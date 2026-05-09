@@ -52,6 +52,7 @@ export function useAskChat({
   const [isLoading, setIsLoading] = useState(false);
   const [loadingPhase, setLoadingPhase] = useState<LoadingPhase>('connecting');
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [reconnectMax, setReconnectMax] = useState(3);
   const reconnectMaxRef = useRef(3);
   const abortRef = useRef<AbortController | null>(null);
   const firstMessageFired = useRef(false);
@@ -188,6 +189,7 @@ export function useAskChat({
       if (stored !== null) { const n = parseInt(stored, 10); if (Number.isFinite(n)) maxRetries = Math.max(0, Math.min(10, n)); }
     } catch { /* localStorage unavailable */ }
     reconnectMaxRef.current = maxRetries;
+    setReconnectMax(maxRetries);
 
     const requestBody = JSON.stringify({
       messages: requestMessages,
@@ -335,6 +337,7 @@ export function useAskChat({
     isLoadingRef,
     loadingPhase,
     reconnectAttempt,
+    reconnectMax,
     reconnectMaxRef,
     abortRef,
     firstMessageFired,

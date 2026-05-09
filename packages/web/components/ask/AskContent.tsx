@@ -92,11 +92,9 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
   useEffect(() => setMounted(true), []);
 
   const [input, setInput] = useState('');
-  const inputValueRef = useRef('');
-  inputValueRef.current = input;
+  const inputValueRef = useRef(input);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const attachedFilesRef = useRef(attachedFiles);
-  attachedFilesRef.current = attachedFiles;
   const [showHistory, setShowHistory] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
@@ -107,11 +105,9 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
 
   const [selectedSkill, setSelectedSkill] = useState<SlashItem | null>(null);
   const selectedSkillRef = useRef(selectedSkill);
-  selectedSkillRef.current = selectedSkill;
   const [selectedAcpAgent, setSelectedAcpAgent] = useState<AcpAgentSelection | null>(null);
   const selectedAcpAgentRef = useRef(selectedAcpAgent);
   const pendingOpenAgentRef = useRef<AcpAgentSelection | null>(null);
-  selectedAcpAgentRef.current = selectedAcpAgent;
   const [chatMode, setChatMode] = useState<AskMode>('agent');
   const [providerOverride, setProviderOverride] = useState<ProviderId | `p_${string}` | null>(null);
   const [modelOverride, setModelOverride] = useState<string | null>(null);
@@ -125,22 +121,56 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
 
   const session = useAskSession(currentFile);
   const sessionRef = useRef(session);
-  sessionRef.current = session;
   const uploadLabels = useMemo(() => ({ unsupportedType: t.fileImport?.unsupported }), [t]);
-  const upload = useFileUpload(uploadLabels);
-  const uploadRef = useRef(upload);
-  uploadRef.current = upload;
-  const imageUpload = useImageUpload();
+  const {
+    localAttachments,
+    uploadError,
+    uploadInputRef,
+    pickFiles,
+    removeAttachment,
+    clearAttachments,
+    injectFiles,
+  } = useFileUpload(uploadLabels);
+  const uploadRuntime = useMemo(() => ({
+    localAttachments,
+    pickFiles,
+    clearAttachments,
+    injectFiles,
+  }), [clearAttachments, injectFiles, localAttachments, pickFiles]);
+  const uploadRef = useRef(uploadRuntime);
+  const {
+    images,
+    imageError,
+    handlePaste: handleImagePaste,
+    handleDrop: handleImageDrop,
+    handleFileSelect,
+    removeImage,
+    clearImages,
+  } = useImageUpload();
+  const imageUploadRuntime = useMemo(() => ({
+    images,
+    clearImages,
+    handleDrop: handleImageDrop,
+    handlePaste: handleImagePaste,
+  }), [clearImages, handleImageDrop, handleImagePaste, images]);
   const mention = useMention();
   const slash = useSlashCommand();
   const acpDetection = useAcpDetection();
 
-  const imageUploadRef = useRef(imageUpload);
-  imageUploadRef.current = imageUpload;
+  const imageUploadRef = useRef(imageUploadRuntime);
   const mentionRef = useRef(mention);
-  mentionRef.current = mention;
   const slashRef = useRef(slash);
-  slashRef.current = slash;
+  useLayoutEffect(() => {
+    inputValueRef.current = input;
+    attachedFilesRef.current = attachedFiles;
+    selectedSkillRef.current = selectedSkill;
+    selectedAcpAgentRef.current = selectedAcpAgent;
+    sessionRef.current = session;
+    uploadRef.current = uploadRuntime;
+    imageUploadRef.current = imageUploadRuntime;
+    mentionRef.current = mention;
+    slashRef.current = slash;
+  }, [attachedFiles, imageUploadRuntime, input, mention, selectedAcpAgent, selectedSkill, session, slash, uploadRuntime]);
 
   const resetInputState = useCallback(() => {
     setInput('');
@@ -163,19 +193,29 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
     setTimeout(() => inputRef.current?.focus(), 50);
   }, []);
 
-  const chatRefs = useRef({ inputValueRef, mentionRef, slashRef, imageUploadRef, sessionRef, uploadRef, selectedSkillRef, selectedAcpAgentRef, attachedFilesRef });
+  const chatRefs = useMemo(() => ({
+    inputValueRef,
+    mentionRef,
+    slashRef,
+    imageUploadRef,
+    sessionRef,
+    uploadRef,
+    selectedSkillRef,
+    selectedAcpAgentRef,
+    attachedFilesRef,
+  }), []);
   const chat = useAskChat({
     currentFile,
     chatMode,
     providerOverride,
     modelOverride,
     onFirstMessage,
-    refs: chatRefs.current,
+    refs: chatRefs,
     errorLabels: { noResponse: t.ask.errorNoResponse, stopped: t.ask.stopped },
     resetInputState,
     onRestoreInput: handleRestoreInput,
   });
-  const { isLoading, loadingPhase, reconnectAttempt, reconnectMaxRef } = chat;
+  const { isLoading, loadingPhase, reconnectAttempt, reconnectMax } = chat;
   const handleSubmit = chat.submit;
   const handleStop = chat.stop;
 
@@ -183,8 +223,8 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
     setSelectedAcpAgent(agent);
     session.setSessionDefaultAcpAgent(agent);
   }, [session]);
-  const hasLoadingAttachments = upload.localAttachments.some((f) => f.status === 'loading');
-  const composerStatusMessage = upload.uploadError || imageUpload.imageError || dropError || '';
+  const hasLoadingAttachments = localAttachments.some((f) => f.status === 'loading');
+  const composerStatusMessage = uploadError || imageError || dropError || '';
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -256,8 +296,8 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
       setInput(initialMessage || '');
       chat.firstMessageFired.current = false;
       setAttachedFiles(currentFile ? [currentFile] : []);
-      upload.clearAttachments();
-      imageUpload.clearImages();
+      clearAttachments();
+      clearImages();
       mention.resetMention();
       slash.resetSlash();
       setSelectedSkill(null);
@@ -305,7 +345,9 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
 
   // Persist session on message changes (skip if last msg is empty assistant placeholder during loading)
   const clearPersistTimerRef = useRef(session.clearPersistTimer);
-  clearPersistTimerRef.current = session.clearPersistTimer;
+  useLayoutEffect(() => {
+    clearPersistTimerRef.current = session.clearPersistTimer;
+  }, [session.clearPersistTimer]);
   useEffect(() => {
     if (!visible || !session.activeSessionId) return;
     const msgs = session.messages;
@@ -423,9 +465,11 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
   }, []);
 
   const selectMentionRef = useRef(selectMention);
-  selectMentionRef.current = selectMention;
   const selectSlashRef = useRef(selectSlashCommand);
-  selectSlashRef.current = selectSlashCommand;
+  useLayoutEffect(() => {
+    selectMentionRef.current = selectMention;
+    selectSlashRef.current = selectSlashCommand;
+  }, [selectMention, selectSlashCommand]);
 
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -581,11 +625,11 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
     connecting: t.ask.connecting,
     thinking: t.ask.thinking,
     generating: t.ask.generating,
-    reconnecting: reconnectAttempt > 0 ? t.ask.reconnecting(reconnectAttempt, reconnectMaxRef.current) : undefined,
+    reconnecting: reconnectAttempt > 0 ? t.ask.reconnecting(reconnectAttempt, reconnectMax) : undefined,
     copyMessage: t.ask.copyMessage,
     editMessage: t.ask.editMessage,
     regenerateMessage: t.ask.regenerateMessage,
-  }), [t, reconnectAttempt]);
+  }), [t, reconnectAttempt, reconnectMax]);
 
   /** Edit: pre-fill composer with the user message content, truncate history after it */
   const handleEditMessage = useCallback((index: number) => {
@@ -719,23 +763,23 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
           onDrop={handleDrop}
         >
           {/* Unified context chip flow */}
-          {(attachedFiles.length > 0 || upload.localAttachments.length > 0 || imageUpload.images.length > 0 || selectedSkill || selectedAcpAgent || upload.uploadError || imageUpload.imageError) && (
+          {(attachedFiles.length > 0 || localAttachments.length > 0 || images.length > 0 || selectedSkill || selectedAcpAgent || uploadError || imageError) && (
             <div className={cn('px-3 pt-2.5 pb-2 border-b border-border/30', isPanel ? 'max-h-24 overflow-y-auto' : 'max-h-28 overflow-y-auto')}>
               <div className="flex flex-wrap gap-1.5">
                 {attachedFiles.map(f => (
                   <FileChip key={f} path={f} variant="kb" onRemove={() => setAttachedFiles(prev => prev.filter(x => x !== f))} />
                 ))}
-                {upload.localAttachments.map((f, idx) => (
-                  <FileChip key={`up-${f.name}-${idx}`} path={f.name} variant="upload" status={f.status} error={f.error} truncatedInfo={f.truncatedInfo} onRemove={() => upload.removeAttachment(idx)} />
+                {localAttachments.map((f, idx) => (
+                  <FileChip key={`up-${f.name}-${idx}`} path={f.name} variant="upload" status={f.status} error={f.error} truncatedInfo={f.truncatedInfo} onRemove={() => removeAttachment(idx)} />
                 ))}
-                {imageUpload.images.map((img, idx) => (
+                {images.map((img, idx) => (
                   <FileChip
                     key={`img-${idx}`}
                     path={img.fileName || `Image ${idx + 1}`}
                     variant="image"
                     imageData={img.data}
                     imageMime={img.mimeType}
-                    onRemove={() => imageUpload.removeImage(idx)}
+                    onRemove={() => removeImage(idx)}
                   />
                 ))}
                 {selectedSkill && (
@@ -793,7 +837,7 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
                 <button
                   type="button"
                   className="flex w-full items-center gap-2.5 px-3 py-2 text-xs hover:bg-muted transition-colors text-left rounded-lg"
-                  onClick={() => { upload.uploadInputRef.current?.click(); setShowAttachMenu(false); }}
+                  onClick={() => { uploadInputRef.current?.click(); setShowAttachMenu(false); }}
                 >
                   <FileText size={12} className="shrink-0 text-muted-foreground" />
                   {t.ask.attachFileLabel}
@@ -811,14 +855,14 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
             )}
 
             <input
-              ref={upload.uploadInputRef}
+              ref={uploadInputRef}
               type="file"
               className="hidden"
               multiple
               accept=".txt,.md,.markdown,.csv,.json,.yaml,.yml,.xml,.html,.htm,.pdf,.doc,.docx,.docm,text/plain,text/markdown,text/csv,application/json,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-word.document.macroEnabled.12"
               onChange={async (e) => {
                 const inputEl = e.currentTarget;
-                await upload.pickFiles(inputEl.files);
+                await pickFiles(inputEl.files);
                 inputEl.value = '';
               }}
             />
@@ -830,7 +874,7 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
               accept="image/png,image/jpeg,image/gif,image/webp"
               onChange={async (e) => {
                 const inputEl = e.currentTarget;
-                await imageUpload.handleFileSelect(inputEl.files);
+                await handleFileSelect(inputEl.files);
                 inputEl.value = '';
               }}
             />
@@ -854,7 +898,7 @@ export default function AskContent({ visible, currentFile, initialMessage, initi
                 {loadingPhase === 'reconnecting' ? <X size={inputIconSize} /> : <StopCircle size={inputIconSize} />}
               </button>
             ) : (
-              <button type="submit" title={hasLoadingAttachments ? (t.ask.uploadsProcessing ?? 'Wait for uploaded files to finish processing before sending.') : t.ask.send} disabled={hasLoadingAttachments || (!input.trim() && imageUpload.images.length === 0)} className="p-2 rounded-xl disabled:opacity-20 disabled:scale-95 disabled:cursor-not-allowed transition-all duration-150 shrink-0 bg-[var(--amber)] text-[var(--amber-foreground)] shadow-sm shadow-[var(--amber)]/15 hover:shadow-md hover:shadow-[var(--amber)]/20 active:scale-95">
+              <button type="submit" title={hasLoadingAttachments ? (t.ask.uploadsProcessing ?? 'Wait for uploaded files to finish processing before sending.') : t.ask.send} disabled={hasLoadingAttachments || (!input.trim() && images.length === 0)} className="p-2 rounded-xl disabled:opacity-20 disabled:scale-95 disabled:cursor-not-allowed transition-all duration-150 shrink-0 bg-[var(--amber)] text-[var(--amber-foreground)] shadow-sm shadow-[var(--amber)]/15 hover:shadow-md hover:shadow-[var(--amber)]/20 active:scale-95">
                 <Send size={14} />
               </button>
             )}
