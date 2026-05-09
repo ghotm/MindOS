@@ -39,7 +39,7 @@ export function getPersistedProviderModel(): { provider: ProviderSelection; mode
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) {
       const old = localStorage.getItem('mindos-provider-override');
-      if (old && (isProviderId(old) || isProviderEntryId(old))) return { provider: old as any, model: null };
+      if (old && (isProviderId(old) || isProviderEntryId(old))) return { provider: old as ProviderSelection, model: null };
       return { provider: null, model: null };
     }
     const parsed = JSON.parse(raw);
@@ -89,6 +89,7 @@ export default function ProviderModelCapsule({
   const [modelsError, setModelsError] = useState('');
   const [modelSearch, setModelSearch] = useState('');
   const [modelHighlight, setModelHighlight] = useState(-1);
+  const [modelRefreshRequest, setModelRefreshRequest] = useState<{ providerId: string; nonce: number } | null>(null);
   const fetchVersionRef = useRef(0);
   const modelsCacheRef = useRef<Record<string, string[]>>({});
 
@@ -107,13 +108,6 @@ export default function ProviderModelCapsule({
       setModelSearch('');
     }, 300); // 300ms grace period to cross the gap smoothly
   }, [cancelCloseTimer]);
-
-  // Cleanup timers on unmount
-  useEffect(() => () => {
-    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
-    if (openTimerRef.current) clearTimeout(openTimerRef.current);
-    if (repositionTimerRef.current) clearTimeout(repositionTimerRef.current);
-  }, []);
 
   // Fetch settings
   useEffect(() => {
@@ -139,12 +133,6 @@ export default function ProviderModelCapsule({
     [settingsData],
   );
 
-  // Stable refs for callbacks — avoids stale closures in effects and handlers
-  const onProviderChangeRef = useRef(onProviderChange);
-  onProviderChangeRef.current = onProviderChange;
-  const onModelChangeRef = useRef(onModelChange);
-  onModelChangeRef.current = onModelChange;
-
   // Auto-clear stale override — only if the persisted provider no longer exists in settings.
   // Use a one-time check on settingsData load, not on every providerValue change,
   // to avoid interfering with in-flight selections.
@@ -153,12 +141,11 @@ export default function ProviderModelCapsule({
     if (!settingsData || staleClearedRef.current) return;
     staleClearedRef.current = true;
     if (providerValue && !configuredProviders.includes(providerValue)) {
-      onProviderChangeRef.current(null);
-      onModelChangeRef.current(null);
+      onProviderChange(null);
+      onModelChange(null);
       persistProviderModel(null, null);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settingsData]);
+  }, [configuredProviders, onModelChange, onProviderChange, providerValue, settingsData]);
 
   // Resolve active display
   const activeProvider = providerValue ?? defaultProvider;
@@ -193,6 +180,13 @@ export default function ProviderModelCapsule({
       reposition();
     }, 0); // Use requestAnimationFrame-like timing
   }, [reposition]);
+
+  // Cleanup timers on unmount
+  useEffect(() => () => {
+    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    if (openTimerRef.current) clearTimeout(openTimerRef.current);
+    if (repositionTimerRef.current) clearTimeout(repositionTimerRef.current);
+  }, []);
 
   useEffect(() => { if (open) reposition(); }, [open, reposition]);
   useEffect(() => {
@@ -260,6 +254,18 @@ export default function ProviderModelCapsule({
     } finally {
       if (version === fetchVersionRef.current) setModelsLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    if (!modelRefreshRequest) return;
+    void fetchModels(modelRefreshRequest.providerId, true);
+  }, [fetchModels, modelRefreshRequest]);
+
+  const requestModelRefresh = useCallback((providerId: string) => {
+    setModelRefreshRequest(previous => ({
+      providerId,
+      nonce: (previous?.nonce ?? 0) + 1,
+    }));
   }, []);
 
   // Determine if a provider can show model flyout
@@ -331,18 +337,18 @@ export default function ProviderModelCapsule({
 
   /* ── Selection handlers ── */
   const handleSelectProvider = useCallback((provider: ProviderSelection) => {
-    onProviderChangeRef.current(provider);
-    onModelChangeRef.current(null);
+    onProviderChange(provider);
+    onModelChange(null);
     persistProviderModel(provider, null);
     setOpen(false); setHoveredProvider(null); setModelSearch('');
-  }, []);
+  }, [onModelChange, onProviderChange]);
 
   const handleSelectModel = useCallback((provider: ProviderSelection, model: string) => {
-    onProviderChangeRef.current(provider);
-    onModelChangeRef.current(model);
+    onProviderChange(provider);
+    onModelChange(model);
     persistProviderModel(provider, model);
     setOpen(false); setHoveredProvider(null); setModelSearch('');
-  }, []);
+  }, [onModelChange, onProviderChange]);
 
   /* ── Filtered models ── */
   const filteredModels = useMemo(() => {
@@ -351,8 +357,6 @@ export default function ProviderModelCapsule({
     const q = modelSearch.toLowerCase();
     return expandedModels.filter(m => m.toLowerCase().includes(q));
   }, [expandedModels, modelSearch]);
-
-  useEffect(() => { setModelHighlight(-1); }, [filteredModels]);
 
   const handleModelKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (!filteredModels.length) return;
@@ -408,7 +412,7 @@ export default function ProviderModelCapsule({
           </span>
           <button
             type="button"
-            onClick={() => fetchModels(hoveredProvider, true)}
+            onClick={() => requestModelRefresh(hoveredProvider)}
             disabled={modelsLoading}
             className="p-1 text-muted-foreground/50 hover:text-foreground transition-colors disabled:opacity-30"
             title="Refresh"
@@ -424,7 +428,10 @@ export default function ProviderModelCapsule({
               ref={searchInputRef}
               type="text"
               value={modelSearch}
-              onChange={e => setModelSearch(e.target.value)}
+              onChange={(e) => {
+                setModelSearch(e.target.value);
+                setModelHighlight(-1);
+              }}
               onKeyDown={handleModelKeyDown}
               placeholder={t.ask?.searchModels ?? 'Search...'}
               className="w-full text-2xs pl-6 pr-2 py-1 rounded border border-border/50 bg-transparent text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus-visible:border-[var(--amber)]/50"
