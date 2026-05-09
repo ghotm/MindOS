@@ -122,6 +122,37 @@ describe('A2A Task Handler', () => {
       );
     });
 
+    it('preserves spaces when routing read-like messages to read_file', async () => {
+      const task = await handleSendMessage(makeMessage('read the file at Project Notes.md'));
+
+      expect(task.status.state).toBe('TASK_STATE_COMPLETED');
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/api/file?path=${encodeURIComponent('Project Notes.md')}`),
+        expect.anything(),
+      );
+    });
+
+    it('allows safe path segments that contain consecutive dots', async () => {
+      const task = await handleSendMessage(makeMessage('read the file at notes/v1..draft.md'));
+
+      expect(task.status.state).toBe('TASK_STATE_COMPLETED');
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/api/file?path=${encodeURIComponent('notes/v1..draft.md')}`),
+        expect.anything(),
+      );
+    });
+
+    it('rejects traversal in read-like messages before calling the file API', async () => {
+      const task = await handleSendMessage(makeMessage('read the file at ..\\secret.md'));
+
+      expect(task.status.state).toBe('TASK_STATE_FAILED');
+      expect(task.status.message?.parts[0]?.text).toContain('Invalid path');
+      expect(fetchSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('/api/file?path='),
+        expect.anything(),
+      );
+    });
+
     it('routes list-like messages to list_files', async () => {
       const task = await handleSendMessage(makeMessage('list files'));
       expect(task.status.state).toBe('TASK_STATE_COMPLETED');

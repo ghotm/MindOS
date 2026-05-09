@@ -2197,6 +2197,20 @@ mindos onboard
 
 **文件**：`app/lib/core/trash.ts`
 
+### A2A read_file 路由丢失空格文件名 / 误判连续点 (2026-05-10)
+
+**严重等级：** 🟡 MEDIUM — 用户无法读取合法文件 / 路径安全误判
+
+**症状**：外部 A2A Agent 请求 `read the file at Project Notes.md` 时，路由只读取到 `Notes.md`；请求 `notes/v1..draft.md` 这类合法文件名时被当成路径遍历拒绝。
+
+**根因**：`task-handler.ts` 的 read 路由用 `[^\s]+` 二次提取路径，天然截断带空格文件名；路径 sanitizer 用 `p.includes('..')` 做子串判断，既误拒绝合法文件名，又没有按跨平台路径段处理 `\`。
+
+**修复**：read 路由复用整条命令的捕获组，支持带空格的 `.md/.csv` 路径；sanitizer 先把 Windows `\` 归一化为 `/`，再逐段拒绝 `.` / `..` / 空段 / Windows 盘符。
+
+**规则**：路径遍历判断必须按 path segment 做，不能用 `includes('..')`；用户可见文件名解析不能用不支持空格的 token regex。
+
+**文件**：`packages/web/lib/a2a/task-handler.ts`
+
 ### stream-consumer.ts tool_end 丢失工具结果 (2026-04-13)
 
 **严重等级：** 🟡 MEDIUM — 数据丢失

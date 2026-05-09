@@ -6,7 +6,6 @@
 import { randomUUID } from 'crypto';
 import type {
   A2ATask,
-  A2AMessage,
   SendMessageParams,
   GetTaskParams,
   CancelTaskParams,
@@ -38,6 +37,20 @@ interface SkillRoute {
   extractParams: (text: string) => Record<string, string>;
 }
 
+const READ_FILE_PATTERN = /^(?:read|get|show|open|view)\s+(?:the\s+)?(?:file\s+)?(?:at\s+)?(.+\.(?:md|csv))\s*$/i;
+
+function extractReadPath(text: string): string {
+  const match = text.match(READ_FILE_PATTERN);
+  return stripWrappingQuotes(match?.[1]?.trim() ?? '');
+}
+
+function stripWrappingQuotes(value: string): string {
+  if (value.length < 2) return value;
+  const first = value[0];
+  const last = value[value.length - 1];
+  return (first === last && (first === '"' || first === '\'')) ? value.slice(1, -1).trim() : value;
+}
+
 const SKILL_ROUTES: SkillRoute[] = [
   {
     pattern: /^(?:search|find|look\s*up|query)\b/i,
@@ -45,12 +58,9 @@ const SKILL_ROUTES: SkillRoute[] = [
     extractParams: (text) => ({ q: text.replace(/^(?:search|find|look\s*up|query)\s+(?:for\s+)?/i, '').trim() }),
   },
   {
-    pattern: /^(?:read|get|show|open|view)\s+(?:the\s+)?(?:file\s+)?(?:at\s+)?(.+\.(?:md|csv))/i,
+    pattern: READ_FILE_PATTERN,
     tool: 'read_file',
-    extractParams: (text) => {
-      const match = text.match(/(?:at\s+)?([^\s]+\.(?:md|csv))/i);
-      return { path: match?.[1] ?? '' };
-    },
+    extractParams: (text) => ({ path: extractReadPath(text) }),
   },
   {
     pattern: /^(?:list|show|tree)\s+(?:files|spaces|structure)/i,
@@ -90,9 +100,15 @@ async function fetchWithTimeout(url: string): Promise<Response> {
 
 /** Sanitize file path: reject traversal attempts */
 function sanitizePath(p: string): string {
-  if (!p || p.includes('..') || p.includes('\0')) throw new Error('Invalid path');
-  // Normalize double slashes and strip leading slashes
-  return p.replace(/\/\//g, '/').replace(/^\/+/, '');
+  if (!p || p.includes('\0')) throw new Error('Invalid path');
+  const normalized = stripWrappingQuotes(p.trim()).replace(/\\/g, '/').replace(/\/+/g, '/');
+  if (!normalized || /^[a-zA-Z]:\//.test(normalized)) throw new Error('Invalid path');
+  const relative = normalized.replace(/^\/+/, '');
+  const segments = relative.split('/');
+  if (segments.some(segment => segment === '' || segment === '.' || segment === '..')) {
+    throw new Error('Invalid path');
+  }
+  return segments.join('/');
 }
 
 async function executeTool(tool: string, params: Record<string, string>): Promise<string> {
