@@ -2109,6 +2109,12 @@ mindos onboard
 - **解决：** npm、systemctl、id、launchctl 全部改成 `execFileSync(command, args)`；launchctl 的 `gui/<uid>/...` 作为单个 argv 参数传入。
 - **规则：** doctor/update 这类诊断命令尤其不能依赖 shell 解析；诊断失败应该反映真实环境问题，而不是命令字符串解析问题。
 
+### `mindos update` 安装和 daemon 状态探测不要通过 shell (2026-05-10)
+
+- **问题：** `packages/mindos/bin/commands/update.js` 仍用 `execSync('npm install -g ...')`、`execSync('systemctl ...')`、`execSync('id -u')`、`execSync(\`launchctl print ...\`)`。update 同时处理全局安装、daemon 探测和 GUI 触发重启，一旦 shell 解析被 PATH、Windows `.cmd` shim 或路径特殊字符影响，用户会卡在“已更新但仍运行旧版本”的排障路径里。
+- **解决：** npm install 和 daemon 探测全部改成 argv 调用；Windows 下 npm 通过 `process.execPath + npm-cli.js` 运行，避免直接执行 `.cmd` shell shim。
+- **防回归：** `tests/unit/cli-update-root.test.ts` 断言 update 命令源码不再包含 `execSync(`，并用 fake npm 记录 argv，确认全局安装参数是 `install -g @geminilight/mindos@latest`。
+
 ### Desktop 私有 Node 的 macOS quarantine 清理不能拼 shell 路径 (2026-05-10)
 
 - **问题：** `packages/desktop/src/node-bootstrap.ts` 下载私有 Node 后用 `execSync(\`xattr ... "${NODE_DIR}"\`)` 清理 quarantine。用户 home / app support 路径如果包含引号、`$` 等字符，会重新进入 shell 解析。

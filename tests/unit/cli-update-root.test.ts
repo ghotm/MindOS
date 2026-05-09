@@ -25,7 +25,11 @@ beforeEach(() => {
   fs.mkdirSync(path.join(fakeInstallRoot, 'packages', 'web', '.next'), { recursive: true });
   fs.mkdirSync(path.join(fakeInstallRoot, '_standalone'), { recursive: true });
 
-  fs.writeFileSync(path.join(fakeBinDir, 'npm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.writeFileSync(
+    path.join(fakeBinDir, 'npm'),
+    `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(path.join(tempDir, 'npm-argv.txt'))}\nexit 0\n`,
+    { mode: 0o755 },
+  );
   fs.writeFileSync(path.join(fakeInstallRoot, 'bin', 'cli.js'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   fs.symlinkSync(path.join(fakeInstallRoot, 'bin', 'cli.js'), path.join(fakeBinDir, 'mindos'));
   fs.writeFileSync(
@@ -61,6 +65,16 @@ describe('mindos update root resolution', () => {
     expect(source).not.toContain("'which mindos'");
   });
 
+  it('runs update subprocesses with argv APIs instead of shell strings', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'packages', 'mindos', 'bin', 'commands', 'update.js'), 'utf-8');
+
+    expect(source).not.toContain('execSync(');
+    expect(source).toContain("execFileSync(invocation.command, invocation.args");
+    expect(source).toContain("execFileSync('systemctl', ['--user', 'is-active', 'mindos']");
+    expect(source).toContain("execFileSync('id', ['-u']");
+    expect(source).toContain("execFileSync('launchctl', ['print', `gui/${uid}/com.mindos.app`]");
+  });
+
   it('uses the resolved installed CLI path instead of falling back to the current repo root', () => {
     const stdout = execFileSync(process.execPath, [CLI, 'update'], {
       cwd: ROOT,
@@ -76,6 +90,11 @@ describe('mindos update root resolution', () => {
 
     expect(stdout).toContain(`Updated: ${CURRENT_VERSION} → 9.9.9`);
     expect(stdout).not.toContain('Already on the latest version');
+    expect(fs.readFileSync(path.join(tempDir, 'npm-argv.txt'), 'utf-8').trim().split(/\r?\n/)).toEqual([
+      'install',
+      '-g',
+      '@geminilight/mindos@latest',
+    ]);
   });
 
   it('uses the resolved installed shim path for the split main package and platform runtime layout', () => {
