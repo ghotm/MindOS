@@ -2532,7 +2532,7 @@ const visibleNodes = useMemo(() => {
 - 不要为了消除依赖数组而在 render 中写 callback ref；优先让 effect 明确依赖最新 callback
 - 如果 ref 只是缓存初始化快照，先用 lazy `useState` 读取外部存储，再用这个普通 state 值初始化 ref 和其他 state，避免在 render 阶段读取 `ref.current`
 
-**防回归**：`packages/web/__tests__/hooks/useResizeDrag-lint.test.ts`、`packages/web/__tests__/renderers/useRendererState-lint.test.ts`、`packages/web/__tests__/lib/LocaleStoreInit-lint.test.ts` 和 `packages/web/__tests__/hooks/acp-hooks-lint.test.ts` 用 ESLint JSON 输出断言关键启动/render hook 不再出现 `react-hooks/refs` warning。
+**防回归**：`packages/web/__tests__/hooks/useResizeDrag-lint.test.ts`、`packages/web/__tests__/renderers/useRendererState-lint.test.ts`、`packages/web/__tests__/lib/LocaleStoreInit-lint.test.ts`、`packages/web/__tests__/hooks/acp-hooks-lint.test.ts` 和 `packages/web/__tests__/hooks/hook-ref-lint.test.ts` 用 ESLint JSON 输出断言关键启动/render hook 不再出现 `react-hooks/refs` warning。
 
 ### Monorepo 迁移后 workflow 仍引用旧顶层目录（2026-04-27）
 

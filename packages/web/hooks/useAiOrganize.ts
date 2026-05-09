@@ -248,6 +248,7 @@ export function useAiOrganize() {
   const abortRef = useRef<AbortController | null>(null);
   const lastEventRef = useRef<number>(0);
   const snapshotsRef = useRef<FileSnapshots>(new Map());
+  const [snapshotPaths, setSnapshotPaths] = useState<Set<string>>(() => new Set());
   const [sourceFileNames, setSourceFileNames] = useState<string[]>([]);
   const [source, setSource] = useState<OrganizeSource>('upload');
   const startTimeRef = useRef<number>(0);
@@ -266,6 +267,7 @@ export function useAiOrganize() {
     startTimeRef.current = Date.now();
     setDurationMs(0);
     snapshotsRef.current = new Map();
+    setSnapshotPaths(new Set());
     lastEventRef.current = Date.now();
 
     const controller = new AbortController();
@@ -317,6 +319,12 @@ export function useAiOrganize() {
         },
         (path, content) => {
           snapshotsRef.current.set(path, content);
+          setSnapshotPaths(prev => {
+            if (prev.has(path)) return prev;
+            const next = new Set(prev);
+            next.add(path);
+            return next;
+          });
         },
         controller.signal,
       );
@@ -419,11 +427,11 @@ export function useAiOrganize() {
     const c = changes.find(ch => ch.path === path && ch.ok && !ch.undone);
     if (!c) return false;
     if (c.action === 'create') return true;
-    if (c.action === 'update') return snapshotsRef.current.has(path);
+    if (c.action === 'update') return snapshotPaths.has(path);
     return false;
-  }, [changes]);
+  }, [changes, snapshotPaths]);
 
-  const hasAnyUndoable = changes.some(c => c.ok && !c.undone && (c.action === 'create' || (c.action === 'update' && snapshotsRef.current.has(c.path))));
+  const hasAnyUndoable = changes.some(c => c.ok && !c.undone && (c.action === 'create' || (c.action === 'update' && snapshotPaths.has(c.path))));
 
   const reset = useCallback(() => {
     setPhase('idle');
@@ -438,6 +446,7 @@ export function useAiOrganize() {
     setDurationMs(0);
     startTimeRef.current = 0;
     snapshotsRef.current = new Map();
+    setSnapshotPaths(new Set());
     lastEventRef.current = 0;
   }, []);
 

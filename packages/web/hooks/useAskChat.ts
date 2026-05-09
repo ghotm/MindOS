@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback, useLayoutEffect } from 'react';
 import type { AgentIdentity, Message, ImagePart, AskMode, LocalAttachment } from '@/lib/types';
 import type { ProviderId } from '@/lib/agent/providers';
 import { consumeUIMessageStream } from '@/lib/agent/stream-consumer';
@@ -72,6 +72,11 @@ export function useAskChat({
   // When true the AbortError handler in submit() skips its own setMessages
   // because stop() already cleaned up the messages array.
   const retractedRef = useRef(false);
+
+  const isLoadingRef = useRef(false);
+  useLayoutEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
 
   const stop = useCallback(() => {
     const pending = pendingMessageRef.current;
@@ -324,9 +329,6 @@ export function useAskChat({
       pendingMessageRef.current = null;
     }
   }, [currentFile, chatMode, providerOverride, modelOverride, errorLabels.noResponse, errorLabels.stopped, onFirstMessage, refs, resetInputState]);
-
-  const isLoadingRef = useRef(isLoading);
-  isLoadingRef.current = isLoading;
 
   return {
     isLoading,

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useLayoutEffect, useRef } from 'react';
 import type { LocalAttachment } from '@/lib/types';
 
 const ALLOWED_UPLOAD_EXTENSIONS = new Set([
@@ -209,7 +209,9 @@ export function useFileUpload(labels?: FileUploadLabels) {
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const labelsRef = useRef(labels);
-  labelsRef.current = labels;
+  useLayoutEffect(() => {
+    labelsRef.current = labels;
+  }, [labels]);
 
   const pickFiles = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;

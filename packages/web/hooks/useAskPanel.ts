@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react';
 import { RIGHT_ASK_DEFAULT_WIDTH, RIGHT_ASK_MIN_WIDTH, RIGHT_ASK_MAX_WIDTH } from '@/components/RightAskPanel';
 import { useAskModal, type AcpAgentSelection } from './useAskModal';
 
@@ -34,7 +34,9 @@ export function useAskPanel(): AskPanelState {
   const [askInitialMessage, setAskInitialMessage] = useState('');
   const [askMaximized, setAskMaximized] = useState(false);
   const askMaximizedRef = useRef(false);
-  askMaximizedRef.current = askMaximized;
+  useLayoutEffect(() => {
+    askMaximizedRef.current = askMaximized;
+  }, [askMaximized]);
   const [askOpenSource, setAskOpenSource] = useState<'user' | 'guide' | 'guide-next'>('user');
   const [askAcpAgent, setAskAcpAgent] = useState<AcpAgentSelection | null>(null);
   const prevWidthRef = useRef(RIGHT_ASK_DEFAULT_WIDTH);
