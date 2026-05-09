@@ -2103,6 +2103,12 @@ mindos onboard
 - **解决：** 抽出 `removeMacQuarantineAttribute()`，用 `execFileSync('xattr', ['-dr', 'com.apple.quarantine', nodeDir])`；测试覆盖带引号和 `$` 的路径。
 - **规则：** Desktop 启动/修复流程里的系统工具调用也必须走 argv；即使路径通常来自系统目录，也按用户可控路径处理。
 
+### Desktop SSH 隧道探测不要把 ssh 路径和 host 拼进 shell (2026-05-10)
+
+- **问题：** `packages/desktop/src/ssh-tunnel.ts` 用 `execAsync("ssh ... ${host}")`、`execAsync(\`ssh-add "${resolvedKey}"\`)`、`execSync(\`"${candidate}" -V\`)` 探测 SSH。Windows 安装路径、key 路径或 host 名含空格/引号时容易解析错，也扩大了 shell 注入面。
+- **解决：** 增加 `resolveSshCommandForPlatform()`，所有 SSH/ssh-add/sc/ps 探测改为 `execFile` / `execFileSync` argv；`SshTunnel.start()` 直接 spawn 解析后的 `.exe`/`ssh`，不再给 Windows 开 shell。
+- **规则：** Desktop remote mode 的 host、key path、工具路径都按用户输入处理；子进程调用必须走 argv，Windows `.exe` 不需要 `shell: true`。
+
 ### VS Code 系 MCP Agent Windows 配置路径不能落到 `~/.config` (2026-05-10)
 
 - **问题：** `github-copilot`、`cline`、`roo`、`trae-cn` 的 MCP global config 只区分 macOS 和 Linux；Windows 下会落到 `~/.config/...`，导致安装成功但写到目标 Agent 不会读取的位置。

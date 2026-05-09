@@ -12,7 +12,13 @@ vi.mock('electron', () => ({
 }));
 
 // NOW import the module that depends on the mocked 'electron'
-import { SshTunnel, parseSshConfig, isSshAvailable, cleanupOrphanedSshTunnel } from './ssh-tunnel';
+import {
+  SshTunnel,
+  cleanupOrphanedSshTunnel,
+  isSshAvailable,
+  parseSshConfig,
+  resolveSshCommandForPlatform,
+} from './ssh-tunnel';
 import path from 'path';
 import fs from 'fs';
 
@@ -159,6 +165,32 @@ Host tilde-test
         value: originalPlatform,
         configurable: true,
       });
+    });
+
+    it('resolves Windows SSH candidates through argv-safe version probes', () => {
+      const calls: Array<{ command: string; args: string[] }> = [];
+      const env = {
+        ProgramFiles: 'C:\\Program Files',
+        USERPROFILE: 'C:\\Users\\Name With Space',
+      } as NodeJS.ProcessEnv;
+
+      const resolved = resolveSshCommandForPlatform('win32', env, (command, args) => {
+        calls.push({ command, args });
+        if (command.includes('Git')) return '';
+        throw new Error('missing');
+      });
+
+      expect(resolved).toBe(path.join('C:\\Program Files', 'Git', 'usr', 'bin', 'ssh.exe'));
+      expect(calls).toContainEqual({
+        command: path.join('C:\\Program Files', 'Git', 'usr', 'bin', 'ssh.exe'),
+        args: ['-V'],
+      });
+
+      const source = fs.readFileSync(path.join(__dirname, 'ssh-tunnel.ts'), 'utf-8');
+      expect(source).not.toContain('execSync(`"${candidate}" -V`');
+      expect(source).not.toContain('execAsync(`ssh-add "${resolvedKey}"`');
+      expect(source).not.toContain('execAsync(\'ssh -V 2>&1\'');
+      expect(source).not.toContain('shell: process.platform === \'win32\'');
     });
   });
 

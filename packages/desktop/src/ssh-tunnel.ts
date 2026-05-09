@@ -2,20 +2,52 @@
  * SSH Tunnel — parse ~/.ssh/config and manage SSH port-forwarding tunnels.
  * Used by Remote mode to securely connect to MindOS servers without exposing ports.
  */
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, execFile, execFileSync, spawn } from 'child_process';
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'fs';
-import { exec } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import { app } from 'electron';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /** Sentinel error message indicating passphrase is needed */
 export const PASSPHRASE_NEEDED = '__PASSPHRASE_NEEDED__';
 
 // PID file for SSH tunnel — allows cleanup of orphaned tunnels on next launch
 const SSH_TUNNEL_PID_FILE = path.join(app.getPath('home'), '.mindos', 'ssh-tunnel.pid');
+
+type ExecFileSyncLike = (
+  command: string,
+  args: string[],
+  options: { stdio?: 'ignore' | 'pipe'; encoding?: BufferEncoding; timeout: number },
+) => unknown;
+
+function getWindowsSshCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
+  return [
+    'ssh.exe',
+    ...(env.ProgramFiles ? [path.join(env.ProgramFiles, 'OpenSSH', 'ssh.exe')] : []),
+    ...(env.ProgramFiles ? [path.join(env.ProgramFiles, 'Git', 'usr', 'bin', 'ssh.exe')] : []),
+    ...(env.ProgramFiles ? [path.join(env.ProgramFiles, 'Git', 'bin', 'ssh.exe')] : []),
+    ...(env.USERPROFILE ? [path.join(env.USERPROFILE, 'scoop', 'shims', 'ssh.exe')] : []),
+  ];
+}
+
+export function resolveSshCommandForPlatform(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  execFile: ExecFileSyncLike = execFileSync,
+): string | null {
+  const candidates = platform === 'win32' ? getWindowsSshCandidates(env) : ['ssh'];
+  for (const candidate of candidates) {
+    try {
+      execFile(candidate, ['-V'], { stdio: 'ignore', timeout: 3000 });
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return null;
+}
 
 /** Write SSH child PID to disk so we can clean up orphans on next launch */
 function writeTunnelPid(pid: number): void {
@@ -42,8 +74,10 @@ export function cleanupOrphanedSshTunnel(): void {
       // Verify it's actually an ssh process (avoid killing unrelated PID reuse)
       if (process.platform !== 'win32') {
         try {
-          const { execSync } = require('child_process');
-          const comm = execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf-8', timeout: 2000 }).trim();
+          const comm = String(execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
+            encoding: 'utf-8',
+            timeout: 2000,
+          })).trim();
           if (!comm.includes('ssh')) {
             // PID was reused by a non-ssh process — don't kill it
             clearTunnelPid();
@@ -172,10 +206,13 @@ export async function isSshAgentLoaded(host: string, sshCmd: string = 'ssh'): Pr
   try {
     // Try a quick connection with BatchMode=yes — if it doesn't fail with permission denied,
     // the key is loaded in ssh-agent
-    await execAsync(
-      `"${sshCmd}" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new ${host} exit 2>&1`,
-      { timeout: 8000 },
-    );
+    await execFileAsync(sshCmd, [
+      '-o', 'BatchMode=yes',
+      '-o', 'ConnectTimeout=5',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      host,
+      'exit',
+    ], { timeout: 8000 });
     return true;
   } catch {
     return false;
@@ -199,7 +236,7 @@ export async function addKeyToAgent(keyPath: string, passphrase: string): Promis
       // Escape batch special characters in passphrase
       const escaped = passphrase.replace(/([&|<>^%!])/g, '^$1').replace(/"/g, '\\"');
       writeFileSync(tmpScript, `@echo off\necho ${escaped}`, 'utf-8');
-      await execAsync(`ssh-add "${resolvedKey}"`, {
+      await execFileAsync('ssh-add', [resolvedKey], {
         timeout: 10000,
         env: { ...process.env, SSH_ASKPASS: tmpScript, SSH_ASKPASS_REQUIRE: 'force', DISPLAY: ':0' },
       });
@@ -217,7 +254,7 @@ export async function addKeyToAgent(keyPath: string, passphrase: string): Promis
     // Create a script that outputs the passphrase
     writeFileSync(tmpScript, `#!/bin/sh\necho '${passphrase.replace(/'/g, "'\\''")}'
 `, { mode: 0o700 });
-    await execAsync(`ssh-add "${resolvedKey}"`, {
+    await execFileAsync('ssh-add', [resolvedKey], {
       timeout: 10000,
       env: { ...process.env, SSH_ASKPASS: tmpScript, SSH_ASKPASS_REQUIRE: 'force', DISPLAY: ':0' },
     });
@@ -239,8 +276,7 @@ export function isSshAgentRunning(): boolean {
   if (process.platform === 'win32') {
     // On Windows, check if the OpenSSH agent service is running
     try {
-      const { execSync } = require('child_process');
-      const out = execSync('sc query ssh-agent', { encoding: 'utf-8', timeout: 3000 });
+      const out = String(execFileSync('sc', ['query', 'ssh-agent'], { encoding: 'utf-8', timeout: 3000 }));
       return out.includes('RUNNING');
     } catch {
       return false;
@@ -251,35 +287,7 @@ export function isSshAgentRunning(): boolean {
 
 /** Check if the `ssh` command is available on this system */
 export async function isSshAvailable(): Promise<boolean> {
-  // On Windows, try to find ssh.exe in common locations if not in PATH
-  if (process.platform === 'win32') {
-    const sshCandidates = [
-      'ssh.exe', // Already in PATH
-      ...(process.env.ProgramFiles ? [path.join(process.env.ProgramFiles, 'OpenSSH', 'ssh.exe')] : []),
-      ...(process.env.ProgramFiles ? [path.join(process.env.ProgramFiles, 'Git', 'usr', 'bin', 'ssh.exe')] : []),
-      ...(process.env.ProgramFiles ? [path.join(process.env.ProgramFiles, 'Git', 'bin', 'ssh.exe')] : []),
-      ...(process.env.USERPROFILE ? [path.join(process.env.USERPROFILE, 'scoop', 'shims', 'ssh.exe')] : []),
-    ];
-
-    for (const candidate of sshCandidates) {
-      try {
-        const { execSync } = require('child_process');
-        execSync(`"${candidate}" -V`, { stdio: 'ignore', timeout: 3000 });
-        return true;
-      } catch {
-        // Try next candidate
-      }
-    }
-    return false;
-  }
-
-  // Unix/macOS: simple check
-  try {
-    await execAsync('ssh -V 2>&1', { timeout: 3000 });
-    return true;
-  } catch {
-    return false;
-  }
+  return resolveSshCommandForPlatform() !== null;
 }
 
 /**
@@ -325,32 +333,9 @@ export class SshTunnel {
     this.stopped = false;
     this.lastError = '';
 
-    // On Windows, try to find ssh.exe before spawning
-    let sshCmd = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
-    if (process.platform === 'win32') {
-      const sshCandidates = [
-        'ssh.exe',
-        ...(process.env.ProgramFiles ? [path.join(process.env.ProgramFiles, 'OpenSSH', 'ssh.exe')] : []),
-        ...(process.env.ProgramFiles ? [path.join(process.env.ProgramFiles, 'Git', 'usr', 'bin', 'ssh.exe')] : []),
-        ...(process.env.ProgramFiles ? [path.join(process.env.ProgramFiles, 'Git', 'bin', 'ssh.exe')] : []),
-        ...(process.env.USERPROFILE ? [path.join(process.env.USERPROFILE, 'scoop', 'shims', 'ssh.exe')] : []),
-      ];
-
-      let foundSsh = false;
-      for (const candidate of sshCandidates) {
-        try {
-          const { execSync } = require('child_process');
-          execSync(`"${candidate}" -V`, { stdio: 'ignore', timeout: 2000 });
-          sshCmd = candidate;
-          foundSsh = true;
-          break;
-        } catch {
-          // Try next candidate
-        }
-      }
-      if (!foundSsh) {
-        throw new Error('SSH not found. Please install OpenSSH (e.g., via Git for Windows or Windows 10+ built-in OpenSSH).');
-      }
+    const sshCmd = resolveSshCommandForPlatform();
+    if (!sshCmd) {
+      throw new Error('SSH not found. Please install OpenSSH (e.g., via Git for Windows or Windows 10+ built-in OpenSSH).');
     }
 
     return new Promise((resolve, reject) => {
@@ -368,7 +353,6 @@ export class SshTunnel {
 
       this.process = spawn(sshCmd, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        shell: process.platform === 'win32',  // Use shell on Windows for path resolution
         env: process.env,  // Inherit env so SSH_AUTH_SOCK is available for ssh-agent
       });
 
