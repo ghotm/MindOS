@@ -2097,6 +2097,12 @@ mindos onboard
 - **解决：** 端口占用检测拆成可测的 argv 调用：Windows 解析 `netstat -ano` 的 LISTENING 行；Unix 先 `lsof -ti :PORT`，再用 `ss -tlnp` fallback，并在 `ss` 输出中继续按目标端口过滤。
 - **规则：** 产品运行时的进程控制不能假设 Unix 工具链；涉及端口的 kill/restart 逻辑必须覆盖 Windows 路径和 fallback 输出过滤。
 
+### CLI stop/restart 端口清理不要拼 lsof/taskkill/pkill shell 字符串 (2026-05-10)
+
+- **问题：** `packages/mindos/bin/lib/stop.js` 用 `execSync(\`lsof -ti :${port} 2>/dev/null\`)`、`execSync(\`taskkill /PID ${pid} /T /F\`)`、`pkill ... || true` 做清理。端口来自 config/extraPorts，PID 来自系统输出，重新进入 shell 没必要且容易跨平台出错。
+- **解决：** 改为 `execFileSync(command, args)`：`netstat -ano`、`lsof -ti :port`、`ss -tlnp`、`taskkill /PID <pid> /T /F`、`pkill -f <pattern>` 都保留结构化 argv。
+- **规则：** CLI stop/restart 的 cleanup 是最后防线，必须比启动路径更保守；重定向、管道、`|| true` 都用 stdio/catch 表达，不写进命令字符串。
+
 ### Desktop 私有 Node 的 macOS quarantine 清理不能拼 shell 路径 (2026-05-10)
 
 - **问题：** `packages/desktop/src/node-bootstrap.ts` 下载私有 Node 后用 `execSync(\`xattr ... "${NODE_DIR}"\`)` 清理 quarantine。用户 home / app support 路径如果包含引号、`$` 等字符，会重新进入 shell 解析。

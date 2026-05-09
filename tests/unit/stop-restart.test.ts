@@ -1,4 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const stopSource = () => readFileSync(join(process.cwd(), 'packages/mindos/bin/lib/stop.js'), 'utf-8');
 
 // ── Extracted logic from packages/mindos/bin/lib/stop.js ─────────────────────
 // Unit-testable pure functions extracted from the source to prevent regressions.
@@ -129,6 +133,19 @@ describe('parseLsofPids', () => {
 
   it('filters out non-numeric lines', () => {
     expect(parseLsofPids('abc\n123\n\n456')).toEqual([123, 456]);
+  });
+});
+
+describe('stop.js subprocess contract', () => {
+  it('uses argv-safe subprocess calls for port cleanup', () => {
+    const source = stopSource();
+
+    expect(source).not.toContain('execSync(');
+    expect(source).not.toContain('lsof -ti :${port}');
+    expect(source).not.toContain('taskkill /PID ${pid}');
+    expect(source).not.toContain('pkill -f "next start|next dev"');
+    expect(source).toContain("execFileSync('lsof', ['-ti', `:${port}`]");
+    expect(source).toContain("execFileSync('taskkill', ['/PID', String(pid), '/T', '/F']");
   });
 });
 

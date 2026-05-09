@@ -1,6 +1,6 @@
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { green, yellow, dim } from './colors.js';
+import { green, yellow } from './colors.js';
 import { loadPids, clearPids } from './pid.js';
 import { CONFIG_PATH } from './constants.js';
 import { stripBom } from './jsonc.js';
@@ -33,7 +33,7 @@ export function killByPort(port) {
   if (isWin) {
     // Windows: parse `netstat -ano` output for LISTENING on the target port
     try {
-      const output = execSync(`netstat -ano`, { encoding: 'utf-8' });
+      const output = execFileSync('netstat', ['-ano'], { encoding: 'utf-8' });
       for (const line of output.split('\r\n')) {
         if (!line.includes(`:${port} `) && !line.includes(`:${port}\t`)) continue;
         if (!/LISTENING/i.test(line)) continue;
@@ -45,7 +45,10 @@ export function killByPort(port) {
   } else {
     // Unix Method 1: lsof
     try {
-      const output = execSync(`lsof -ti :${port} 2>/dev/null`, { encoding: 'utf-8' }).trim();
+      const output = execFileSync('lsof', ['-ti', `:${port}`], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
       if (output) {
         for (const p of output.split('\n')) {
           const pid = Number(p);
@@ -57,7 +60,10 @@ export function killByPort(port) {
     // Unix Method 2: ss -tlnp (fallback)
     if (pidsToKill.size === 0) {
       try {
-        const output = execSync(`ss -tlnp 2>/dev/null`, { encoding: 'utf-8' });
+        const output = execFileSync('ss', ['-tlnp'], {
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
         const portRe = new RegExp(`:${port}(?!\\d)`);
         for (const line of output.split('\n')) {
           if (!portRe.test(line)) continue;
@@ -76,7 +82,7 @@ export function killByPort(port) {
   let killed = 0;
   if (isWin) {
     for (const pid of pidsToKill) {
-      try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' }); killed++; } catch {}
+      try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); killed++; } catch {}
     }
   } else {
     for (const pid of pidsToKill) {
@@ -102,7 +108,7 @@ export function killByPort(port) {
  */
 function killTree(pid) {
   if (isWin) {
-    try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' }); } catch {}
+    try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
     return true;
   }
 
@@ -176,10 +182,10 @@ export function stopMindos(opts = {}) {
     // Last resort: pattern match (for envs without lsof/netstat)
     if (process.env.NODE_ENV !== 'test') {
       if (isWin) {
-        try { execSync('taskkill /FI "IMAGENAME eq node.exe" /F', { stdio: 'ignore' }); } catch {}
+        try { execFileSync('taskkill', ['/FI', 'IMAGENAME eq node.exe', '/F'], { stdio: 'ignore' }); } catch {}
       } else {
-        try { execSync('pkill -f "next start|next dev" 2>/dev/null || true', { stdio: ['ignore', 'inherit', 'inherit'] }); } catch {}
-        try { execSync('pkill -f "(mcp|mcp-server)/(src/index|dist/index)" 2>/dev/null || true', { stdio: ['ignore', 'inherit', 'inherit'] }); } catch {}
+        try { execFileSync('pkill', ['-f', 'next start|next dev'], { stdio: ['ignore', 'inherit', 'inherit'] }); } catch {}
+        try { execFileSync('pkill', ['-f', '(mcp|mcp-server)/(src/index|dist/index)'], { stdio: ['ignore', 'inherit', 'inherit'] }); } catch {}
       }
     }
   }
