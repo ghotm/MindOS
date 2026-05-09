@@ -34,11 +34,6 @@ export function useRendererState<T>(
   // causing Object.is to fail → infinite re-renders for non-primitive types.
   const cacheRef = useRef<{ key: string; raw: string | null; parsed: T }>({ key, raw: null, parsed: defaultValue });
 
-  // Reset cache when key changes (different file or different renderer)
-  if (cacheRef.current.key !== key) {
-    cacheRef.current = { key, raw: null, parsed: defaultValue };
-  }
-
   const state = useSyncExternalStore(
     (onStoreChange) => {
       const listener = () => onStoreChange();
@@ -51,6 +46,10 @@ export function useRendererState<T>(
     },
     () => {
       try {
+        if (cacheRef.current.key !== key) {
+          cacheRef.current = { key, raw: null, parsed: defaultValue };
+        }
+
         const raw = localStorage.getItem(key);
         if (raw === cacheRef.current.raw) return cacheRef.current.parsed;
         if (raw === null) {

@@ -2531,7 +2531,7 @@ const visibleNodes = useMemo(() => {
 - 对需要给鼠标/键盘事件读取的最新值，用 `useLayoutEffect` 同步到 ref，保证用户交互前已经更新
 - 不要为了消除依赖数组而在 render 中写 callback ref；优先让 effect 明确依赖最新 callback
 
-**防回归**：`packages/web/__tests__/hooks/useResizeDrag-lint.test.ts` 用 ESLint JSON 输出断言 `useResizeDrag` 不再出现 `react-hooks/refs` warning。
+**防回归**：`packages/web/__tests__/hooks/useResizeDrag-lint.test.ts` 和 `packages/web/__tests__/renderers/useRendererState-lint.test.ts` 用 ESLint JSON 输出断言关键 hook 不再出现 `react-hooks/refs` warning。
 
 ### Monorepo 迁移后 workflow 仍引用旧顶层目录（2026-04-27）
 
