@@ -70,6 +70,32 @@ describe('test architecture contract', () => {
     }
   });
 
+  it('keeps workspace lint scripts backed by shared ESLint tooling', () => {
+    const rootPkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf-8')) as {
+      devDependencies?: Record<string, string>;
+    };
+    const eslintPackageDirs = [
+      'packages/mobile',
+      'packages/retrieval/search',
+      'packages/retrieval/vector',
+    ];
+
+    expect(rootPkg.devDependencies?.eslint).toBeDefined();
+    expect(rootPkg.devDependencies?.['@eslint/js']).toBeDefined();
+    expect(rootPkg.devDependencies?.['eslint-plugin-react-hooks']).toBeDefined();
+    expect(rootPkg.devDependencies?.globals).toBeDefined();
+    expect(rootPkg.devDependencies?.['typescript-eslint']).toBeDefined();
+    expect(existsSync(resolve(root, 'eslint.config.mjs'))).toBe(true);
+
+    for (const packageDir of eslintPackageDirs) {
+      const pkg = JSON.parse(readFileSync(resolve(root, packageDir, 'package.json'), 'utf-8')) as {
+        scripts?: Record<string, string>;
+      };
+
+      expect(pkg.scripts?.lint, packageDir).toContain('eslint');
+    }
+  });
+
   it('keeps the product package test script scoped to product source tests', () => {
     const pkg = JSON.parse(readFileSync(resolve(root, 'packages/mindos/package.json'), 'utf-8')) as {
       scripts?: Record<string, string>;

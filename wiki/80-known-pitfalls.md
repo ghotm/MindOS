@@ -2505,6 +2505,22 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`tests/test-architecture-contract.test.ts` 检查 workspace TS package 的 `type-check` 脚本，`pnpm run type-check` 应至少覆盖 11 个真实 TS package。
 
+### Package lint 脚本不能依赖隐式 ESLint 安装（2026-05-10）
+
+**症状**：`pnpm run lint` 在部分 package 中直接报 `eslint: command not found`，而 Web package 即使能启动 lint，也会被历史 `any`、unused vars 和 React compiler 规则 backlog 阻塞。
+
+**根因**：
+- `@mindos/mobile`、`@mindos/search`、`@mindos/vector` 声明了 `lint` 脚本，但 workspace 根目录没有共享 ESLint 依赖和 flat config
+- ESLint 9 不再自动使用旧式隐式配置；没有 `eslint.config.mjs` 时，package lint 脚本会因为环境不同而表现不一致
+- Web lint backlog 很大，直接把所有历史问题设为 error 会让根质量门长期不可用
+
+**修复**：
+- 根目录声明共享 `eslint`、`@eslint/js`、`typescript-eslint`、`eslint-plugin-react-hooks` 和 `globals`
+- 根目录提供 `eslint.config.mjs`，让非 Web package 的 lint 脚本在同一套规则下执行
+- Web 保留 Next/TypeScript/React lint，但将已有大批量历史问题先降为 warning；后续清理时逐条恢复为 error
+
+**防回归**：`tests/test-architecture-contract.test.ts` 检查共享 ESLint 依赖和根 `eslint.config.mjs`。`pnpm run lint` 必须能完整跑完，warning 视为待清理 backlog。
+
 ### Monorepo 迁移后 workflow 仍引用旧顶层目录（2026-04-27）
 
 **症状**：GitHub Actions 在发版或构建 Desktop/Mobile 时直接失败，常见报错是 `cd app: No such file or directory`、`cd mcp: No such file or directory`、`cd desktop: No such file or directory`。
