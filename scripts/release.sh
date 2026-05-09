@@ -41,7 +41,7 @@ echo ""
 # 4. Smoke test: pack → install in temp dir → verify CLI works
 echo "🔍 Smoke testing package..."
 if ! command -v bun >/dev/null 2>&1; then
-  echo "❌ Bun is required to build single-binary platform packages. Install Bun 1.2.9+ and retry."
+  echo "❌ Bun is required to build single-binary platform packages. Install Bun 1.2.17+ and retry."
   exit 1
 fi
 SMOKE_DIR=$(mktemp -d)
