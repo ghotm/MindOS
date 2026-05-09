@@ -14,7 +14,12 @@ const STORAGE_KEY = 'mindos:acp-registry';
 const STALE_TTL_MS = 30 * 60 * 1000; // 30 min — show stale data instantly
 const REVALIDATE_TTL_MS = 10 * 60 * 1000; // 10 min — background refresh interval
 
-function readStorage(): { agents: AcpRegistryEntry[]; ts: number } | null {
+interface RegistryCache {
+  agents: AcpRegistryEntry[];
+  ts: number;
+}
+
+function readStorage(): RegistryCache | null {
   try {
     const raw = sessionStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
@@ -34,9 +39,10 @@ function writeStorage(agents: AcpRegistryEntry[]) {
 }
 
 export function useAcpRegistry(): AcpRegistryState {
-  const cached = useRef(readStorage());
-  const [agents, setAgents] = useState<AcpRegistryEntry[]>(cached.current?.agents ?? []);
-  const [loading, setLoading] = useState(!cached.current);
+  const [initialCache] = useState<RegistryCache | null>(() => readStorage());
+  const cached = useRef<RegistryCache | null>(initialCache);
+  const [agents, setAgents] = useState<AcpRegistryEntry[]>(() => initialCache?.agents ?? []);
+  const [loading, setLoading] = useState(() => !initialCache);
   const [error, setError] = useState<string | null>(null);
   const [trigger, setTrigger] = useState(0);
   const inflight = useRef(false);

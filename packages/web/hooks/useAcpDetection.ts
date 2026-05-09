@@ -57,10 +57,11 @@ function writeStorage(installed: DetectedAgent[], notInstalled: NotInstalledAgen
 }
 
 export function useAcpDetection(): AcpDetectionState {
-  const cached = useRef(readStorage());
-  const [installedAgents, setInstalledAgents] = useState<DetectedAgent[]>(cached.current?.installed ?? []);
-  const [notInstalledAgents, setNotInstalledAgents] = useState<NotInstalledAgent[]>(cached.current?.notInstalled ?? []);
-  const [loading, setLoading] = useState(!cached.current);
+  const [initialCache] = useState<DetectionCache | null>(() => readStorage());
+  const cached = useRef<DetectionCache | null>(initialCache);
+  const [installedAgents, setInstalledAgents] = useState<DetectedAgent[]>(() => initialCache?.installed ?? []);
+  const [notInstalledAgents, setNotInstalledAgents] = useState<NotInstalledAgent[]>(() => initialCache?.notInstalled ?? []);
+  const [loading, setLoading] = useState(() => !initialCache);
   const [error, setError] = useState<string | null>(null);
   const [trigger, setTrigger] = useState(0);
   const inflight = useRef(false);
