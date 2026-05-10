@@ -65,6 +65,7 @@ describe('Desktop release packaging contract', () => {
 
     expect(smoke).toContain('/api/health');
     expect(smoke).toContain('APPIMAGE_EXTRACT_AND_RUN');
+    expect(smoke).toContain("process.platform === 'linux' ? ['--no-sandbox'] : []");
     expect(smoke).toContain("resolve('packages/desktop/dist')");
     expect(smoke).toContain("resolve('dist')");
     expect(smoke).toContain("join(desktopDist, 'linux-unpacked', 'MindOS')");

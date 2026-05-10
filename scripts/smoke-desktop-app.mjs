@@ -38,7 +38,8 @@ const executable = resolveExecutable(appPath);
 console.log(`[smoke-desktop-app] Launching ${executable}`);
 console.log(`[smoke-desktop-app] Log: ${logPath}`);
 
-const child = spawn(executable, [], {
+const launchArgs = process.platform === 'linux' ? ['--no-sandbox'] : [];
+const child = spawn(executable, launchArgs, {
   cwd: dirname(executable),
   env: {
     ...process.env,
