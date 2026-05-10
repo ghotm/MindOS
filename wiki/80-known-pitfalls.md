@@ -2893,6 +2893,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`tests/unit/cli-smoke.test.ts` 直接覆盖 Windows / Darwin 两种提示，确保 Windows 文案不再包含 `shell rc`。
 
+### CLI doctor fallback 要检查 Windows 的 mindos.cmd（2026-05-10）
+
+**症状**：如果 `mindos doctor` 在 CLI shim 修复分支里捕获异常，fallback 只检查 `~/.mindos/bin/mindos`。Windows 实际 shim 是 `mindos.cmd`，因此已有 shim 但 PATH 不可见时不会给用户任何修复提示。
+
+**根因**：跨平台 shim 文件名在 `cli-shim.js` 已经区分，但 doctor fallback 仍硬编码 Unix 可执行名。
+
+**修复**：抽出 `getShimExecutablePath()`，Windows 返回 `mindos.cmd`，Unix 返回 `mindos`；fallback 提示也按平台给出 User PATH 或 shell config 修复方式。
+
+**防回归**：`tests/unit/cli-smoke.test.ts` 覆盖 Windows / Darwin 的 shim 可执行路径后缀。
+
 ### Web 全量测试中的动态 import smoke test 要给足超时预算（2026-05-10）
 
 **症状**：`@mindos/web` 全量 Vitest 并发执行时，`__tests__/core/request-scoped-tools.test.ts` 偶发在默认 5s 超时。单独运行约 0.7s 通过，但与多个 ESLint 合约测试、Next build 后续测试并发时，动态 import `@/lib/agent/tools` 会被 CPU/transform 竞争拖慢。

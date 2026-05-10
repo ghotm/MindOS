@@ -85,6 +85,15 @@ describe('CLI smoke tests', () => {
     expect(doctor.formatShimActivationWarning('darwin')).toContain('shell rc files');
   });
 
+  it('mindos doctor checks the platform-specific shim executable', async () => {
+    const doctor = await import('../../packages/mindos/bin/commands/doctor.js') as {
+      getShimExecutablePath: (platform: NodeJS.Platform, homeDir: string) => string;
+    };
+
+    expect(doctor.getShimExecutablePath('win32', 'C:\\Users\\Ada')).toMatch(/mindos\.cmd$/);
+    expect(doctor.getShimExecutablePath('darwin', '/Users/ada')).toMatch(/\/mindos$/);
+  });
+
   it('mindos config show without config exits 1', () => {
     const { exitCode } = run(['config', 'show']);
     expect(exitCode).toBe(1);

@@ -33,6 +33,10 @@ export function formatShimActivationWarning(platform = process.platform) {
     : '~/.mindos/bin PATH injected into shell rc files — open a new terminal to activate';
 }
 
+export function getShimExecutablePath(platform = process.platform, homeDir = homedir()) {
+  return resolve(homeDir, '.mindos', 'bin', platform === 'win32' ? 'mindos.cmd' : 'mindos');
+}
+
 export const run = async (_args, flags) => {
   const jsonMode = flags.json === true;
   const checks = [];
@@ -132,11 +136,17 @@ export const run = async (_args, flags) => {
         warn(formatShimActivationWarning());
       }
     } catch {
-      if (existsSync(resolve(mindosBin, 'mindos'))) {
-        warn(`~/.mindos/bin/mindos exists but is NOT in PATH — AI Agents cannot find the mindos command`);
+      const shimExecutable = getShimExecutablePath();
+      if (existsSync(shimExecutable)) {
+        const shimName = process.platform === 'win32' ? 'mindos.cmd' : 'mindos';
+        warn(`~/.mindos/bin/${shimName} exists but is NOT in PATH — AI Agents cannot find the mindos command`);
         if (!jsonMode) {
-          console.log(dim('     Fix: add to your shell config:'));
-          console.log(dim('       export PATH="$HOME/.mindos/bin:$PATH"'));
+          if (process.platform === 'win32') {
+            console.log(dim('     Fix: add %USERPROFILE%\\.mindos\\bin to your user PATH, then open a new terminal.'));
+          } else {
+            console.log(dim('     Fix: add to your shell config:'));
+            console.log(dim('       export PATH="$HOME/.mindos/bin:$PATH"'));
+          }
         }
       }
     }
