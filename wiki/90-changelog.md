@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-13 | Current version: v0.6.82 -->
+<!-- Last verified: 2026-05-10 | Current version: v1.0.5 -->
 
 # 变更日志 (CHANGELOG)
 
