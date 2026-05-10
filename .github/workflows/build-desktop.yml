@@ -185,6 +185,10 @@ jobs:
             EXTRA_ARGS+=(
               --config.nsis.artifactName="MindOS-Setup-${VERSION}-arm64.\${ext}"
             )
+          elif [ "${{ matrix.platform }}" = "win" ]; then
+            EXTRA_ARGS+=(
+              --config.nsis.artifactName="MindOS-Setup-${VERSION}.\${ext}"
+            )
           fi
 
           cd packages/desktop && pnpm exec electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never "${EXTRA_ARGS[@]}"
@@ -481,6 +485,8 @@ jobs:
           fi
 
           shopt -s nullglob
+          gh release delete-asset "$DESIRED_TAG" "MindOS.Setup.${VERSION}.exe" --yes 2>/dev/null || true
+          gh release delete-asset "$DESIRED_TAG" "MindOS.Setup.${VERSION}.exe.blockmap" --yes 2>/dev/null || true
           assets=(artifacts/*)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "No desktop artifacts downloaded; refusing to finalize release."

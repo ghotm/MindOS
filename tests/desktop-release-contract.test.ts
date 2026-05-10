@@ -25,6 +25,7 @@ describe('Desktop release packaging contract', () => {
     expect(workflow).toContain('publish_channel: latest-arm64');
     expect(workflow).toContain('--config.publish.channel="${{ matrix.publish_channel }}"');
     expect(workflow).toContain('MindOS-Setup-${VERSION}-arm64.\\${ext}');
+    expect(workflow).toContain('MindOS-Setup-${VERSION}.\\${ext}');
     expect(workflow).toContain('packages/desktop/dist/*.blockmap');
     expect(updater).toContain("autoUpdater.channel = 'latest-arm64'");
     expect(runtimePrep).toContain('targetNodePlatform');
@@ -53,6 +54,8 @@ describe('Desktop release packaging contract', () => {
     expect(workflow.indexOf('Upload artifacts')).toBeGreaterThan(workflow.indexOf('Smoke packaged app'));
     expect(workflow).toContain('electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never');
     expect(workflow).not.toContain('--publish always');
+    expect(workflow).toContain('gh release delete-asset "$DESIRED_TAG" "MindOS.Setup.${VERSION}.exe" --yes');
+    expect(workflow).toContain('gh release delete-asset "$DESIRED_TAG" "MindOS.Setup.${VERSION}.exe.blockmap" --yes');
     expect(workflow).toContain('gh release upload "$DESIRED_TAG" "${assets[@]}" --clobber');
 
     expect(verifier).toContain('packages/web/.next/standalone/node_modules/@sinclair/typebox/package.json');
