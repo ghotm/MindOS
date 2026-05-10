@@ -29,4 +29,12 @@ describe('node-bootstrap', () => {
     expect(source).not.toContain('execSync(`xattr');
     expect(source).not.toContain('com.apple.quarantine "${NODE_DIR}"');
   });
+
+  it('does not route every Windows bootstrap spawn through the shell', () => {
+    const source = readFileSync(path.join(__dirname, 'node-bootstrap.ts'), 'utf-8');
+
+    expect(source).not.toContain('shell: IS_WIN');
+    expect(source).toContain('shell: needsWindowsShell(cmd)');
+    expect(source).toContain('shell: needsWindowsShell(npmBin)');
+  });
 });

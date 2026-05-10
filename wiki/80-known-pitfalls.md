@@ -2193,6 +2193,12 @@ mindos onboard
 - **解决：** 抽出 `removeMacQuarantineAttribute()`，用 `execFileSync('xattr', ['-dr', 'com.apple.quarantine', nodeDir])`；测试覆盖带引号和 `$` 的路径。
 - **规则：** Desktop 启动/修复流程里的系统工具调用也必须走 argv；即使路径通常来自系统目录，也按用户可控路径处理。
 
+### Desktop 私有 Node bootstrap 不要让所有 Windows spawn 进 shell (2026-05-10)
+
+- **问题：** `node-bootstrap.ts` 为了执行 Windows `npm.cmd`，把 `spawnAsync()`、`npm install`、`npm root -g` 都设成 Windows 下 `shell: true`。这样 PowerShell `.exe`、未来其他 `.exe` 工具或带特殊字符的路径都会额外经过 shell 解析。
+- **解决：** 增加 `needsWindowsShell(command)`，仅 `.cmd` / `.bat` launcher 启用 shell；`powershell.exe`、Unix `tar`、其他 `.exe` 继续 argv spawn。
+- **防回归：** `packages/desktop/src/node-bootstrap.test.ts` 禁止源码重新出现 blanket Windows shell，并断言 `spawnAsync()` / npm 调用都走 `needsWindowsShell(...)`。
+
 ### Desktop SSH 隧道探测不要把 ssh 路径和 host 拼进 shell (2026-05-10)
 
 - **问题：** `packages/desktop/src/ssh-tunnel.ts` 用 `execAsync("ssh ... ${host}")`、`execAsync(\`ssh-add "${resolvedKey}"\`)`、`execSync(\`"${candidate}" -V\`)` 探测 SSH。Windows 安装路径、key 路径或 host 名含空格/引号时容易解析错，也扩大了 shell 注入面。

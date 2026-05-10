@@ -22,6 +22,10 @@ const NODE_DIR = path.join(MINDOS_DIR, 'node');
 const IS_WIN = process.platform === 'win32';
 const PATH_SEP = IS_WIN ? ';' : ':';
 
+function needsWindowsShell(command: string): boolean {
+  return IS_WIN && /\.(?:cmd|bat)$/i.test(command);
+}
+
 /** Path to the bundled Node.js shipped inside the packaged app (resources/mindos-runtime/node/) */
 export function getBundledNodePath(): string {
   // In dev mode, process.resourcesPath still exists (Electron provides it),
@@ -261,8 +265,7 @@ function downloadFile(
 /** Spawn a process and wait for exit. Rejects on non-zero exit or timeout. */
 function spawnAsync(cmd: string, args: string[], timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    // On Windows, .cmd/.bat files require shell:true for spawn to execute them.
-    const proc = spawn(cmd, args, { stdio: 'ignore', shell: IS_WIN });
+    const proc = spawn(cmd, args, { stdio: 'ignore', shell: needsWindowsShell(cmd) });
     const timer = setTimeout(() => {
       proc.kill(); // No signal arg — Node.js uses SIGTERM on Unix, TerminateProcess on Windows
       reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
@@ -296,11 +299,11 @@ export async function installMindosWithPrivateNode(
 
   onProgress?.('installing');
 
-  // Use spawn with argument array (no shell, no injection risk)
+  // Use spawn with argument array. Windows npm.cmd is the only shell-backed path.
   await new Promise<void>((resolve, reject) => {
     const proc = spawn(npmBin, ['install', '-g', '@geminilight/mindos@latest'], {
       stdio: 'ignore',
-      shell: IS_WIN, // .cmd files require shell on Windows
+      shell: needsWindowsShell(npmBin),
       env: {
         ...process.env,
         PATH: `${binDir}${PATH_SEP}${process.env.PATH || ''}`,
@@ -327,7 +330,7 @@ export async function installMindosWithPrivateNode(
     let out = '';
     const proc = spawn(npmBin, ['root', '-g'], {
       stdio: ['ignore', 'pipe', 'ignore'],
-      shell: IS_WIN, // .cmd files require shell on Windows
+      shell: needsWindowsShell(npmBin),
       env: {
         ...process.env,
         PATH: `${binDir}${PATH_SEP}${process.env.PATH || ''}`,
