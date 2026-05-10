@@ -2755,6 +2755,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`tests/package-architecture-contract.test.ts` 解析 Web ESLint config 的 bare imports，并断言它们都在 `packages/web/package.json` 中声明。
 
+### npm scripts 里的 `${VAR:-default}` 会破坏 Windows 启动（2026-05-10）
+
+**症状**：`@mindos/web` 的 `dev` / `start` 脚本在 macOS/Linux 正常，但 Windows npm/cmd 不支持 POSIX 参数展开，`-p ${MINDOS_WEB_PORT:-3456}` 会把字面量传给 Next.js 或直接解析失败。
+
+**根因**：package scripts 是跨平台入口，不能依赖 Bash 语法。即使 `pnpm --filter @mindos/web dev` 在当前机器通过，也不代表 Windows 用户能启动。
+
+**修复**：端口默认值与校验放到 Node launcher（`packages/web/scripts/next-with-port.mjs`）里，用 `spawn(process.execPath, [nextBin, ...args])` 调本地 Next.js CLI。`dev` 保留 `--webpack`，`start` 只传 `-p <port>`。
+
+**防回归**：`packages/web/__tests__/next-config-warning.test.ts` 检查 `dev` / `start` 不再包含 POSIX `${VAR:-default}`，并直接验证 launcher 的默认端口、合法端口和非法端口 fallback。
+
 ### Hook / Component 不要在 render 阶段读写 ref.current（2026-05-10）
 
 **症状**：React compiler lint 报 `react-hooks/refs`，典型位置是 hook / component 为了避免事件回调 stale closure，在组件 render 阶段直接执行 `someRef.current = value`，用 `someRef.current` 初始化 state，或在 JSX handler 中直接调用会读写 ref 的 callback。

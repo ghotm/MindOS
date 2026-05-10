@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import nextConfig from '../next.config';
 
@@ -16,10 +16,38 @@ describe('next config warning hygiene', () => {
       scripts?: Record<string, string>;
     };
 
-    expect(pkg.scripts?.dev).toContain('next dev --webpack');
+    const launcher = readFileSync(resolve(__dirname, '../scripts/next-with-port.mjs'), 'utf-8');
+
+    expect(pkg.scripts?.dev).toContain('node scripts/next-with-port.mjs dev');
+    expect(launcher).toContain("'--webpack'");
     expect(pkg.scripts?.dev).not.toContain('npx tsx');
     expect(pkg.scripts?.generate).toBe('tsx scripts/generate-explore.ts');
     expect(pkg.scripts?.prebuild).toContain('tsx scripts/generate-explore.ts');
+  });
+
+  it('uses a cross-platform launcher for dev and start port selection', async () => {
+    const pkg = JSON.parse(readFileSync(resolve(__dirname, '../package.json'), 'utf-8')) as {
+      scripts?: Record<string, string>;
+    };
+    const launcherPath = resolve(__dirname, '../scripts/next-with-port.mjs');
+    const launcherModule = await import('../scripts/next-with-port.mjs') as {
+      buildNextArgs: (command: string, env?: Record<string, string | undefined>) => string[];
+    };
+
+    expect(pkg.scripts?.dev).toBe('tsx scripts/generate-explore.ts && node scripts/next-with-port.mjs dev');
+    expect(pkg.scripts?.start).toBe('node scripts/next-with-port.mjs start');
+    expect(`${pkg.scripts?.dev ?? ''}\n${pkg.scripts?.start ?? ''}`).not.toMatch(/\$\{[^}]+:-/);
+    expect(existsSync(launcherPath)).toBe(true);
+
+    const launcher = readFileSync(launcherPath, 'utf-8');
+    expect(launcher).toContain('MINDOS_WEB_PORT');
+    expect(launcher).toContain('3456');
+    expect(launcher).toContain('spawn(');
+    expect(launcher).not.toContain('shell: true');
+    expect(launcherModule.buildNextArgs('dev', {})).toEqual(['dev', '--webpack', '-p', '3456']);
+    expect(launcherModule.buildNextArgs('dev', { MINDOS_WEB_PORT: '4567' })).toEqual(['dev', '--webpack', '-p', '4567']);
+    expect(launcherModule.buildNextArgs('start', { MINDOS_WEB_PORT: '70000' })).toEqual(['start', '-p', '3456']);
+    expect(() => launcherModule.buildNextArgs('build', {})).toThrow(/Unsupported Next.js command/);
   });
 
   it('suppresses only the known pi-ai dynamic dependency webpack warning', () => {

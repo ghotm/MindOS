@@ -7,11 +7,11 @@
   },
   "scripts": {
     "generate": "tsx scripts/generate-explore.ts",
-    "dev": "tsx scripts/generate-explore.ts && next dev --webpack -p ${MINDOS_WEB_PORT:-3456}",
+    "dev": "tsx scripts/generate-explore.ts && node scripts/next-with-port.mjs dev",
     "prebuild": "tsx scripts/generate-explore.ts && node ../../scripts/gen-renderer-index.js",
     "build": "next build --webpack",
     "postbuild": "node ../../scripts/write-build-stamp.js",
-    "start": "next start -p ${MINDOS_WEB_PORT:-3456}",
+    "start": "node scripts/next-with-port.mjs start",
     "lint": "eslint",
     "test": "vitest run",
     "type-check": "tsc --noEmit",
