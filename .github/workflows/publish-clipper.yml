@@ -61,9 +61,7 @@ jobs:
           fi
 
       - name: Package zip
-        run: |
-          cd packages/browser-extension/extension
-          zip -r ../mindos-web-clipper-${{ steps.version.outputs.version }}.zip .
+        run: node packages/browser-extension/scripts/package-extension.mjs mindos-web-clipper-${{ steps.version.outputs.version }}.zip
 
       - name: Generate release notes
         run: |

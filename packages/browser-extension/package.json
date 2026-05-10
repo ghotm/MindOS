@@ -6,9 +6,9 @@
   "scripts": {
     "build": "node build.mjs",
     "watch": "node build.mjs --watch",
-    "clean": "rm -rf extension",
+    "clean": "node scripts/clean-extension.mjs",
     "type-check": "tsc --noEmit",
-    "package": "pnpm run build && cd extension && zip -r ../mindos-web-clipper.zip ."
+    "package": "pnpm run build && node scripts/package-extension.mjs"
   },
   "dependencies": {
     "@mozilla/readability": "^0.5.0",
@@ -17,6 +17,7 @@
   "devDependencies": {
     "@types/chrome": "^0.1.39",
     "@types/turndown": "^5.0.6",
+    "archiver": "^7.0.1",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"
   }

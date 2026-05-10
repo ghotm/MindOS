@@ -2765,6 +2765,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/web/__tests__/next-config-warning.test.ts` 检查 `dev` / `start` 不再包含 POSIX `${VAR:-default}`，并直接验证 launcher 的默认端口、合法端口和非法端口 fallback。
 
+### 浏览器扩展打包不能依赖系统 zip 命令（2026-05-10）
+
+**症状**：`pnpm --filter @mindos/browser-extension run package` 在 macOS/Linux 有 `zip` 时正常，但 Windows 或精简 CI 镜像可能没有 `zip`，导致 Web Clipper 本地打包失败。
+
+**根因**：package script 使用 `cd extension && zip -r ...`，既依赖外部 CLI，也把打包逻辑拆在 workflow 和本地脚本两处。
+
+**修复**：用 `packages/browser-extension/scripts/package-extension.mjs` 基于 `archiver` 生成 zip；workflow 也调用同一个脚本。`clean` 脚本改成 Node 版 `clean-extension.mjs`，避免 `rm -rf`。
+
+**防回归**：`tests/workflow-migration-contract.test.ts` 断言 Browser Extension package/workflow 不再包含 `zip -r` 或 `rm -rf`，并要求 `archiver` 和 Node package 脚本存在。
+
 ### Hook / Component 不要在 render 阶段读写 ref.current（2026-05-10）
 
 **症状**：React compiler lint 报 `react-hooks/refs`，典型位置是 hook / component 为了避免事件回调 stale closure，在组件 render 阶段直接执行 `someRef.current = value`，用 `someRef.current` 初始化 state，或在 JSX handler 中直接调用会读写 ref 的 callback。

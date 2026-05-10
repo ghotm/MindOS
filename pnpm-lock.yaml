@@ -74,6 +74,9 @@ importers:
       '@types/turndown':
         specifier: ^5.0.6
         version: 5.0.6
+      archiver:
+        specifier: ^7.0.1
+        version: 7.0.1
       esbuild:
         specifier: ^0.24.0
         version: 0.24.2

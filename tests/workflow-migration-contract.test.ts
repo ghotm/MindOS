@@ -181,8 +181,12 @@ describe('GitHub workflow migration contract', () => {
   it('builds the browser extension from packages/browser-extension', () => {
     const yml = workflow('publish-clipper.yml');
     const npmignore = readText('.npmignore');
-    const clipperPkg = readText('packages/browser-extension/package.json');
+    const clipperPkg = readJson<{
+      scripts?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    }>('packages/browser-extension/package.json');
     const clipperReadme = readText('packages/browser-extension/README.md');
+    const packageScript = readText('packages/browser-extension/scripts/package-extension.mjs');
 
     expect(existsSync(resolve(root, 'packages/browser-extension/package.json'))).toBe(true);
     expect(existsSync(resolve(root, 'browser-extension'))).toBe(false);
@@ -192,11 +196,19 @@ describe('GitHub workflow migration contract', () => {
     expect(yml).toContain('pnpm install --frozen-lockfile');
     expect(yml).toContain('pnpm --filter @mindos/browser-extension run build');
     expect(yml).toContain('packages/browser-extension/extension/manifest.json');
+    expect(yml).toContain('node packages/browser-extension/scripts/package-extension.mjs mindos-web-clipper-${{ steps.version.outputs.version }}.zip');
     expect(yml).toContain('packages/browser-extension/mindos-web-clipper-${{ steps.version.outputs.version }}.zip');
+    expect(yml).not.toContain('zip -r');
     expect(yml).not.toMatch(/\bcd browser-extension\b|(^|[\s'"])browser-extension\/extension|(^|[\s'"])browser-extension\/src/);
     expect(npmignore).toMatch(/^packages\/browser-extension\/$/m);
     expect(npmignore).not.toMatch(/^browser-extension\/$/m);
-    expect(clipperPkg).toContain('"package": "pnpm run build');
+    expect(clipperPkg.scripts?.package).toBe('pnpm run build && node scripts/package-extension.mjs');
+    expect(clipperPkg.scripts?.clean).toBe('node scripts/clean-extension.mjs');
+    expect(clipperPkg.scripts?.package).not.toMatch(/\bzip\b|rm -rf/);
+    expect(clipperPkg.scripts?.clean).not.toMatch(/\brm -rf\b/);
+    expect(clipperPkg.devDependencies).toHaveProperty('archiver');
+    expect(packageScript).toContain('archiver');
+    expect(packageScript).not.toContain('zip -r');
     expect(clipperReadme).toContain('pnpm install');
     expect(clipperReadme).toContain('pnpm run build');
     expect(clipperReadme).not.toMatch(/\bnpm install\b|\bnpm run build\b|\bnpm run watch\b|\bnpm run package\b/);
