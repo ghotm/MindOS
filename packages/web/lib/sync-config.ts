@@ -6,7 +6,7 @@
  */
 import { execFile, execFileSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
-import { isAbsolute, join, relative, resolve, sep } from 'path';
+import { isAbsolute, join, relative, resolve, sep, win32 } from 'path';
 import { homedir } from 'os';
 import { resolveMindosCliPath } from './project-root';
 
@@ -68,8 +68,17 @@ export function getUnpushedCount(cwd: string): string {
 
 /** Validate that a file path is safely within mindRoot (prevents path traversal). */
 export function isPathWithinMindRoot(mindRoot: string, filePath: string): boolean {
+  const normalizedFilePath = filePath.replace(/\\/g, '/');
+  if (
+    isAbsolute(normalizedFilePath) ||
+    win32.isAbsolute(filePath) ||
+    win32.isAbsolute(normalizedFilePath)
+  ) {
+    return false;
+  }
+
   const root = resolve(mindRoot);
-  const target = resolve(root, filePath);
+  const target = resolve(root, normalizedFilePath);
   const rel = relative(root, target);
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }

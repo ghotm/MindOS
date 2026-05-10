@@ -3255,6 +3255,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/mindos/src/server.test.ts` 覆盖 `conflict-preview` 对 `..\\outside.md` 返回 `Invalid file path`，同时保留 `..notes/note.md` 这类合法单段 dotted 目录。
 
+### Web sync-config 路径校验也要处理 Windows 分隔符（2026-05-10）
+
+**症状**：`packages/web/lib/sync-config.ts` 的 `isPathWithinMindRoot()` 在 POSIX 主机上会接受 `..\\outside.md`，因为反斜杠被当作普通文件名字符。
+
+**根因**：该 helper 自己使用 `path.resolve()` + `path.relative()`，但只按当前平台的 `path.sep` 判断父目录前缀。Web 层虽然最终多通过 product server 执行操作，但这个 helper 被 CLI/Web 共用，不能留下跨平台语义差异。
+
+**修复**：校验前把反斜杠规范化为 `/`，并拒绝 POSIX absolute、Windows absolute 和 UNC absolute path，再做 root containment。
+
+**防回归**：`packages/web/__tests__/lib/sync-config-path.test.ts` 覆盖 `..\\outside.md` 在 POSIX host 上必须返回 `false`，同时保留 `..notes/todo.md` 这种合法单段 dotted 目录。
+
 ### Monorepo 迁移后 workflow 仍引用旧顶层目录（2026-04-27）
 
 **症状**：GitHub Actions 在发版或构建 Desktop/Mobile 时直接失败，常见报错是 `cd app: No such file or directory`、`cd mcp: No such file or directory`、`cd desktop: No such file or directory`。

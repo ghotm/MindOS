@@ -21,4 +21,17 @@ describe('sync-config path boundary checks', () => {
 
     expect(isPathWithinMindRoot(root, '../outside.md')).toBe(false);
   });
+
+  it('blocks Windows-style traversal outside mindRoot on POSIX hosts', () => {
+    const root = path.join(os.tmpdir(), 'mindos-sync-root');
+
+    expect(isPathWithinMindRoot(root, '..\\outside.md')).toBe(false);
+  });
+
+  it('blocks Windows absolute paths', () => {
+    const root = path.join(os.tmpdir(), 'mindos-sync-root');
+
+    expect(isPathWithinMindRoot(root, 'C:\\Users\\alice\\outside.md')).toBe(false);
+    expect(isPathWithinMindRoot(root, '\\\\server\\share\\outside.md')).toBe(false);
+  });
 });
