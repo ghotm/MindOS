@@ -555,7 +555,7 @@ export async function handleAgentCopySkillPost(
     if (!body.targetPath?.trim()) return json({ error: 'targetPath is required' }, { status: 400 });
 
     const skillName = body.skillName.trim();
-    if (skillName.includes('/') || skillName.includes('\\') || skillName.includes('..')) {
+    if (skillName === '.' || skillName === '..' || skillName.includes('/') || skillName.includes('\\')) {
       return json({ error: 'Invalid skill name' }, { status: 400 });
     }
 

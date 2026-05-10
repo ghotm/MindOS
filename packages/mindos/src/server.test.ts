@@ -1099,6 +1099,22 @@ describe('MindOS product server contract', () => {
       body: { error: 'Invalid target path' },
     });
 
+    mkdirSync(join(skillRoot, 'agent..skill'), { recursive: true });
+    writeFileSync(join(skillRoot, 'agent..skill', 'SKILL.md'), '# Agent Dotted Skill');
+    const dottedTargetRoot = join(home, 'target-dotted-skills');
+
+    await expect(handleAgentCopySkillPost({
+      skillName: 'agent..skill',
+      targetPath: dottedTargetRoot,
+    }, {
+      skillRoots: [{ path: skillRoot, source: 'builtin', origin: 'project-builtin', editable: false }],
+      homeDir: home,
+    })).resolves.toMatchObject({
+      status: 200,
+      body: { success: true, skillName: 'agent..skill', targetPath: join(dottedTargetRoot, 'agent..skill') },
+    });
+    expect(existsSync(join(dottedTargetRoot, 'agent..skill', 'SKILL.md'))).toBe(true);
+
     await expect(handleAgentCopySkillPost({
       skillName: 'mindos',
       targetPath: targetRoot,

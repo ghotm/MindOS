@@ -3103,6 +3103,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/retrieval/api/src/server.test.ts` 用临时 TCP server 占用 OS 分配端口，确认 `ApiServer.start()` 返回 `INTERNAL_ERROR` 且不会触发 uncaught exception。
 
+### Skill copy 校验不要把安全的连续点当成路径穿越（2026-05-10）
+
+**症状**：Agent skill copy handler 会拒绝 `agent..skill` 这类合法 skill 目录名，返回 `Invalid skill name`，即使目录名没有 `/` 或 `\`，无法发生路径分段穿越。
+
+**根因**：`handleAgentCopySkillPost()` 用 `skillName.includes('..')` 做路径安全校验，误把普通单段目录名中的连续点当成父目录段。
+
+**修复**：skill name 只拒绝真实危险单段：`.`、`..`、含 `/` 或含 `\`；target path 仍用按分隔符拆分的 `hasParentDirectorySegment()` 拦截实际 `..` 段。
+
+**防回归**：`packages/mindos/src/server.test.ts` 覆盖 `agent..skill` 可以从 skill root copy 到目标目录，同时保留 `../mindos` 和 target path 中真实 `..` 段的拒绝用例。
+
 ### 删除风险评估不要把 `..name` 当成系统路径（2026-05-10）
 
 **症状**：Desktop 与产品 CLI 的 `assessDeletionRisk()` 会把 `.mindos/..cache/runtime` 这种仍在配置目录内的路径标记为 `isSystemPath: true`，误报为系统路径风险。
