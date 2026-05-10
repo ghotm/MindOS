@@ -15,6 +15,7 @@ const ALLOWED_SUBDIRS = [
   'runtime',
   'runtime-downloading',
   'runtime-old',
+  'runtime-download.tar.gz',
   'config.json',
   'node',
   'bin',

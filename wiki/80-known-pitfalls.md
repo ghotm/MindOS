@@ -2973,6 +2973,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`tests/unit/custom-agents.test.ts` 覆盖 Windows 尾反斜杠默认值与 `~\` 输入；`packages/web/__tests__/core/mcp-agents-windows-paths.test.ts` 覆盖 `~\` expansion。
 
+### Desktop updater 路径白名单要覆盖 getRuntimePaths 全量输出（2026-05-10）
+
+**症状**：Desktop updater 下载运行时后，`getRuntimePaths()` 生成的 `tarballPath` 是 `~/.mindos/runtime-download.tar.gz`，但 `validateRuntimePath()` 会报 `SECURITY: Subdirectory not whitelisted: runtime-download.tar.gz`。
+
+**根因**：安全校验只白名单了 runtime 目录和 `config.json` 等少数顶层项，新增/已有的顶层 runtime artifact 没有和 `getRuntimePaths()` 的返回值做一致性测试。
+
+**修复**：把 `runtime-download.tar.gz` 纳入 updater 可管理顶层项；新增测试确保 `getRuntimePaths()` 返回的每个路径都能通过 `validateRuntimePath()`。
+
+**防回归**：`packages/desktop/src/safe-paths.test.ts` 覆盖 Desktop runtime 路径生成器与 validator 的自一致性。
+
 ### Web 全量测试中的动态 import smoke test 要给足超时预算（2026-05-10）
 
 **症状**：`@mindos/web` 全量 Vitest 并发执行时，`__tests__/core/request-scoped-tools.test.ts` 偶发在默认 5s 超时。单独运行约 0.7s 通过，但与多个 ESLint 合约测试、Next build 后续测试并发时，动态 import `@/lib/agent/tools` 会被 CPU/transform 竞争拖慢。
