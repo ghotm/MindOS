@@ -17,12 +17,16 @@ export type BootstrapPayload = {
   target_config_json?: string;
 };
 
+function hasParentDirectorySegment(input: string): boolean {
+  return input.split(/[\\/]+/).includes('..');
+}
+
 export function handleBootstrapGet(
   query: URLSearchParams,
   services: BootstrapHandlerServices,
 ): MindosServerResponse<BootstrapPayload | { error: string }> {
   const targetDir = query.get('target_dir') ?? undefined;
-  if (targetDir && (targetDir.includes('..') || path.isAbsolute(targetDir))) {
+  if (targetDir && (hasParentDirectorySegment(targetDir) || path.isAbsolute(targetDir))) {
     return json({ error: 'invalid target_dir' }, { status: 400 });
   }
 

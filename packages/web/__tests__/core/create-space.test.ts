@@ -32,6 +32,17 @@ describe('createSpaceFilesystem', () => {
     expect(readSeeded(mindRoot, 'Parent/Child/README.md')).toContain('nested');
   });
 
+  it('creates nested spaces under parent paths whose segment starts with consecutive dots', () => {
+    createSpaceFilesystem(mindRoot, '..Parent', 'top', '');
+    createSpaceFilesystem(mindRoot, 'Child', 'nested', '..Parent');
+    expect(fs.existsSync(path.join(mindRoot, '..Parent', 'Child', 'INSTRUCTION.md'))).toBe(true);
+    expect(readSeeded(mindRoot, '..Parent/Child/README.md')).toContain('nested');
+  });
+
+  it('throws for parent path traversal segments', () => {
+    expect(() => createSpaceFilesystem(mindRoot, 'Child', 'nested', '../Parent')).toThrow('Invalid parent path');
+  });
+
   it('throws when space README path already exists', () => {
     createSpaceFilesystem(mindRoot, 'Dup', 'a', '');
     expect(() => createSpaceFilesystem(mindRoot, 'Dup', 'b', '')).toThrow('already exists');

@@ -1924,6 +1924,8 @@ describe('MindOS product server contract', () => {
       ['.mindos/user-preferences.md', 'Prefer concise answers'],
       ['Workflows/README.md', '# Workflows'],
       ['Workflows/INSTRUCTION.md', '# Workflow Instructions'],
+      ['..Notes/README.md', '# Dotted Notes'],
+      ['..Notes/INSTRUCTION.md', '# Dotted Notes Instructions'],
       ['Projects/roadmap.md', '# Roadmap'],
       ['Projects/pricing.md', '# Pricing'],
       ['notes.md', 'Notes'],
@@ -1949,6 +1951,13 @@ describe('MindOS product server contract', () => {
     });
     expect(result.body.file_index).toContain('Projects/ (2 files)');
     expect(result.body.file_index).toContain('notes.md');
+    expect(handleBootstrapGet(new URLSearchParams('target_dir=..Notes'), services)).toMatchObject({
+      status: 200,
+      body: {
+        target_readme: '# Dotted Notes',
+        target_instruction: '# Dotted Notes Instructions',
+      },
+    });
     expect(handleBootstrapGet(new URLSearchParams('target_dir=../secret'), services)).toMatchObject({
       status: 400,
       body: { error: 'invalid target_dir' },

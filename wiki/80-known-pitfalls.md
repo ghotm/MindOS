@@ -3053,6 +3053,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/mindos/src/foundation/security/path-safety.test.ts` 覆盖 `assertWithinRoot()`、`isWithinRoot()`、`resolveSafe()` 对 `..notes/file.txt` 的允许行为。
 
+### Route/core 相对目录校验不要误伤 `..Name`（2026-05-10）
+
+**症状**：Bootstrap `target_dir=..Notes` 会返回 400 `invalid target_dir`；Web 创建嵌套 Space 时，父目录 `..Parent` 会报 `Invalid parent path`。
+
+**根因**：route/core 层把 `includes('..')` 当成 traversal 校验，误把普通相对目录名里的连续点号当成父目录段。底层 safe resolver 已经能区分父目录段，route 层不应该使用整串 substring。
+
+**修复**：改为按 `/` / `\` 分隔符拆分，只拒绝完整 `..` segment；继续拒绝绝对路径、Windows 反斜杠 parent path 和真实 `../` traversal。
+
+**防回归**：`packages/mindos/src/server.test.ts` 覆盖 bootstrap `target_dir=..Notes` 与 `../secret`；`packages/web/__tests__/core/create-space.test.ts` 覆盖 `..Parent` 嵌套 Space 与 `../Parent` traversal。
+
 ### Desktop updater 路径白名单要覆盖 getRuntimePaths 全量输出（2026-05-10）
 
 **症状**：Desktop updater 下载运行时后，`getRuntimePaths()` 生成的 `tarballPath` 是 `~/.mindos/runtime-download.tar.gz`，但 `validateRuntimePath()` 会报 `SECURITY: Subdirectory not whitelisted: runtime-download.tar.gz`。

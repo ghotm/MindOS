@@ -4,6 +4,10 @@ import { MindOSError, ErrorCodes } from '@/lib/errors';
 import { createFile } from './fs-ops';
 import { INSTRUCTION_TEMPLATE, cleanDirName } from './space-scaffold';
 
+function hasParentDirectorySegment(input: string): boolean {
+  return input.split('/').includes('..');
+}
+
 /**
  * Generate the template README.md content for a new space.
  * Extracted so both createSpaceFilesystem and revert can produce identical content.
@@ -33,7 +37,7 @@ export function createSpaceFilesystem(
   }
 
   const cleanParent = parentPath.replace(/\/+$/, '').trim();
-  if (cleanParent.includes('..') || cleanParent.startsWith('/') || cleanParent.includes('\\')) {
+  if (hasParentDirectorySegment(cleanParent) || cleanParent.startsWith('/') || cleanParent.includes('\\')) {
     throw new MindOSError(ErrorCodes.INVALID_PATH, 'Invalid parent path', { parentPath });
   }
 
