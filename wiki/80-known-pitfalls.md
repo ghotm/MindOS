@@ -554,6 +554,7 @@ rootcause: app/api/ask/route.ts:143 直接传递 llmHistoryMessages（pi-ai Mess
 - **现象：** Timeline、Summary、Skill detail 这类轻量 Markdown renderer 先做 Markdown 替换，再直接 `dangerouslySetInnerHTML`，如果原文包含 `<script>`、`<img onerror>` 或 `javascript:` 链接，会把不可信内容带入 DOM。
 - **根因：** 这些 renderer 不是通用 Markdown 引擎，也没有 sanitizer；正则替换只处理少数 Markdown 语法，不会自动转义普通 HTML 或校验链接协议。
 - **解决：** 统一在 Markdown 替换前对原始文本做 `escapeHtml()`；属性值用 `escapeAttribute()`；链接 href 走 `safeHref()` 白名单（`http(s)`、`mailto`、站内路径和 hash），不合规则降级为 `#`。
+- **Browser Extension 例外注意：** popup 里的目录名来自 MindOS API，必须用 `textContent` + `createElementNS` 组装图标，不能为了 SVG 图标方便把 `${childName}` 插进 `innerHTML`。
 - **规则：** 新增 `dangerouslySetInnerHTML` 必须满足二选一：输入来自可信静态模板，或先经过明确的 escape/sanitize helper，并补一条包含 HTML 注入和危险链接的回归测试。
 - **验证：** `packages/web/__tests__/renderers/generated-html-safety.test.ts` 覆盖 Summary、Timeline 和 Skill detail 的 HTML 转义与危险链接降级。
 

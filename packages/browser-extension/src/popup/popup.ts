@@ -199,10 +199,37 @@ function showClipView(errorMsg?: string) {
 }
 
 /** Render the hierarchical directory picker at the current browsing level */
+function createSvgIcon(className: string, size: string, pathData?: string, polylinePoints?: string): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', className);
+  svg.setAttribute('width', size);
+  svg.setAttribute('height', size);
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+
+  if (pathData) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', pathData);
+    svg.appendChild(path);
+  }
+
+  if (polylinePoints) {
+    const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    polyline.setAttribute('points', polylinePoints);
+    svg.appendChild(polyline);
+  }
+
+  return svg;
+}
+
 function renderDirPicker() {
   // Breadcrumb
   const segments = browsingPath ? browsingPath.split('/') : [];
-  dirBreadcrumb.innerHTML = '';
+  dirBreadcrumb.replaceChildren();
 
   // Root / Inbox button
   const rootBtn = document.createElement('button');
@@ -220,7 +247,7 @@ function renderDirPicker() {
   segments.forEach((seg, i) => {
     const sep = document.createElement('span');
     sep.className = 'crumb-sep';
-    sep.innerHTML = '&#8250;';
+    sep.textContent = String.fromCharCode(8250);
     dirBreadcrumb.appendChild(sep);
 
     const btn = document.createElement('button');
@@ -247,7 +274,7 @@ function renderDirPicker() {
     })
     .sort();
 
-  dirList.innerHTML = '';
+  dirList.replaceChildren();
   for (const childPath of children) {
     const childName = childPath.split('/').pop() || childPath;
     const hasChildren = allDirs.some(p => p.startsWith(childPath + '/'));
@@ -255,11 +282,17 @@ function renderDirPicker() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'dir-item';
-    btn.innerHTML = `
-      <svg class="dir-item-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-      <span class="dir-item-name">${childName}</span>
-      ${hasChildren ? '<svg class="dir-item-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>' : ''}
-    `;
+    btn.appendChild(createSvgIcon('dir-item-icon', '12', 'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'));
+
+    const name = document.createElement('span');
+    name.className = 'dir-item-name';
+    name.textContent = childName;
+    btn.appendChild(name);
+
+    if (hasChildren) {
+      btn.appendChild(createSvgIcon('dir-item-arrow', '11', undefined, '9 18 15 12 9 6'));
+    }
+
     btn.addEventListener('click', () => {
       browsingPath = childPath;
       selectedPath = childPath;
