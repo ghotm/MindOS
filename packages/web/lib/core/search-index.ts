@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { collectAllFiles } from './tree';
 import { readFile } from './fs-ops';
-import { resolveSafe } from './security';
+import { resolveExistingSafe } from './security';
 import { extractPdfText } from './pdf-text';
 import { CJK_CHAR_REGEX } from './cjk';
 import { telemetry } from '../telemetry';
@@ -198,7 +198,7 @@ export class SearchIndex {
       if (ext === '.pdf') {
         // PDF: extract text from binary via pdfjs-dist child process
         try {
-          const resolved = resolveSafe(mindRoot, filePath);
+          const resolved = resolveExistingSafe(mindRoot, filePath);
           content = extractPdfText(resolved);
           if (!content) continue;
         } catch {
@@ -291,7 +291,7 @@ export class SearchIndex {
     const ext = path.extname(filePath).toLowerCase();
     if (ext === '.pdf') {
       try {
-        const resolved = resolveSafe(mindRoot, filePath);
+        const resolved = resolveExistingSafe(mindRoot, filePath);
         content = extractPdfText(resolved);
         if (!content) return;
       } catch { return; }
@@ -512,7 +512,7 @@ export class SearchIndex {
       // Small index: check all files
       for (const dp of docPaths) {
         try {
-          const stat = fs.statSync(path.join(mindRoot, dp));
+          const stat = fs.statSync(resolveExistingSafe(mindRoot, dp));
           if (stat.mtimeMs > data.timestamp) return false;
         } catch {
           return false; // file deleted
@@ -529,7 +529,7 @@ export class SearchIndex {
 
       for (const idx of sampled) {
         try {
-          const stat = fs.statSync(path.join(mindRoot, docPaths[idx]));
+          const stat = fs.statSync(resolveExistingSafe(mindRoot, docPaths[idx]));
           if (stat.mtimeMs > data.timestamp) return false;
         } catch {
           return false;

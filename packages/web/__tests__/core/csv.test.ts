@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 import { mkTempMindRoot, cleanupMindRoot, seedFile, readSeeded } from './helpers';
 import { appendCsvRow } from '@/lib/core/csv';
 
@@ -40,6 +42,20 @@ describe('csv', () => {
     appendCsvRow(mindRoot, 'new/dir/data.csv', ['a', 'b']);
     const content = readSeeded(mindRoot, 'new/dir/data.csv');
     expect(content).toBe('a,b\n');
+  });
+
+  it('rejects appending through a symlinked parent outside mindRoot', () => {
+    const outsideRoot = `${mindRoot}-outside`;
+    fs.mkdirSync(outsideRoot, { recursive: true });
+    fs.writeFileSync(path.join(outsideRoot, 'data.csv'), 'name,value\n', 'utf-8');
+    fs.symlinkSync(outsideRoot, path.join(mindRoot, 'Linked'), 'dir');
+
+    try {
+      expect(() => appendCsvRow(mindRoot, 'Linked/data.csv', ['leak', '1'])).toThrow('Access denied');
+      expect(fs.readFileSync(path.join(outsideRoot, 'data.csv'), 'utf-8')).toBe('name,value\n');
+    } finally {
+      fs.rmSync(outsideRoot, { recursive: true, force: true });
+    }
   });
 
   it('throws for non-.csv files', () => {

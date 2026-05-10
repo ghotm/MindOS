@@ -1,7 +1,8 @@
 import type { Result } from '../../foundation/shared/index.js'
 import { err } from '../../foundation/shared/index.js'
 import { createError } from '../../foundation/errors/index.js'
-import { resolveSafe, validatePath } from '../../foundation/security/index.js'
+import { resolveExistingSafe, resolveSafe, validatePath } from '../../foundation/security/index.js'
+import { existsSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type {
   DirectoryEntry,
@@ -106,9 +107,13 @@ export class RootedFileSystem implements IFileSystem {
       }
 
       if (operation) {
-        return validatePath(this.rootPath, path, operation)
+        const validation = validatePath(this.rootPath, path, operation)
+        if (!validation.ok) return validation
       }
-      return { ok: true, value: resolveSafe(this.rootPath, path) }
+      const value = existsSync(this.rootPath)
+        ? resolveExistingSafe(this.rootPath, path)
+        : resolveSafe(this.rootPath, path)
+      return { ok: true, value }
     } catch (error) {
       return err(
         createError('VALIDATION_ERROR', 'Path validation failed', {

@@ -492,7 +492,7 @@ export function getRecentlyModified(limit = 10): Array<{ path: string; mtime: nu
   const allFiles = collectAllFiles();
   const withMtime = allFiles.map((filePath) => {
     try {
-      const abs = path.join(root, filePath);
+      const abs = resolveExistingSafe(root, filePath);
       const stat = fs.statSync(abs);
       return { path: filePath, mtime: stat.mtimeMs };
     } catch {

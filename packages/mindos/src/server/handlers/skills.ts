@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
+import { resolveExistingSafe } from '../../foundation/security/index.js';
 import { json, publicCacheHeaders, type MindosServerResponse } from '../response.js';
 
 export type MindosSkillSource = 'builtin' | 'user';
@@ -91,10 +92,18 @@ export function handleSkillsPost(
   const payload = normalizeSkillsPostPayload(body);
   const { action, name } = payload;
   const settings = services.readSettings();
-  const userSkillsDir = join(services.mindRoot, '.skills');
 
   if (name && !isValidSkillName(name)) {
     return json({ error: 'Invalid skill name. Use lowercase letters, numbers, and hyphens only.' }, { status: 400 });
+  }
+
+  let userSkillsDir: string;
+  try {
+    userSkillsDir = resolveUserSkillsDir(services.mindRoot);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/access denied|outside root|absolute paths/i.test(message)) return json({ error: 'Access denied' }, { status: 403 });
+    return json({ error: message }, { status: 500 });
   }
 
   switch (action) {
@@ -140,6 +149,7 @@ export function handleSkillsPost(
 
 function readSkillsFromRoot(root: MindosSkillRoot, disabled: Set<string>): MindosSkillInfo[] {
   if (!existsSync(root.path)) return [];
+  if (root.origin === 'mindos-user' && lstatSync(root.path).isSymbolicLink()) return [];
   const skills: MindosSkillInfo[] = [];
 
   for (const entry of readdirSync(root.path, { withFileTypes: true })) {
@@ -161,6 +171,11 @@ function readSkillsFromRoot(root: MindosSkillRoot, disabled: Set<string>): Mindo
   }
 
   return skills;
+}
+
+function resolveUserSkillsDir(mindRoot: string): string {
+  if (!existsSync(mindRoot)) return join(mindRoot, '.skills');
+  return resolveExistingSafe(mindRoot, '.skills');
 }
 
 function parseSkillMd(content: string): { name?: string; description?: string } {

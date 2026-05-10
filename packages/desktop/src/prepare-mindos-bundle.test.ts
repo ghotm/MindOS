@@ -40,10 +40,15 @@ describe('materializeStandaloneAssets', () => {
     expect(() => materializeStandaloneAssets(appDir)).toThrow(/Missing .*server\.js/);
   });
 
-  it('copies .next/static and public into standalone', () => {
+  it('copies .next/static and public into standalone without build caches', () => {
     const appDir = makeTemp('mindos-app-');
     const standalone = path.join(appDir, '.next', 'standalone');
     writeStandaloneApp(appDir);
+
+    mkdirSync(path.join(standalone, '.next', 'cache', 'webpack'), { recursive: true });
+    writeFileSync(path.join(standalone, '.next', 'cache', 'webpack', '0.pack'), 'cache');
+    mkdirSync(path.join(standalone, '.next', 'dev'), { recursive: true });
+    writeFileSync(path.join(standalone, '.next', 'dev', 'hot-reloader.json'), 'dev');
 
     mkdirSync(path.join(appDir, '.next', 'static', 'chunks'), { recursive: true });
     writeFileSync(path.join(appDir, '.next', 'static', 'chunks', 'a.js'), 'a');
@@ -60,6 +65,9 @@ describe('materializeStandaloneAssets', () => {
     const pub = path.join(standalone, 'public', 'favicon.ico');
     expect(existsSync(pub)).toBe(true);
     expect(readFileSync(pub, 'utf-8')).toBe('ico');
+
+    expect(existsSync(path.join(standalone, '.next', 'cache'))).toBe(false);
+    expect(existsSync(path.join(standalone, '.next', 'dev'))).toBe(false);
   });
 
   it('throws when required pdf runtime files are missing', () => {
@@ -99,7 +107,7 @@ describe('copyAppForBundledRuntime', () => {
     );
   });
 
-  it('omits node_modules and .next/cache', () => {
+  it('omits node_modules and nested .next/cache directories', () => {
     const src = makeTemp('mindos-src-');
     const dest = path.join(makeTemp('mindos-dest-'), 'app');
 
@@ -115,6 +123,8 @@ describe('copyAppForBundledRuntime', () => {
 
     mkdirSync(path.join(src, '.next', 'standalone'), { recursive: true });
     writeFileSync(path.join(src, '.next', 'standalone', 'server.js'), 'ok');
+    mkdirSync(path.join(src, '.next', 'standalone', '.next', 'cache', 'webpack'), { recursive: true });
+    writeFileSync(path.join(src, '.next', 'standalone', '.next', 'cache', 'webpack', '0.pack'), 'nested-cache');
 
     copyAppForBundledRuntime(src, dest);
 
@@ -122,6 +132,7 @@ describe('copyAppForBundledRuntime', () => {
     expect(existsSync(path.join(dest, 'node_modules'))).toBe(false);
     expect(existsSync(path.join(dest, '.next', 'cache'))).toBe(false);
     expect(existsSync(path.join(dest, '.next', 'dev'))).toBe(false);
+    expect(existsSync(path.join(dest, '.next', 'standalone', '.next', 'cache'))).toBe(false);
     expect(existsSync(path.join(dest, '.next', 'standalone', 'server.js'))).toBe(true);
   });
 

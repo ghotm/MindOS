@@ -43,7 +43,14 @@ export function materializeStandaloneAssets(appDir) {
 
   materializeStandaloneNodeModules(appDir, standaloneDir);
   materializeNextServerLib(appDir, standaloneDir);
+  pruneStandaloneBuildJunk(standaloneDir);
   assertStandaloneAppFiles(appDir, 'prepare-mindos-bundle');
+}
+
+function pruneStandaloneBuildJunk(standaloneDir) {
+  for (const rel of ['.next/cache', '.next/dev']) {
+    rmSync(path.join(standaloneDir, rel), { recursive: true, force: true });
+  }
 }
 
 function materializeStandaloneNodeModules(appDir, standaloneDir) {
@@ -197,20 +204,14 @@ function fixTurbopackHashedExternals(destAppDir) {
  * @param {string} rel — path relative to app root (native separators)
  */
 function copyFiltered(fromAbs, toAbs, rel) {
-  const skipUnderNext = ['cache', 'dev'];
-  for (const seg of skipUnderNext) {
-    const prefix = path.join('.next', seg);
-    if (rel === prefix || rel.startsWith(prefix + path.sep)) {
-      return;
-    }
-  }
+  if (isExcludedNextRuntimePath(rel)) return;
 
   const entries = readdirSync(fromAbs, { withFileTypes: true });
   for (const ent of entries) {
     const name = ent.name;
-    if (rel === '.next' && (name === 'cache' || name === 'dev')) continue;
 
     const nextRel = rel ? path.join(rel, name) : name;
+    if (isExcludedNextRuntimePath(nextRel)) continue;
 
     // Skip app-level node_modules but KEEP .next/standalone/node_modules (traced runtime deps).
     // Copy the standalone node_modules with symlinks dereferenced for codesign-safe packaging.
@@ -238,6 +239,17 @@ function copyFiltered(fromAbs, toAbs, rel) {
       copyDereferenced(fromChild, toChild);
     }
   }
+}
+
+function isExcludedNextRuntimePath(rel) {
+  if (!rel) return false;
+  const parts = rel.split(path.sep);
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    if (parts[i] === '.next' && (parts[i + 1] === 'cache' || parts[i + 1] === 'dev')) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function copyDereferenced(fromAbs, toAbs) {

@@ -38,5 +38,18 @@ describe('export helpers', () => {
         fs.rmSync(outsideDir, { recursive: true, force: true });
       }
     });
+
+    it('rejects export roots that resolve through symlinks outside mindRoot', () => {
+      const outsideDir = path.join(path.dirname(mindRoot), `mindos-export-linked-${Date.now()}`);
+      fs.mkdirSync(outsideDir, { recursive: true });
+      fs.writeFileSync(path.join(outsideDir, 'leak.md'), 'outside', 'utf-8');
+      fs.symlinkSync(outsideDir, path.join(mindRoot, 'Linked'), 'dir');
+
+      try {
+        expect(() => collectExportFiles(mindRoot, 'Linked')).toThrow('Access denied');
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
   });
 });

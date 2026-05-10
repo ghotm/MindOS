@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { resolveSafe } from './security';
+import { resolveExistingSafe } from './security';
 import { appendContentChange } from './content-changes';
 
 export interface OrganizeResult {
@@ -65,7 +65,7 @@ export function organizeAfterImport(
   if (space && createdFiles.length > 0) {
     const readmePath = path.posix.join(space, 'README.md');
     try {
-      const resolved = resolveSafe(mindRoot, readmePath);
+      const resolved = resolveExistingSafe(mindRoot, readmePath);
       if (fs.existsSync(resolved)) {
         const existing = fs.readFileSync(resolved, 'utf-8');
         const bullets = createdFiles.map(f => {
@@ -92,7 +92,7 @@ export function organizeAfterImport(
       if (createdSet.has(candidate)) continue;
       if (relatedFiles.length >= 10) break;
       try {
-        const resolved = resolveSafe(mindRoot, candidate);
+        const resolved = resolveExistingSafe(mindRoot, candidate);
         const content = fs.readFileSync(resolved, 'utf-8').toLowerCase();
         if (kwArray.some(kw => content.includes(kw))) {
           relatedFiles.push({ path: candidate, matchType: 'keyword' });

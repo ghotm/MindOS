@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname } from 'node:path';
-import { resolveSafe } from '../../foundation/security/index.js';
+import { resolveExistingSafe } from '../../foundation/security/index.js';
 import { type MindosServerResponse } from '../response.js';
 
 export const STATIC_MIME_TYPES: Record<string, string> = {
@@ -29,6 +29,7 @@ export function handleStaticArtifact(
   options: StaticArtifactHandlerOptions,
 ): MindosServerResponse<Buffer | { error: string }> | null {
   if (!options.staticRoot) return null;
+  if (!existsSync(options.staticRoot)) return null;
 
   const requestPath = normalizeStaticRequestPath(options.path);
   const resolved = resolveStaticPath(options.staticRoot, requestPath);
@@ -51,7 +52,7 @@ function normalizeStaticRequestPath(pathname: string): string {
 
 function resolveStaticPath(root: string, filePath: string): string | null {
   try {
-    return resolveSafe(root, filePath);
+    return resolveExistingSafe(root, filePath);
   } catch {
     return null;
   }

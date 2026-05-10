@@ -3,6 +3,7 @@ import path from 'path';
 import os from 'os';
 import { collectAllFiles } from './tree';
 import { readFile } from './fs-ops';
+import { resolveExistingSafe } from './security';
 import { SearchIndex } from './search-index';
 import type { SearchResult, SearchOptions } from './types';
 import { updateEmbeddingFile, removeEmbeddingFile, invalidateEmbeddingIndex } from './hybrid-search';
@@ -267,7 +268,7 @@ export function searchFiles(mindRoot: string, query: string, opts: SearchOptions
   for (const filePath of allFiles) {
     if (mtimeThreshold > 0) {
       try {
-        const abs = path.join(mindRoot, filePath);
+        const abs = resolveExistingSafe(mindRoot, filePath);
         const stat = fs.statSync(abs);
         if (stat.mtimeMs < mtimeThreshold) continue;
       } catch { continue; }

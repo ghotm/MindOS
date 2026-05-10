@@ -1,10 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { mkdtempSync, rmSync, symlinkSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   appendContentChange,
   listContentChanges,
   appendAgentAuditEvent,
   listAgentAuditEvents
 } from './index';
+import { LocalFileSystem } from '../storage/local.js';
 import type { IFileSystem, Result, FileEntry } from '../storage/index.js';
 
 class MockFileSystem implements IFileSystem {
@@ -104,6 +108,27 @@ describe('Content Change Log', () => {
       expect(result.value.length).toBe(2);
     }
   });
+
+  it('should reject change log writes through symlinked .mindos directories outside the root', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-knowledge-change-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-knowledge-change-outside-'));
+    try {
+      symlinkSync(outside, join(root, '.mindos'), 'dir');
+
+      const result = await appendContentChange(new LocalFileSystem(), root, {
+        op: 'create',
+        path: 'note.md',
+        source: 'agent',
+        summary: 'Created file',
+      });
+
+      expect(result.ok).toBe(false);
+      expect(existsSync(join(outside, 'change-log.json'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('Agent Audit Log', () => {
@@ -158,6 +183,28 @@ describe('Agent Audit Log', () => {
       expect(result.value.length).toBe(2);
       const agent1Events = result.value.filter(e => e.agentName === 'agent1');
       expect(agent1Events.length).toBe(1);
+    }
+  });
+
+  it('should reject audit log writes through symlinked .mindos directories outside the root', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-knowledge-audit-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-knowledge-audit-outside-'));
+    try {
+      symlinkSync(outside, join(root, '.mindos'), 'dir');
+
+      const result = await appendAgentAuditEvent(new LocalFileSystem(), root, {
+        ts: new Date().toISOString(),
+        tool: 'file_create',
+        params: { path: 'note.md' },
+        result: 'ok',
+        agentName: 'test-agent',
+      });
+
+      expect(result.ok).toBe(false);
+      expect(existsSync(join(outside, 'agent-audit-log.json'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });

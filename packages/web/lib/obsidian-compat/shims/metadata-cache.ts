@@ -4,10 +4,10 @@
  */
 
 import fs from 'fs';
-import path from 'path';
 import yaml from 'js-yaml';
 import { Events } from '../events';
 import type { CachedMetadata, IMetadataCache, TFile, IVault } from '../types';
+import { resolveExistingSafe } from '@/lib/core/security';
 
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n?/;
 const TAG_RE = /(^|\s)(#([\p{L}\p{N}_/-]+))/gu;
@@ -17,7 +17,7 @@ const MARKDOWN_LINK_RE = /\[[^\]]+\]\((?!https?:\/\/)([^)#]+)(?:#[^)]+)?\)/g;
 
 function readMarkdownFile(mindRoot: string, file: TFile): string | null {
   try {
-    return fs.readFileSync(path.join(mindRoot, file.path), 'utf-8');
+    return fs.readFileSync(resolveExistingSafe(mindRoot, file.path), 'utf-8');
   } catch {
     return null;
   }

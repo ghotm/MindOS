@@ -1,6 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import path from 'path';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkTempMindRoot, cleanupMindRoot, seedFile } from './helpers';
 import { SearchIndex } from '@/lib/core/search-index';
+
+vi.mock('@/lib/core/pdf-text', () => ({
+  extractPdfText: vi.fn(() => 'leaked pdf token'),
+}));
 
 describe('SearchIndex', () => {
   let mindRoot: string;
@@ -223,6 +229,22 @@ describe('SearchIndex', () => {
 
       expect(index.getFileCount()).toBe(5);
       expect(index.getCandidates('blockchain')).toContain('Notes/fresh.md');
+    });
+
+    it('addFile ignores PDF paths that resolve through symlinks outside mindRoot', () => {
+      index.rebuild(mindRoot);
+      const outsideRoot = `${mindRoot}-outside`;
+      fs.mkdirSync(outsideRoot, { recursive: true });
+      fs.writeFileSync(path.join(outsideRoot, 'leak.pdf'), 'outside', 'utf-8');
+      fs.symlinkSync(path.join(outsideRoot, 'leak.pdf'), path.join(mindRoot, 'Profile', 'leak.pdf'), 'file');
+
+      try {
+        index.addFile(mindRoot, 'Profile/leak.pdf');
+        expect(index.getFileCount()).toBe(4);
+        expect(index.getCandidates('leaked')).toHaveLength(0);
+      } finally {
+        fs.rmSync(outsideRoot, { recursive: true, force: true });
+      }
     });
 
     it('updateFile updates BM25 docLength stats', () => {

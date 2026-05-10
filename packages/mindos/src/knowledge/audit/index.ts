@@ -1,6 +1,8 @@
 import type { Result } from '../../foundation/shared/index.js';
 import { createError } from '../../foundation/errors/index.js';
+import { resolveExistingSafe } from '../../foundation/security/index.js';
 import type { IFileSystem } from '../storage/index.js';
+import { existsSync } from 'node:fs';
 import * as path from 'path';
 
 // Helper functions for Result type
@@ -77,8 +79,15 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function resolveKnowledgePath(mindRoot: string, relativePath: string): string {
+  if (existsSync(mindRoot)) {
+    return resolveExistingSafe(mindRoot, relativePath);
+  }
+  return path.join(mindRoot, relativePath);
+}
+
 function changeLogPath(mindRoot: string) {
-  return path.join(mindRoot, LOG_DIR_NAME, CHANGE_LOG_FILE_NAME);
+  return resolveKnowledgePath(mindRoot, path.posix.join(LOG_DIR_NAME, CHANGE_LOG_FILE_NAME));
 }
 
 function defaultChangeLogState(): ChangeLogState {
@@ -103,7 +112,12 @@ function normalizeText(value: string | undefined): { value: string | undefined; 
 }
 
 async function readChangeLogState(fs: IFileSystem, mindRoot: string): Promise<ChangeLogState> {
-  const file = changeLogPath(mindRoot);
+  let file: string;
+  try {
+    file = changeLogPath(mindRoot);
+  } catch {
+    return defaultChangeLogState();
+  }
   const existsResult = await fs.exists(file);
   if (!existsResult.ok || !existsResult.value) {
     return defaultChangeLogState();
@@ -138,7 +152,15 @@ async function readChangeLogState(fs: IFileSystem, mindRoot: string): Promise<Ch
 }
 
 async function writeChangeLogState(fs: IFileSystem, mindRoot: string, state: ChangeLogState): Promise<Result<void>> {
-  const file = changeLogPath(mindRoot);
+  let file: string;
+  try {
+    file = changeLogPath(mindRoot);
+  } catch (error) {
+    return err(createError('VALIDATION_ERROR', 'Access denied: invalid change log path', {
+      context: { mindRoot },
+      cause: error as Error,
+    }));
+  }
   const dir = path.dirname(file);
 
   const mkdirResult = await fs.mkdir(dir, true);
@@ -184,7 +206,12 @@ async function importLegacyAgentDiffIfNeeded(
   mindRoot: string,
   state: ChangeLogState
 ): Promise<ChangeLogState> {
-  const legacyPath = path.join(mindRoot, 'Agent-Diff.md');
+  let legacyPath: string;
+  try {
+    legacyPath = resolveKnowledgePath(mindRoot, 'Agent-Diff.md');
+  } catch {
+    return state;
+  }
   const existsResult = await fs.exists(legacyPath);
   if (!existsResult.ok || !existsResult.value) {
     return state;
@@ -406,11 +433,16 @@ function defaultAuditState(): AgentAuditState {
 }
 
 function auditLogPath(mindRoot: string) {
-  return path.join(mindRoot, LOG_DIR_NAME, AUDIT_LOG_FILE_NAME);
+  return resolveKnowledgePath(mindRoot, path.posix.join(LOG_DIR_NAME, AUDIT_LOG_FILE_NAME));
 }
 
 async function readAuditState(fs: IFileSystem, mindRoot: string): Promise<AgentAuditState> {
-  const file = auditLogPath(mindRoot);
+  let file: string;
+  try {
+    file = auditLogPath(mindRoot);
+  } catch {
+    return defaultAuditState();
+  }
   const existsResult = await fs.exists(file);
   if (!existsResult.ok || !existsResult.value) {
     return defaultAuditState();
@@ -439,7 +471,15 @@ async function readAuditState(fs: IFileSystem, mindRoot: string): Promise<AgentA
 }
 
 async function writeAuditState(fs: IFileSystem, mindRoot: string, state: AgentAuditState): Promise<Result<void>> {
-  const file = auditLogPath(mindRoot);
+  let file: string;
+  try {
+    file = auditLogPath(mindRoot);
+  } catch (error) {
+    return err(createError('VALIDATION_ERROR', 'Access denied: invalid audit log path', {
+      context: { mindRoot },
+      cause: error as Error,
+    }));
+  }
   const dir = path.dirname(file);
 
   const mkdirResult = await fs.mkdir(dir, true);
@@ -510,7 +550,12 @@ async function importLegacyMdIfNeeded(
   mindRoot: string,
   state: AgentAuditState
 ): Promise<AgentAuditState> {
-  const legacyPath = path.join(mindRoot, LEGACY_MD_FILE);
+  let legacyPath: string;
+  try {
+    legacyPath = resolveKnowledgePath(mindRoot, LEGACY_MD_FILE);
+  } catch {
+    return state;
+  }
   const existsResult = await fs.exists(legacyPath);
   if (!existsResult.ok || !existsResult.value) {
     return state;
@@ -552,7 +597,12 @@ async function importLegacyJsonlIfNeeded(
   mindRoot: string,
   state: AgentAuditState
 ): Promise<AgentAuditState> {
-  const legacyPath = path.join(mindRoot, LEGACY_JSONL_FILE);
+  let legacyPath: string;
+  try {
+    legacyPath = resolveKnowledgePath(mindRoot, LEGACY_JSONL_FILE);
+  } catch {
+    return state;
+  }
   const existsResult = await fs.exists(legacyPath);
   if (!existsResult.ok || !existsResult.value) {
     return state;

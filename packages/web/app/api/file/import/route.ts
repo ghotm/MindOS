@@ -6,7 +6,7 @@ import path from 'path';
 import { NextRequest, NextResponse } from 'next/server';
 import { revalidatePath } from 'next/cache';
 import { sanitizeFileName, convertToMarkdown } from '@/lib/core/file-convert';
-import { resolveSafe } from '@/lib/core/security';
+import { resolveExistingSafe } from '@/lib/core/security';
 import { organizeAfterImport } from '@/lib/core/organize';
 import { invalidateSearchIndex } from '@/lib/core/search';
 import { effectiveSopRoot } from '@/lib/settings';
@@ -69,7 +69,7 @@ function resolveUniquePath(
   conflict: ConflictMode,
 ): { relPath: string; resolved: string; skipped?: string } {
   let rel = relPath.replace(/\\/g, '/');
-  let resolved = resolveSafe(mindRoot, rel);
+  let resolved = resolveExistingSafe(mindRoot, rel);
   if (!fs.existsSync(resolved)) {
     return { relPath: rel, resolved };
   }
@@ -88,7 +88,7 @@ function resolveUniquePath(
     const stem = ext ? base.slice(0, -ext.length) : base;
     const newBase = `${stem}-${n}${ext}`;
     rel = dir && dir !== '.' ? path.posix.join(dir, newBase) : newBase;
-    resolved = resolveSafe(mindRoot, rel);
+    resolved = resolveExistingSafe(mindRoot, rel);
   }
   return { relPath: rel, resolved };
 }

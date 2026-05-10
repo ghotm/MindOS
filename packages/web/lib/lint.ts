@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { collectAllFiles } from './core/tree';
 import { readFile } from './core/fs-ops';
+import { resolveExistingSafe } from './core/security';
 import { LinkIndex } from './core/link-index';
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -268,7 +269,7 @@ function isWhitelisted(filePath: string): boolean {
 
 function safeStat(mindRoot: string, filePath: string): fs.Stats | null {
   try {
-    return fs.statSync(path.join(mindRoot, filePath));
+    return fs.statSync(resolveExistingSafe(mindRoot, filePath));
   } catch {
     return null;
   }

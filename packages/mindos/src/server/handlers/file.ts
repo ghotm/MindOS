@@ -166,7 +166,7 @@ function handleCheckConflicts(
     for (const originalName of names.split(',').map((name) => name.trim()).filter(Boolean)) {
       const targetName = markdownTargetName(sanitizeFileName(originalName));
       const rel = space ? posix.join(space, targetName) : targetName;
-      if (existsSync(resolveSafe(services.mindRoot, rel))) conflicts.push(originalName);
+      if (existsSync(resolveExistingSafe(services.mindRoot, rel))) conflicts.push(originalName);
     }
     return json({ conflicts });
   } catch (error) {
@@ -186,7 +186,7 @@ function listDetailedSpaces(mindRoot: string): Array<{ name: string; path: strin
       return {
         name: entry.name,
         path: spacePath,
-        fileCount: countFiles(resolveSafe(mindRoot, spacePath)),
+        fileCount: countFiles(resolveExistingSafe(mindRoot, spacePath)),
         description: readSpaceDescription(mindRoot, spacePath),
       };
     })
@@ -214,7 +214,7 @@ function countFiles(absDir: string): number {
   let count = 0;
   const walk = (abs: string) => {
     for (const entry of readdirSync(abs, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.isSymbolicLink()) continue;
       const child = join(abs, entry.name);
       if (entry.isDirectory()) walk(child);
       else count++;
@@ -226,7 +226,7 @@ function countFiles(absDir: string): number {
 
 function readSpaceDescription(mindRoot: string, spacePath: string): string {
   try {
-    const readme = readFileSync(resolveSafe(mindRoot, posix.join(spacePath, 'README.md')), 'utf-8');
+    const readme = readFileSync(resolveExistingSafe(mindRoot, posix.join(spacePath, 'README.md')), 'utf-8');
     return readme
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -578,7 +578,7 @@ function parseAgentAuditJsonLines(raw: string): AgentAuditInput[] {
 }
 
 function appendAgentAuditEvent(mindRoot: string, input: AgentAuditInput): void {
-  const file = join(mindRoot, '.mindos', 'agent-audit-log.json');
+  const file = resolveExistingSafe(mindRoot, '.mindos/agent-audit-log.json');
   let state: { version: 1; events: Array<Record<string, unknown>> } = { version: 1, events: [] };
   try {
     if (existsSync(file)) {

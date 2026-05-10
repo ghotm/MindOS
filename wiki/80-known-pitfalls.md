@@ -3355,6 +3355,96 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/mindos/src/server.test.ts` 覆盖 Product Inbox symlink 拒绝；`packages/web/__tests__/core/inbox.test.ts` 覆盖 Web Inbox ensure/list/archive symlink 拒绝。
 
+### Trash 恢复/删除入口必须同时校验原路径和 trashId（2026-05-10）
+
+**症状**：Web trash 模块把 `filePath` 通过 `resolveSafe()` 后移动到 sibling `.trash`，仍可能跟随 vault 内 symlink 删除 root 外文件；恢复时若 metadata 的 `originalPath` 指向 symlink 父目录，也可能把 trash 内容恢复到 root 外。`trashId` 若包含路径分隔符，还可能绕出 `.trash` / `.trash-meta` 目录。
+
+**根因**：Trash 既处理用户文件路径，也处理持久化 metadata 里的路径和 URL/动作传入的 `trashId`。这三类值都不能只做词法拼接。
+
+**修复**：Trash 文件源路径、恢复目标、copy 目标统一使用 `resolveExistingSafe()`；所有 `trashId` 必须是单段 id，禁止 `/`、`\`、空值和 basename 不一致。
+
+**防回归**：`packages/web/__tests__/core/trash.test.ts` 覆盖 symlink 删除、symlink 恢复和 trashId traversal。
+
+### Product knowledge audit 不能假设 `.mindos` 元数据目录可信（2026-05-10）
+
+**症状**：`@geminilight/mindos` 的 knowledge audit 独立于 Web core 实现，也会读写 `.mindos/change-log.json`、`.mindos/agent-audit-log.json` 和 legacy `Agent-Diff.md` / `.agent-log.json`。若 `.mindos` 是指向 root 外的 symlink，agent activity / change log 写入可能落到 root 外。
+
+**根因**：共享 product 层接受 `IFileSystem`，早期只做 `path.join(mindRoot, ...)`。即使 Web core 已修，同名 product audit 实现仍需独立校验。
+
+**修复**：当 `mindRoot` 是真实本地目录时，knowledge audit 所有 metadata/legacy 路径统一走 `resolveExistingSafe()`；in-memory test FS 继续使用原来的虚拟路径。
+
+**防回归**：`packages/mindos/src/knowledge/audit/audit-log.test.ts` 使用 `LocalFileSystem` 覆盖 symlinked `.mindos` 拒绝写入。
+
+### Web 直接文件助手不能只在 API 层防 symlink（2026-05-10）
+
+**症状**：CSV 行追加、目录导出这类 core helper 会直接调用 `appendFileSync`、`readFileSync`、`readdirSync`。如果只用 `resolveSafe()` 做词法检查，vault 内的 symlink parent 可以让追加或导出访问 root 外文件。
+
+**根因**：API handler 或上层 workflow 的校验不能替代 core helper 的边界检查；任何直接触碰真实文件系统的 helper 都必须自己校验 nearest existing path 的 realpath。
+
+**修复**：CSV append 与 export collect 入口改用 `resolveExistingSafe()`，先拒绝 symlink 指向 root 外的入口再读写/遍历。
+
+**防回归**：`packages/web/__tests__/core/csv.test.ts` 覆盖 symlink parent append 拒绝；`packages/web/__tests__/core/export.test.ts` 覆盖 symlink export root 拒绝。
+
+### Product Server handler 也要独立做 realpath containment（2026-05-10）
+
+**症状**：Product Server 的静态 artifact、上传冲突检查、space 描述读取、legacy `.agent-log.json` 写入不经过 Web core helper。若这些 handler 继续使用 `resolveSafe()` 或 `path.join(mindRoot, ...)` 后直接 `readFileSync` / `writeFileSync`，symlinked static asset、space README 或 `.mindos` 元数据目录会访问 root 外文件。
+
+**根因**：monorepo 里 Web 和 Product Server 有两套运行入口。修 Web helper 不会自动保护 npm CLI / MCP HTTP / static runtime handler。
+
+**修复**：Product Server handler 中会直接触碰真实文件系统的入口改为 `resolveExistingSafe()`；space 文件计数跳过 symlink；legacy audit metadata 写入先校验 `.mindos` realpath。
+
+**防回归**：`packages/mindos/src/server.test.ts` 覆盖 symlinked README 不泄露描述、conflict check 拒绝 symlink space、legacy audit 拒绝 symlinked `.mindos`、static artifact 拒绝 symlink asset。
+
+### Import / organize / search 后台路径和前台文件操作一样危险（2026-05-10）
+
+**症状**：文件导入会根据 `targetSpace` 创建父目录并写入文件；导入后的 organize 会自动更新 README；搜索索引会单独解析 PDF。若这些后台入口只用 `resolveSafe()`，symlinked target space 或 PDF 文件可以让后台任务写入、读取或索引 root 外内容。
+
+**根因**：后台 workflow 常被当作“内部调用”，但输入仍来自用户路径或从文件树事件传入。只要最终触碰真实文件系统，就必须在该 helper 内做 realpath containment。
+
+**修复**：import unique path、organize README/related-file 读取、search index PDF 解析统一改用 `resolveExistingSafe()`。
+
+**防回归**：`packages/web/__tests__/api/file-import.test.ts` 覆盖 symlinked target space 导入拒绝；`packages/web/__tests__/core/organize.test.ts` 覆盖 symlinked README 不写外部；`packages/web/__tests__/core/search-index.test.ts` 覆盖 symlinked PDF 不进入增量索引。
+
+### 底层文件系统 wrapper 和 server action 不能只做词法隔离（2026-05-10）
+
+**症状**：`RootedFileSystem`、Space 初始化回滚、Space overview、compile、git helper、二进制 view 检查都可能在不同入口直接触碰本地文件。如果只检查 `../` / 绝对路径，symlinked space 仍会把写入、读取或存在性判断带到 root 外。
+
+**根因**：越底层的 wrapper 越容易被多个运行入口复用；一旦这里只做 lexical containment，上层很难逐个补齐。
+
+**修复**：真实本地 root 存在时，`RootedFileSystem` 改用 `resolveExistingSafe()`；Space init revert、compile、git helper、binary view existence、Product Server space overview 改用 realpath containment。虚拟/in-memory root 继续保留原有词法路径行为。
+
+**防回归**：`packages/mindos/src/knowledge/storage/rooted.test.ts` 覆盖 LocalFileSystem symlink parent 写入拒绝；`packages/web/__tests__/actions/revert-space-init-path.test.ts` 覆盖 symlinked space 回滚拒绝；`packages/mindos/src/server.test.ts` 覆盖 Product Server space overview symlink 拒绝。
+
+### Sync conflict / gitignore 文件操作不能信任冲突路径（2026-05-10）
+
+**症状**：sync handler 会读取/写入 `.gitignore`，也会读取 `file` 与 `file.sync-conflict` 来预览或解决冲突。若 `.gitignore` 或冲突文件父目录是 symlink，sync 操作可能覆盖 root 外文件。
+
+**根因**：sync 的文件路径来自持久化 conflict state 或请求 payload，不是 git 自身的可信输出；保存 `.gitignore` 也会跟随同名 symlink。
+
+**修复**：sync `.gitignore` 和 conflict path 统一通过 `resolveExistingSafe()`；symlink escape 在 preview/resolve 中视为 invalid path，在 `.gitignore` 保存中返回 403。
+
+**防回归**：`packages/mindos/src/server.test.ts` 覆盖 symlinked `.gitignore` 保存拒绝、symlinked conflict preview/resolve 拒绝且不修改外部文件。
+
+### Workflows / search / lint / Obsidian shim 也会绕过主文件 API（2026-05-10）
+
+**症状**：workflow 创建直接写 `.mindos/workflows`，搜索和 lint 会在排序/过滤阶段 `stat` 文件，Obsidian compatibility shim 会直接读 markdown 或 stat 文件。如果这些路径绕开 core fs helper，symlinked metadata 目录或文件会造成外部读写/元数据泄露。
+
+**根因**：这些模块是“辅助体验”入口，不一定走 `/api/file` 或 `fs-ops` 的统一读写路径。
+
+**修复**：workflow 目录、workflow 模板、search mtime 过滤、index freshness check、lint stat、homepage existence check、recent-file mtime、Obsidian metadata/vault stat 全部改为 `resolveExistingSafe()`。
+
+**防回归**：`packages/mindos/src/server.test.ts` 覆盖 symlinked `.mindos` 下 workflow 创建拒绝；现有 search-index / vault / lint 相关测试继续覆盖正常路径和类型检查。
+
+### User skill 目录是可写入口，不能跟随 `.skills` symlink（2026-05-10）
+
+**症状**：Product skills handler 会在 `mindRoot/.skills/<name>/SKILL.md` 创建、更新、删除用户 skill。若 `.skills` 是指向 root 外的 symlink，skill 写入会落到外部目录；列表也可能暴露外部 skill。
+
+**根因**：`.skills` 看起来像内部目录，但位于用户知识库内，仍然是用户可控路径。
+
+**修复**：`mindos-user` skill root 若自身是 symlink 则不参与列表；create/update/delete 前通过 `resolveExistingSafe(mindRoot, '.skills')` 校验。mindRoot 首次不存在时保留原有创建行为。
+
+**防回归**：`packages/mindos/src/server.test.ts` 覆盖 symlinked `.skills` 不列出外部 skill，且 create 返回 403、不写外部目录。
+
 ### Monorepo 迁移后 workflow 仍引用旧顶层目录（2026-04-27）
 
 **症状**：GitHub Actions 在发版或构建 Desktop/Mobile 时直接失败，常见报错是 `cd app: No such file or directory`、`cd mcp: No such file or directory`、`cd desktop: No such file or directory`。

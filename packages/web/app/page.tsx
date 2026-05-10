@@ -1,7 +1,7 @@
 import fs from 'fs';
-import path from 'path';
 import { readSettings } from '@/lib/settings';
 import { getRecentlyModified, getFileContent, getFileTree, getMindRoot } from '@/lib/fs';
+import { resolveExistingSafe } from '@/lib/core/security';
 import { getAllRenderers } from '@/lib/renderers/registry';
 import HomeContent from '@/components/HomeContent';
 import ClientRedirect from '@/components/ClientRedirect';
@@ -58,7 +58,7 @@ function getExistingFiles(paths: string[]): string[] {
     const root = getMindRoot();
     return paths.filter(p => {
       try {
-        return fs.existsSync(path.join(root, p));
+        return fs.existsSync(resolveExistingSafe(root, p));
       } catch { return false; }
     });
   } catch {

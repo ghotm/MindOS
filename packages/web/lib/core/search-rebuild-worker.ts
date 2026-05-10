@@ -9,7 +9,7 @@
 import { parentPort, workerData } from 'worker_threads';
 import { collectAllFiles } from './tree';
 import { readFile } from './fs-ops';
-import { resolveSafe } from './security';
+import { resolveExistingSafe } from './security';
 import { extractPdfText } from './pdf-text';
 import { CJK_CHAR_REGEX } from './cjk';
 import path from 'path';
@@ -90,7 +90,7 @@ function rebuild(mindRoot: string): PersistedIndex {
 
     if (ext === '.pdf') {
       try {
-        const resolved = resolveSafe(mindRoot, filePath);
+        const resolved = resolveExistingSafe(mindRoot, filePath);
         content = extractPdfText(resolved);
         if (!content) continue;
       } catch { continue; }

@@ -25,6 +25,23 @@ describe('revertSpaceInitAction path safety', () => {
       fs.rmSync(outsideDir, { recursive: true, force: true });
     }
   });
+
+  it('does not write scaffold files through a symlinked space outside MIND_ROOT', async () => {
+    const root = getTestMindRoot();
+    const outsideDir = `${root}-outside`;
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.symlinkSync(outsideDir, path.join(root, 'Linked'), 'dir');
+
+    try {
+      const result = await revertSpaceInitAction('Linked', 'Outside', 'Should not write');
+
+      expect(result.success).toBe(false);
+      expect(fs.existsSync(path.join(outsideDir, 'README.md'))).toBe(false);
+      expect(fs.existsSync(path.join(outsideDir, 'INSTRUCTION.md'))).toBe(false);
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('createFileAction path safety', () => {

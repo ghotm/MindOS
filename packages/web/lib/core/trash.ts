@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { resolveSafe } from './security';
+import { resolveExistingSafe } from './security';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -36,6 +36,12 @@ function ensureDirs(mindRoot: string): void {
   fs.mkdirSync(metaRoot(mindRoot), { recursive: true });
 }
 
+function assertTrashId(id: string): void {
+  if (!id || id.includes('/') || id.includes('\\') || path.basename(id) !== id) {
+    throw new Error('Invalid trash id');
+  }
+}
+
 /** Sanitize filename for use as trash ID — strip all unsafe characters */
 function generateId(fileName: string): string {
   const safe = fileName.replace(/[^a-zA-Z0-9._\-\u4e00-\u9fff]/g, '_');
@@ -43,11 +49,13 @@ function generateId(fileName: string): string {
 }
 
 function writeMeta(mindRoot: string, meta: TrashMeta): void {
+  assertTrashId(meta.id);
   const metaPath = path.join(metaRoot(mindRoot), `${meta.id}.json`);
   fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
 }
 
 function readMeta(mindRoot: string, id: string): TrashMeta | null {
+  assertTrashId(id);
   const metaPath = path.join(metaRoot(mindRoot), `${id}.json`);
   if (!fs.existsSync(metaPath)) return null;
   try {
@@ -58,6 +66,7 @@ function readMeta(mindRoot: string, id: string): TrashMeta | null {
 }
 
 function deleteMeta(mindRoot: string, id: string): void {
+  assertTrashId(id);
   const metaPath = path.join(metaRoot(mindRoot), `${id}.json`);
   try { fs.unlinkSync(metaPath); } catch { /* already gone */ }
 }
@@ -91,7 +100,7 @@ function safeMove(src: string, dest: string, isDir: boolean): void {
 
 export function moveToTrash(mindRoot: string, filePath: string): TrashMeta {
   ensureDirs(mindRoot);
-  const src = resolveSafe(mindRoot, filePath);
+  const src = resolveExistingSafe(mindRoot, filePath);
   if (!fs.existsSync(src)) throw new Error(`File not found: ${filePath}`);
 
   const isDir = fs.statSync(src).isDirectory();
@@ -116,13 +125,14 @@ export function moveToTrash(mindRoot: string, filePath: string): TrashMeta {
 }
 
 export function restoreFromTrash(mindRoot: string, trashId: string, overwrite = false): { restoredPath: string } {
+  assertTrashId(trashId);
   const meta = readMeta(mindRoot, trashId);
   if (!meta) throw new Error('Item not found in trash');
 
   const trashPath = path.join(trashRoot(mindRoot), trashId);
   if (!fs.existsSync(trashPath)) throw new Error('Trash file missing from disk');
 
-  const dest = resolveSafe(mindRoot, meta.originalPath);
+  const dest = resolveExistingSafe(mindRoot, meta.originalPath);
 
   // Check for conflicts
   if (fs.existsSync(dest) && !overwrite) {
@@ -148,6 +158,7 @@ export function restoreFromTrash(mindRoot: string, trashId: string, overwrite = 
 }
 
 export function restoreAsCopy(mindRoot: string, trashId: string): { restoredPath: string } {
+  assertTrashId(trashId);
   const meta = readMeta(mindRoot, trashId);
   if (!meta) throw new Error('Item not found in trash');
 
@@ -160,12 +171,12 @@ export function restoreAsCopy(mindRoot: string, trashId: string): { restoredPath
   const base = path.basename(meta.fileName, ext);
   let copyPath = path.join(dir, `${base} (copy)${ext}`);
   let counter = 2;
-  while (fs.existsSync(path.join(mindRoot, copyPath))) {
+  while (fs.existsSync(resolveExistingSafe(mindRoot, copyPath))) {
     copyPath = path.join(dir, `${base} (copy ${counter})${ext}`);
     counter++;
   }
 
-  const dest = resolveSafe(mindRoot, copyPath);
+  const dest = resolveExistingSafe(mindRoot, copyPath);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   safeMove(trashPath, dest, meta.isDirectory);
 
@@ -174,6 +185,7 @@ export function restoreAsCopy(mindRoot: string, trashId: string): { restoredPath
 }
 
 export function permanentlyDelete(mindRoot: string, trashId: string): void {
+  assertTrashId(trashId);
   const trashPath = path.join(trashRoot(mindRoot), trashId);
   try {
     if (fs.existsSync(trashPath)) {
@@ -202,6 +214,7 @@ export function listTrash(mindRoot: string): TrashMeta[] {
   for (const file of files) {
     try {
       const meta = JSON.parse(fs.readFileSync(path.join(metaDir, file), 'utf-8')) as TrashMeta;
+      assertTrashId(meta.id);
       // Verify the trash file still exists on disk
       const trashPath = path.join(trashRoot(mindRoot), meta.id);
       if (fs.existsSync(trashPath)) {

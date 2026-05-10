@@ -567,6 +567,33 @@ describe('MindOS product server contract', () => {
     });
   });
 
+  it('does not read Product Server space descriptions through symlinked README files', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-spaces-readme-symlink-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-spaces-readme-outside-'));
+    mkdirSync(join(root, 'SpaceA'), { recursive: true });
+    writeFileSync(join(root, 'SpaceA', 'note.md'), 'hello', 'utf-8');
+    writeFileSync(join(outside, 'README.md'), '# Outside\n\nLeaked description.\n', 'utf-8');
+    symlinkSync(join(outside, 'README.md'), join(root, 'SpaceA', 'README.md'), 'file');
+
+    const res = handleFileGet(new URLSearchParams('op=list_spaces'), {
+      mindRoot: root,
+      readTextFile: () => '',
+      readLines: () => [],
+      listSpaces: () => [],
+      listDirectories: () => [],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      spaces: [expect.objectContaining({
+        name: 'SpaceA',
+        path: 'SpaceA',
+        fileCount: 1,
+        description: '',
+      })],
+    });
+  });
+
   it('checks upload filename conflicts in the Product Server file handler', () => {
     const root = mkdtempSync(join(tmpdir(), 'mindos-file-conflicts-'));
     mkdirSync(join(root, 'Inbox'), { recursive: true });
@@ -582,6 +609,24 @@ describe('MindOS product server contract', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ conflicts: ['hello.md'] });
+  });
+
+  it('rejects Product Server conflict checks through symlinked spaces outside mindRoot', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-file-conflict-symlink-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-file-conflict-symlink-outside-'));
+    writeFileSync(join(outside, 'hello.md'), 'outside', 'utf-8');
+    symlinkSync(outside, join(root, 'Linked'), 'dir');
+
+    const res = handleFileGet(new URLSearchParams('op=check_conflicts&space=Linked&names=hello.md'), {
+      mindRoot: root,
+      readTextFile: () => '',
+      readLines: () => [],
+      listSpaces: () => [],
+      listDirectories: () => [],
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Access denied' });
   });
 
   it('runs Product Server file write operations through knowledge operation guardrails', async () => {
@@ -627,6 +672,24 @@ describe('MindOS product server contract', () => {
 
     expect(created.status).toBe(403);
     expect(existsSync(join(outside, 'new.md'))).toBe(false);
+  });
+
+  it('rejects Product Server legacy agent audit writes through symlinked metadata directories', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-file-audit-symlink-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-file-audit-symlink-outside-'));
+    symlinkSync(outside, join(root, '.mindos'), 'dir');
+
+    const res = await handleFilePost(
+      {
+        op: 'append_to_file',
+        path: '.agent-log.json',
+        content: '{"tool":"legacy","params":{},"result":"ok"}\n',
+      },
+      { mindRoot: root },
+    );
+
+    expect(res.status).toBe(403);
+    expect(existsSync(join(outside, 'agent-audit-log.json'))).toBe(false);
   });
 
   it('rejects Product runtime reads through symlinks that resolve outside mindRoot', () => {
@@ -1005,6 +1068,32 @@ describe('MindOS product server contract', () => {
       status: 200,
       body: { ok: true },
     });
+  });
+
+  it('rejects product skill writes through symlinked user skill directories', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-skill-symlink-root-'));
+    const mindRoot = join(root, 'mind');
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-skill-symlink-outside-'));
+    mkdirSync(mindRoot, { recursive: true });
+    symlinkSync(outside, join(mindRoot, '.skills'), 'dir');
+
+    const services = {
+      mindRoot,
+      skillRoots: [
+        { path: join(mindRoot, '.skills'), source: 'user' as const, origin: 'mindos-user' as const, editable: true },
+      ],
+      readSettings: () => ({}),
+      writeSettings: () => {},
+    };
+
+    expect(handleSkillsGet({
+      skillRoots: services.skillRoots,
+    }).body.skills).toEqual([]);
+    expect(handleSkillsPost({ action: 'create', name: 'external-skill' }, services)).toMatchObject({
+      status: 403,
+      body: { error: 'Access denied' },
+    });
+    expect(existsSync(join(outside, 'external-skill', 'SKILL.md'))).toBe(false);
   });
 
   it('resets auth tokens from the product runtime', () => {
@@ -1918,6 +2007,18 @@ describe('MindOS product server contract', () => {
     });
   });
 
+  it('rejects Product Server space overview through symlinked spaces outside mindRoot', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-space-overview-symlink-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-space-overview-symlink-outside-'));
+    writeFileSync(join(outside, 'secret.md'), 'outside');
+    symlinkSync(outside, join(root, 'Linked'), 'dir');
+
+    expect(handleSpaceOverviewGet(new URLSearchParams('space=Linked'), { mindRoot: root })).toMatchObject({
+      status: 403,
+      body: { error: 'Access denied' },
+    });
+  });
+
   it('handles git status, history, and show through injectable product services', async () => {
     const services = {
       isGitRepo: async () => true,
@@ -2363,6 +2464,41 @@ describe('MindOS product server contract', () => {
     });
   });
 
+  it('rejects sync file operations through symlinks outside mindRoot', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-sync-symlink-root-'));
+    const mindRoot = join(root, 'mind');
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-sync-symlink-outside-'));
+    mkdirSync(mindRoot, { recursive: true });
+    writeFileSync(join(outside, '.gitignore'), 'outside\n', 'utf-8');
+    writeFileSync(join(outside, 'note.md'), 'outside local', 'utf-8');
+    writeFileSync(join(outside, 'note.md.sync-conflict'), 'outside remote', 'utf-8');
+    symlinkSync(join(outside, '.gitignore'), join(mindRoot, '.gitignore'), 'file');
+    symlinkSync(outside, join(mindRoot, 'Linked'), 'dir');
+
+    const services = {
+      readConfig: () => ({ mindRoot, sync: { enabled: true } }),
+      writeConfig: () => {},
+      readState: () => ({ conflicts: [{ file: 'Linked/note.md' }] }),
+      writeState: () => {},
+    };
+
+    expect(await handleSyncPost({ action: 'gitignore-save', content: 'node_modules\n' }, services)).toMatchObject({
+      status: 403,
+      body: { error: 'Access denied' },
+    });
+    expect(readFileSync(join(outside, '.gitignore'), 'utf-8')).toBe('outside\n');
+
+    expect(await handleSyncPost({ action: 'conflict-preview', remote: 'Linked/note.md' }, services)).toMatchObject({
+      status: 400,
+      body: { error: 'Invalid file path' },
+    });
+    expect(await handleSyncPost({ action: 'resolve-conflict', remote: 'Linked/note.md', branch: 'keep-remote' }, services)).toMatchObject({
+      status: 400,
+      body: { error: 'Invalid file path' },
+    });
+    expect(readFileSync(join(outside, 'note.md'), 'utf-8')).toBe('outside local');
+  });
+
   it('reads sync git metadata through argv-safe git commands', () => {
     const source = readFileSync(join(__dirname, 'server', 'handlers', 'sync.ts'), 'utf-8');
 
@@ -2735,6 +2871,22 @@ describe('MindOS product server contract', () => {
     });
   });
 
+  it('rejects workflow creation through symlinked metadata directories', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-workflows-symlink-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-workflows-symlink-outside-'));
+    symlinkSync(outside, join(root, '.mindos'), 'dir');
+
+    expect(handleWorkflowsGet({ mindRoot: root })).toMatchObject({
+      status: 200,
+      body: { workflows: [] },
+    });
+    expect(handleWorkflowsPost({ name: 'External Flow' }, { mindRoot: root })).toMatchObject({
+      status: 403,
+      body: { error: 'Access denied' },
+    });
+    expect(existsSync(join(outside, 'workflows', 'External Flow.flow.yaml'))).toBe(false);
+  });
+
   it('handles tree version through an injectable product service', () => {
     const res = handleTreeVersion({ getTreeVersion: () => 123 });
     expect(res).toMatchObject({ status: 200, body: { v: 123 } });
@@ -2827,6 +2979,20 @@ describe('MindOS product server contract', () => {
     expect(asset?.headers?.['Cache-Control']).toContain('immutable');
 
     expect(handleStaticArtifact({ staticRoot, path: '/../secret.js' })).toMatchObject({
+      status: 403,
+      body: { error: 'Access denied' },
+    });
+  });
+
+  it('rejects static Web artifacts through symlinks outside the static root', () => {
+    const staticRoot = mkdtempSync(join(tmpdir(), 'mindos-static-web-symlink-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-static-web-outside-'));
+    mkdirSync(join(staticRoot, 'assets'), { recursive: true });
+    writeFileSync(join(staticRoot, 'index.html'), '<main>MindOS</main>');
+    writeFileSync(join(outside, 'secret.js'), 'window.secret=1');
+    symlinkSync(outside, join(staticRoot, 'assets', 'linked'), 'dir');
+
+    expect(handleStaticArtifact({ staticRoot, path: '/assets/linked/secret.js' })).toMatchObject({
       status: 403,
       body: { error: 'Access denied' },
     });

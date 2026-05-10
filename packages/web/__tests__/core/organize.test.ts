@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 import { mkTempMindRoot, cleanupMindRoot, seedFile, readSeeded } from './helpers';
 import { organizeAfterImport } from '@/lib/core/organize';
 
@@ -26,6 +28,21 @@ describe('organizeAfterImport', () => {
 
     const result = organizeAfterImport(mindRoot, ['Notes/imported.md'], 'Notes');
     expect(result.readmeUpdated).toBe(false);
+  });
+
+  it('does not update README through a symlinked target space outside mindRoot', () => {
+    const outsideRoot = `${mindRoot}-outside`;
+    fs.mkdirSync(outsideRoot, { recursive: true });
+    fs.writeFileSync(path.join(outsideRoot, 'README.md'), '# Outside\n', 'utf-8');
+    fs.symlinkSync(outsideRoot, path.join(mindRoot, 'Linked'), 'dir');
+
+    try {
+      const result = organizeAfterImport(mindRoot, ['Linked/imported.md'], 'Linked');
+      expect(result.readmeUpdated).toBe(false);
+      expect(fs.readFileSync(path.join(outsideRoot, 'README.md'), 'utf-8')).toBe('# Outside\n');
+    } finally {
+      fs.rmSync(outsideRoot, { recursive: true, force: true });
+    }
   });
 
   it('skips readme update for root imports (empty targetSpace)', () => {

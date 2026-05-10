@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolveExistingSafe } from '../../foundation/security/index.js';
 import { json, type MindosServerResponse } from '../response.js';
 
 export const WORKFLOWS_DIR = '.mindos/workflows';
@@ -47,23 +48,34 @@ export function handleWorkflowsPost(
 
   const safeName = name.replace(/[/\\:*?"<>|]/g, '-');
   const fileName = `${safeName}.flow.yaml`;
-  const dir = join(services.mindRoot, WORKFLOWS_DIR);
-  mkdirSync(dir, { recursive: true });
-  const fullPath = join(dir, fileName);
-  if (existsSync(fullPath)) {
-    return json({ error: 'Workflow already exists' }, { status: 409 });
-  }
+  try {
+    const dir = resolveExistingSafe(services.mindRoot, WORKFLOWS_DIR);
+    mkdirSync(dir, { recursive: true });
+    const fullPath = resolveExistingSafe(services.mindRoot, `${WORKFLOWS_DIR}/${fileName}`);
+    if (existsSync(fullPath)) {
+      return json({ error: 'Workflow already exists' }, { status: 409 });
+    }
 
-  const templateName = body && typeof body === 'object' && typeof (body as { template?: unknown }).template === 'string'
-    ? (body as { template: string }).template
-    : 'blank';
-  const content = resolveWorkflowTemplate(services.mindRoot, templateName, name);
-  writeFileSync(fullPath, content, 'utf-8');
-  return json({ path: `${WORKFLOWS_DIR}/${fileName}` });
+    const templateName = body && typeof body === 'object' && typeof (body as { template?: unknown }).template === 'string'
+      ? (body as { template: string }).template
+      : 'blank';
+    const content = resolveWorkflowTemplate(services.mindRoot, templateName, name);
+    writeFileSync(fullPath, content, 'utf-8');
+    return json({ path: `${WORKFLOWS_DIR}/${fileName}` });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/access denied|outside root|absolute paths/i.test(message)) return json({ error: 'Access denied' }, { status: 403 });
+    return json({ error: message }, { status: 500 });
+  }
 }
 
 function listWorkflows(mindRoot: string): WorkflowListItem[] {
-  const dir = join(mindRoot, WORKFLOWS_DIR);
+  let dir: string;
+  try {
+    dir = resolveExistingSafe(mindRoot, WORKFLOWS_DIR);
+  } catch {
+    return [];
+  }
   if (!existsSync(dir)) return [];
 
   const items: WorkflowListItem[] = [];
@@ -106,13 +118,14 @@ function parseWorkflowYamlSummary(content: string, fileName: string): { title: s
 
 function resolveWorkflowTemplate(mindRoot: string, templateName: string, title: string): string {
   if (templateName !== 'blank') {
-    const dir = join(mindRoot, WORKFLOWS_DIR);
     try {
+      const dir = resolveExistingSafe(mindRoot, WORKFLOWS_DIR);
       const templateFile = readdirSync(dir).find((fileName) =>
         fileName.toLowerCase().includes(templateName.toLowerCase()) && /\.workflow\.(yaml|yml)$/i.test(fileName)
       );
       if (templateFile) {
-        return readFileSync(join(dir, templateFile), 'utf-8').replace(/^title:.*$/m, `title: ${title}`);
+        const templatePath = resolveExistingSafe(mindRoot, `${WORKFLOWS_DIR}/${templateFile}`);
+        return readFileSync(templatePath, 'utf-8').replace(/^title:.*$/m, `title: ${title}`);
       }
     } catch {
       // Fall through to blank template.

@@ -1,11 +1,17 @@
-import { defineConfig } from 'electron-vite';
-import { resolve } from 'path';
+import { builtinModules } from 'node:module';
+import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
+import { resolve } from 'node:path';
+
+const nodeBuiltins = [...builtinModules, ...builtinModules.map((name) => `node:${name}`)];
+const electronMainExternal = ['electron', ...nodeBuiltins];
 
 export default defineConfig({
   main: {
+    plugins: [externalizeDepsPlugin({ include: ['electron'] })],
     build: {
       outDir: 'dist-electron/main',
       rollupOptions: {
+        external: electronMainExternal,
         input: {
           index: resolve(__dirname, 'src/main.ts'),
         },
@@ -22,9 +28,11 @@ export default defineConfig({
     },
   },
   preload: {
+    plugins: [externalizeDepsPlugin({ include: ['electron'] })],
     build: {
       outDir: 'dist-electron/preload',
       rollupOptions: {
+        external: electronMainExternal,
         input: {
           index: resolve(__dirname, 'src/preload.ts'),
           'connect-preload': resolve(__dirname, 'src/connect-preload.ts'),

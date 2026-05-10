@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { LocalFileSystem } from './local.js';
 import { MemoryFileSystem } from './memory.js';
 import { RootedFileSystem } from './rooted.js';
 
@@ -52,5 +56,23 @@ describe('RootedFileSystem', () => {
     expect((await fs.move('safe.md', '../safe.md')).ok).toBe(false);
     expect((await fs.move('../evil.md', 'safe.md')).ok).toBe(false);
     expect((await base.exists('/vault/safe.md')).value).toBe(true);
+  });
+
+  it('rejects local filesystem writes through symlinked parents outside the root', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-rooted-fs-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-rooted-fs-outside-'));
+    writeFileSync(join(outside, 'leak.md'), 'outside', 'utf-8');
+    symlinkSync(outside, join(root, 'Linked'), 'dir');
+
+    try {
+      const fs = new RootedFileSystem(root, new LocalFileSystem());
+      const result = await fs.writeFile('Linked/leak.md', 'changed');
+
+      expect(result.ok).toBe(false);
+      expect(readFileSync(join(outside, 'leak.md'), 'utf-8')).toBe('outside');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });

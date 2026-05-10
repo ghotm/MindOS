@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { resolveSafe } from './security';
+import { resolveExistingSafe } from './security';
 import { MindOSError, ErrorCodes } from '@/lib/errors';
 
 /**
@@ -9,8 +9,8 @@ import { MindOSError, ErrorCodes } from '@/lib/errors';
  * Returns the new total row count.
  */
 export function appendCsvRow(mindRoot: string, filePath: string, row: string[]): { newRowCount: number } {
-  const resolved = resolveSafe(mindRoot, filePath);
   if (!filePath.endsWith('.csv')) throw new MindOSError(ErrorCodes.INVALID_FILE_TYPE, 'Only .csv files support row append', { filePath });
+  const resolved = resolveExistingSafe(mindRoot, filePath);
 
   const escaped = row.map((cell) => {
     if (cell.includes(',') || cell.includes('"') || cell.includes('\n')) {

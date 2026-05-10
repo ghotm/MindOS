@@ -5,7 +5,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { resolveSafe } from '@/lib/core/security';
+import { resolveExistingSafe, resolveSafe } from '@/lib/core/security';
 import { Events } from '../events';
 import { IVault, TFile, TFolder, TAbstractFile } from '../types';
 
@@ -34,7 +34,7 @@ export class TFileImpl extends TAbstractFileImpl implements TFile {
 
     // Stat the file to get timestamps
     try {
-      const stats = fs.statSync(path.join(mindRoot, filePath));
+      const stats = fs.statSync(resolveExistingSafe(mindRoot, filePath));
       this.stat = {
         ctime: stats.birthtimeMs,
         mtime: stats.mtimeMs,

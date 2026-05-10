@@ -1,5 +1,5 @@
 import { posix } from 'node:path';
-import { resolveSafe } from '../../foundation/security/index.js';
+import { resolveExistingSafe } from '../../foundation/security/index.js';
 import { queryValue, type MindosRequestQuery } from '../context.js';
 import { collectAllFilesFromMindRoot } from '../runtime.js';
 import { json, privateCacheHeaders, type MindosServerResponse } from '../response.js';
@@ -21,7 +21,7 @@ export function handleSpaceOverviewGet(
   if (!space) return json({ error: 'space parameter required' }, { status: 400 });
 
   try {
-    resolveSafe(services.mindRoot, space);
+    resolveExistingSafe(services.mindRoot, space);
   } catch {
     return json({ error: 'Access denied' }, { status: 403 });
   }

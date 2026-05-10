@@ -31,4 +31,14 @@ describe('Desktop release packaging contract', () => {
     expect(runtimePrep).toContain('targetNodeArch');
     expect(runtimePrep).toContain('platform: `${targetNodePlatform}-${targetNodeArch}`');
   });
+
+  it('keeps Electron main and preload builds externalized for Node runtime modules', () => {
+    const config = readText('packages/desktop/electron.vite.config.ts');
+
+    expect(config).toContain('externalizeDepsPlugin');
+    expect(config).toContain('nodeBuiltins');
+    expect(config).toContain("include: ['electron']");
+    expect(config).toContain('plugins: [externalizeDepsPlugin');
+    expect(config).toContain('external: electronMainExternal');
+  });
 });

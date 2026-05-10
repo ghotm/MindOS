@@ -1,7 +1,7 @@
 import { notFound } from 'next/navigation';
 import fs from 'fs';
 import { getFileContent, saveFileContent, isDirectory, getDirEntries, createFile, getFileTree, getSpacePreview, getMindRoot } from '@/lib/fs';
-import { resolveSafe } from '@/lib/core/security';
+import { resolveExistingSafe } from '@/lib/core/security';
 import type { FileNode } from '@/lib/types';
 import ViewPageClient from './ViewPageClient';
 import DirView from '@/components/DirView';
@@ -73,7 +73,7 @@ export default async function ViewPage({ params }: PageProps) {
   if (BINARY_EXTENSIONS.has(extension)) {
     let binaryExists = false;
     try {
-      const resolved = resolveSafe(getMindRoot(), filePath);
+      const resolved = resolveExistingSafe(getMindRoot(), filePath);
       binaryExists = fs.existsSync(resolved);
     } catch { /* path traversal → not found */ }
 

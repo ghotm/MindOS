@@ -2,7 +2,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { resolveSafe } from '../../foundation/security/index.js';
+import { resolveExistingSafe } from '../../foundation/security/index.js';
 import { json, type MindosServerResponse } from '../response.js';
 
 export type MindosSyncConfig = Record<string, any> & {
@@ -199,7 +199,7 @@ async function handleSyncNow(
 
 function handleGitignoreGet(mindRoot: string): MindosServerResponse<{ content: string }> {
   try {
-    return json({ content: readFileSync(join(mindRoot, '.gitignore'), 'utf-8') });
+    return json({ content: readFileSync(resolveExistingSafe(mindRoot, '.gitignore'), 'utf-8') });
   } catch {
     return json({ content: '' });
   }
@@ -212,8 +212,14 @@ function handleGitignoreSave(
   if (typeof payload.content !== 'string') {
     return json({ error: 'Missing content' }, { status: 400 });
   }
-  writeFileSync(join(mindRoot, '.gitignore'), payload.content, 'utf-8');
-  return json({ ok: true });
+  try {
+    writeFileSync(resolveExistingSafe(mindRoot, '.gitignore'), payload.content, 'utf-8');
+    return json({ ok: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/access denied|outside root|absolute paths/i.test(message)) return json({ error: 'Access denied' }, { status: 403 });
+    return json({ error: message }, { status: 500 });
+  }
 }
 
 function handleResolveConflict(
@@ -376,7 +382,7 @@ function isPathWithinMindRoot(mindRoot: string, filePath: string): boolean {
 
 function resolveMindRootPath(mindRoot: string, filePath: string): string | null {
   try {
-    return resolveSafe(mindRoot, filePath);
+    return resolveExistingSafe(mindRoot, filePath);
   } catch {
     return null;
   }

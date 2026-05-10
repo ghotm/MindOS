@@ -1,5 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+const testState = vi.hoisted(() => ({
+  mindRoot: '',
+}));
 
 vi.mock('@/lib/compile', () => ({
   collectSpaceFiles: vi.fn().mockReturnValue([
@@ -14,12 +21,22 @@ vi.mock('@/lib/compile', () => ({
 }));
 
 vi.mock('@/lib/fs', () => ({
-  getMindRoot: () => '/tmp/fake-mind-root',
+  getMindRoot: () => testState.mindRoot,
 }));
 
 const { GET, POST } = await import('@/app/api/space-overview/route');
 
 describe('GET /api/space-overview', () => {
+  beforeEach(() => {
+    testState.mindRoot = mkdtempSync(join(tmpdir(), 'mindos-space-overview-route-'));
+    mkdirSync(join(testState.mindRoot, 'Research'));
+  });
+
+  afterEach(() => {
+    rmSync(testState.mindRoot, { recursive: true, force: true });
+    testState.mindRoot = '';
+  });
+
   it('returns 400 without space param', async () => {
     const req = new NextRequest('http://localhost/api/space-overview');
     const res = await GET(req);

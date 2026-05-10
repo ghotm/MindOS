@@ -11,7 +11,7 @@ import { complete } from '@mariozechner/pi-ai';
 import { getModelConfig } from '@/lib/agent/model';
 import { effectiveAiConfig } from '@/lib/settings';
 import { getMindRoot, collectAllFiles, invalidateCache } from '@/lib/fs';
-import { resolveSafe } from '@/lib/core/security';
+import { resolveExistingSafe } from '@/lib/core/security';
 
 const MAX_FILES = 80;
 const MAX_CHARS_PER_FILE = 800;
@@ -102,8 +102,8 @@ export function collectSpaceFiles(
 
   for (const filePath of spaceFiles) {
     if (totalChars >= MAX_TOTAL_CHARS) break;
-    const abs = path.join(mindRoot, filePath);
     try {
+      const abs = resolveExistingSafe(mindRoot, filePath);
       const content = fs.readFileSync(abs, 'utf-8');
       const trimmed = content.slice(0, MAX_CHARS_PER_FILE);
       const preview = trimmed.length < content.length ? trimmed + '\n...(truncated)' : trimmed;
@@ -174,8 +174,8 @@ export function collectChangedFiles(
   for (const filePath of spaceFiles) {
     if (changed.length >= MAX_FILES) break;
     if (totalChars >= MAX_TOTAL_CHARS) break;
-    const abs = path.join(mindRoot, filePath);
     try {
+      const abs = resolveExistingSafe(mindRoot, filePath);
       const stat = fs.statSync(abs);
       if (stat.mtimeMs <= sinceMs) continue;
       const content = fs.readFileSync(abs, 'utf-8');
@@ -254,10 +254,10 @@ export async function compileSpaceOverview(
   }
 
   const mindRoot = getMindRoot();
-  resolveSafe(mindRoot, space);
+  resolveExistingSafe(mindRoot, space);
 
   const spaceName = path.basename(space) || space;
-  const readmePath = path.join(mindRoot, space, 'README.md');
+  const readmePath = resolveExistingSafe(mindRoot, path.posix.join(space, 'README.md'));
 
   // Check for existing compile metadata → attempt incremental
   let existingReadme = '';
