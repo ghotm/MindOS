@@ -3133,6 +3133,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/web/__tests__/lib/daily-echo-storage.test.ts` 固定 `Date.now()` 后再构造 30 天边界 report，避免全量 gate 因调度延迟随机失败。
 
+### npm package name 校验不要拒绝中间连续点（2026-05-10）
+
+**症状**：ACP install handler 会拒绝 `agent..plugin` 这类 npm 包名，返回 `Invalid package name`，即使 npm package name 规则只禁止以 `.` 开头等情况，并不禁止名称中间出现连续点。
+
+**根因**：`isValidNpmPackageName()` 在 regex 之外额外使用 `value.includes('..')`，把路径穿越语义套到了 npm 包名上。实际危险输入已经由首字符、slash scope 结构、backslash 和 URL-friendly 字符规则拦截。
+
+**修复**：移除 `includes('..')`，保留长度、反斜杠和 npm 包名结构校验。
+
+**防回归**：`packages/mindos/src/server.test.ts` 覆盖 `agent..plugin` 能进入 ACP install flow，同时 `../bad` 仍然返回 `Invalid package name`。
+
 ### 删除风险评估不要把 `..name` 当成系统路径（2026-05-10）
 
 **症状**：Desktop 与产品 CLI 的 `assessDeletionRisk()` 会把 `.mindos/..cache/runtime` 这种仍在配置目录内的路径标记为 `isSystemPath: true`，误报为系统路径风险。

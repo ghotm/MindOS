@@ -3108,6 +3108,10 @@ describe('MindOS product server contract', () => {
       status: 400,
       body: { error: 'Invalid package name' },
     });
+    await expect(handleAcpInstallPost({ agentId: 'claude', packageName: 'agent..plugin' }, services)).resolves.toMatchObject({
+      status: 200,
+      body: { status: 'installing', agentId: 'claude', packageName: 'agent..plugin' },
+    });
     await expect(handleAcpInstallPost({ agentId: 'claude', packageName: '@anthropic-ai/claude-code' }, services)).resolves.toMatchObject({
       status: 200,
       body: { status: 'installing', agentId: 'claude' },

@@ -288,7 +288,7 @@ function readAcpAgentOverrides(services: AcpDetectServices): Record<string, AcpA
 
 function isValidNpmPackageName(packageName: string): boolean {
   const value = packageName.trim();
-  if (value.length === 0 || value.length > 214 || value.includes('..') || value.includes('\\')) return false;
+  if (value.length === 0 || value.length > 214 || value.includes('\\')) return false;
   return /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(value);
 }
 
