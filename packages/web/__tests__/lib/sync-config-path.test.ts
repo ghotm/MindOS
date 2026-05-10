@@ -1,0 +1,18 @@
+import os from 'os';
+import path from 'path';
+import { describe, expect, it } from 'vitest';
+import { isPathWithinMindRoot } from '@/lib/sync-config';
+
+describe('sync-config path boundary checks', () => {
+  it('allows child paths when mindRoot has a trailing separator', () => {
+    const root = path.join(os.tmpdir(), 'mindos-sync-root');
+
+    expect(isPathWithinMindRoot(root + path.sep, 'notes/todo.md')).toBe(true);
+  });
+
+  it('blocks traversal outside mindRoot', () => {
+    const root = path.join(os.tmpdir(), 'mindos-sync-root');
+
+    expect(isPathWithinMindRoot(root, '../outside.md')).toBe(false);
+  });
+});

@@ -2943,6 +2943,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/web/__tests__/core/export.test.ts` 创建 MIND_ROOT 外的 sibling 目录，确认 traversal 在目录存在性检查前被拒绝。
 
+### 路径边界检查不要拼 `root + '/'`（2026-05-10）
+
+**症状**：Sync 配置里保存的 `mindRoot` 如果带尾部斜杠，`isPathWithinMindRoot(root + '/', 'notes/todo.md')` 会把正常子文件误判成 root 外路径；Windows 上硬编码 `/` 还会和 `\` 分隔符不一致。
+
+**根因**：路径边界检查直接比较字符串前缀 `normalizedPath.startsWith(mindRoot + '/')`，没有先规范化 root，也没有使用平台对应的相对路径判断。
+
+**修复**：使用 `resolve(root)` + `resolve(root, filePath)` + `relative(root, target)`，只要 relative 不是 `..` 开头且不是绝对路径就视为 root 内。
+
+**防回归**：`packages/web/__tests__/lib/sync-config-path.test.ts` 覆盖尾斜杠 root 的正常子路径和 traversal 拦截。
+
 ### Web 全量测试中的动态 import smoke test 要给足超时预算（2026-05-10）
 
 **症状**：`@mindos/web` 全量 Vitest 并发执行时，`__tests__/core/request-scoped-tools.test.ts` 偶发在默认 5s 超时。单独运行约 0.7s 通过，但与多个 ESLint 合约测试、Next build 后续测试并发时，动态 import `@/lib/agent/tools` 会被 CPU/transform 竞争拖慢。
