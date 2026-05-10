@@ -3315,6 +3315,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/desktop/src/core-updater-tar.test.ts` 构造 `C:evil.txt` tar entry，要求 extractor 抛出 `outside extraction directory`，且不会写入目标目录。
 
+### Obsidian Vault shim 不能跟随指向 vault 外的 symlink（2026-05-10）
+
+**症状**：`.plugins` 之外的 Obsidian compatibility `Vault.getFiles()` 用 `fs.statSync()` 递归目录。若 vault 内有 `linked-outside -> /tmp/outside` 这种 symlink，插件看到的文件列表会包含 `linked-outside/secret.md`，`getFileByPath()` 也会返回可读文件对象。
+
+**根因**：`resolveSafe()` 只做词法路径 containment，不能阻止真实文件系统 symlink 把已解析的 vault 内路径跳到 vault 外；同时 `statSync()` 会跟随 symlink。
+
+**修复**：Vault shim 递归时改用 `lstatSync()` 并跳过 symlink；直接读取/查找已存在路径时校验 `realpath` 仍在 `mindRoot` 的真实路径内。
+
+**防回归**：`packages/web/__tests__/obsidian-compat/vault.test.ts` 构造指向 vault 外的目录 symlink，验证 `getFiles()` 不暴露外部文件，`getFileByPath()` 返回 null。
+
 ### Monorepo 迁移后 workflow 仍引用旧顶层目录（2026-04-27）
 
 **症状**：GitHub Actions 在发版或构建 Desktop/Mobile 时直接失败，常见报错是 `cd app: No such file or directory`、`cd mcp: No such file or directory`、`cd desktop: No such file or directory`。

@@ -73,9 +73,32 @@ export class Vault extends Events implements IVault {
     return resolveSafe(this.mindRoot, filePath);
   }
 
+  private isRealPathWithinRoot(resolvedPath: string): boolean {
+    try {
+      const rootRealPath = fs.realpathSync(this.mindRoot);
+      const targetRealPath = fs.realpathSync(resolvedPath);
+      const relative = path.relative(rootRealPath, targetRealPath);
+      return relative === '' || (
+        relative !== '..'
+        && !relative.startsWith(`..${path.sep}`)
+        && !path.isAbsolute(relative)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private resolveExisting(filePath: string): string {
+    const resolved = this.resolve(filePath);
+    if (fs.existsSync(resolved) && !this.isRealPathWithinRoot(resolved)) {
+      throw new Error(`Path resolves outside vault: ${filePath}`);
+    }
+    return resolved;
+  }
+
   getAbstractFileByPath(filePath: string): TAbstractFile | null {
     try {
-      const resolved = this.resolve(filePath);
+      const resolved = this.resolveExisting(filePath);
       if (!fs.existsSync(resolved)) {
         return null;
       }
@@ -88,7 +111,7 @@ export class Vault extends Events implements IVault {
 
   getFileByPath(filePath: string): TFile | null {
     try {
-      const resolved = this.resolve(filePath);
+      const resolved = this.resolveExisting(filePath);
       if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
         return null;
       }
@@ -103,7 +126,7 @@ export class Vault extends Events implements IVault {
 
   getFolderByPath(dirPath: string): TFolder | null {
     try {
-      const resolved = this.resolve(dirPath);
+      const resolved = this.resolveExisting(dirPath);
       if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
         return null;
       }
@@ -130,7 +153,10 @@ export class Vault extends Events implements IVault {
             continue;
           }
 
-          const stats = fs.statSync(fullPath);
+          const stats = fs.lstatSync(fullPath);
+          if (stats.isSymbolicLink() || !this.isRealPathWithinRoot(fullPath)) {
+            continue;
+          }
           if (stats.isDirectory()) {
             walkDir(fullPath, relPath);
           } else if (stats.isFile()) {
@@ -153,7 +179,7 @@ export class Vault extends Events implements IVault {
 
   async read(file: TFile): Promise<string> {
     try {
-      const filePath = this.resolve(file.path);
+      const filePath = this.resolveExisting(file.path);
       return fs.readFileSync(filePath, 'utf-8');
     } catch (err) {
       throw new Error(`Failed to read file: ${file.path}: ${err instanceof Error ? err.message : String(err)}`);
@@ -183,7 +209,7 @@ export class Vault extends Events implements IVault {
 
   async modify(file: TFile, data: string): Promise<void> {
     try {
-      const resolved = this.resolve(file.path);
+      const resolved = this.resolveExisting(file.path);
       fs.writeFileSync(resolved, data, 'utf-8');
       this.trigger('modify', file);
     } catch (err) {
@@ -193,7 +219,7 @@ export class Vault extends Events implements IVault {
 
   async append(file: TFile, data: string): Promise<void> {
     try {
-      const resolved = this.resolve(file.path);
+      const resolved = this.resolveExisting(file.path);
       const current = fs.readFileSync(resolved, 'utf-8');
       fs.writeFileSync(resolved, current + data, 'utf-8');
       this.trigger('modify', file);
@@ -204,7 +230,7 @@ export class Vault extends Events implements IVault {
 
   async delete(file: TAbstractFile): Promise<void> {
     try {
-      const resolved = this.resolve(file.path);
+      const resolved = this.resolveExisting(file.path);
       if (fs.lstatSync(resolved).isDirectory()) {
         fs.rmSync(resolved, { recursive: true, force: true });
       } else {
@@ -221,7 +247,7 @@ export class Vault extends Events implements IVault {
 
   async rename(file: TAbstractFile, newPath: string): Promise<void> {
     try {
-      const oldResolved = this.resolve(file.path);
+      const oldResolved = this.resolveExisting(file.path);
       const newResolved = this.resolve(newPath);
       const newDir = path.dirname(newResolved);
       fs.mkdirSync(newDir, { recursive: true });

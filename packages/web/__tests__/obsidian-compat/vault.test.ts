@@ -65,6 +65,21 @@ describe('Vault', () => {
     expect(files).not.toContain(path.join('.plugins', 'sample-plugin', 'data.json'));
   });
 
+  it('does not expose files through symlinks that point outside the vault', () => {
+    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mindos-obsidian-outside-'));
+    try {
+      fs.writeFileSync(path.join(outsideRoot, 'secret.md'), 'outside', 'utf-8');
+      fs.symlinkSync(outsideRoot, path.join(mindRoot, 'linked-outside'), 'dir');
+
+      const files = vault.getFiles().map((file) => file.path);
+
+      expect(files).not.toContain('linked-outside/secret.md');
+      expect(vault.getFileByPath('linked-outside/secret.md')).toBeNull();
+    } finally {
+      fs.rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
   it('emits create and modify events', async () => {
     const onCreate = vi.fn();
     const onModify = vi.fn();
