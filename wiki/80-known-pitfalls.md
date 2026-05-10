@@ -2913,6 +2913,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`tests/unit/cli-shim.test.ts` mock Windows 平台，用大小写不同的 shim 目录和 `;` 分隔 PATH 验证 `isShimInPath()`。
 
+### Web 子进程不要用裸 `node` 命令（2026-05-10）
+
+**症状**：Desktop / packaged runtime 中上传 PDF 或 Word 文件时，提取接口可能失败，原因不是文件解析错误，而是 GUI 进程 PATH 很短，`execFileSync('node', ...)` 找不到 Node。
+
+**根因**：`/api/extract-pdf`、`/api/extract-docx` 和 `lib/core/pdf-text.ts` 直接依赖 PATH 查找 `node`。Desktop 启动 Web runtime 时已经会传入 `MINDOS_NODE_BIN`，但提取子进程没有使用它。
+
+**修复**：新增 `getNodeExecutor()`，优先用 `MINDOS_NODE_BIN`，否则用当前 `process.execPath`；所有文档提取子进程都通过该 helper 启动 Node，不再依赖 PATH。
+
+**防回归**：`packages/web/__tests__/core/node-executor.test.ts` 覆盖 helper 行为，`packages/web/__tests__/api/extract-subprocess.test.ts` 扫描提取入口，禁止重新出现 `execFileSync('node', ...)`。
+
 ### Web 全量测试中的动态 import smoke test 要给足超时预算（2026-05-10）
 
 **症状**：`@mindos/web` 全量 Vitest 并发执行时，`__tests__/core/request-scoped-tools.test.ts` 偶发在默认 5s 超时。单独运行约 0.7s 通过，但与多个 ESLint 合约测试、Next build 后续测试并发时，动态 import `@/lib/agent/tools` 会被 CPU/transform 竞争拖慢。

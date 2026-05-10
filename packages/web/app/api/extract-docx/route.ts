@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { resolveScript } from '@/lib/core/resolve-script';
+import { getNodeExecutor } from '@/lib/core/node-executor';
 import { handleRouteErrorSimple } from '@/lib/errors';
 
 export const runtime = 'nodejs';
@@ -70,7 +71,7 @@ function extractWord(buf: Buffer, originalName: string): ExtractedContent {
 
   fs.writeFileSync(tmpFile, buf);
   try {
-    const stdout = execFileSync('node', [scriptPath, tmpFile], {
+    const stdout = execFileSync(getNodeExecutor(), [scriptPath, tmpFile], {
       encoding: 'utf-8',
       timeout: 30_000,
       maxBuffer: 10 * 1024 * 1024,

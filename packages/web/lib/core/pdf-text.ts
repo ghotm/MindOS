@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { getNodeExecutor } from './node-executor';
 import { resolveScript } from './resolve-script';
 
 /**
@@ -11,7 +12,7 @@ export function extractPdfText(absolutePath: string): string {
     const scriptPath = resolveScript('extract-pdf.cjs');
     if (!scriptPath) return '';
 
-    const stdout = execFileSync('node', [scriptPath, absolutePath], {
+    const stdout = execFileSync(getNodeExecutor(), [scriptPath, absolutePath], {
       encoding: 'utf-8',
       timeout: 15_000,
       maxBuffer: 5 * 1024 * 1024,
