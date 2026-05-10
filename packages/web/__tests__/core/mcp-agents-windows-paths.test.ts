@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import os from 'os';
+import path from 'path';
 
 const originalPlatform = process.platform;
 const originalAppData = process.env.APPDATA;
@@ -36,5 +38,11 @@ describe('MCP agent registry Windows paths', () => {
     expect(MCP_AGENTS['cline'].presenceDirs).toContain(`${appData}/Code/User/globalStorage/saoudrizwan.claude-dev/`);
     expect(MCP_AGENTS['roo'].presenceDirs).toContain(`${appData}/Code/User/globalStorage/rooveterinaryinc.roo-cline/`);
     expect(MCP_AGENTS['trae-cn'].presenceDirs).toContain(`${appData}/Trae CN/`);
+  });
+
+  it('expands Windows tilde-style paths', async () => {
+    const { expandHome } = await importAgentsForWindows('C:/Users/Alice/AppData/Roaming');
+
+    expect(expandHome('~\\.agent\\skills')).toBe(path.resolve(os.homedir(), '.agent\\skills'));
   });
 });

@@ -84,18 +84,36 @@ export function generateUniqueKey(
 /* ─── Defaults Inference ─── */
 
 export function inferDefaults(name: string, baseDir: string): Omit<CustomAgentDef, 'key'> {
-  const dir = baseDir.endsWith('/') ? baseDir : baseDir + '/';
+  const dir = ensureDirTrailingSeparator(baseDir);
   return {
     name,
     baseDir: dir,
-    global: dir + 'mcp.json',
+    global: appendPathSegment(dir, 'mcp.json'),
     project: null,
     configKey: 'mcpServers',
     format: 'json',
     preferredTransport: 'stdio',
     presenceDirs: [dir],
-    skillDir: dir + 'skills/',
+    skillDir: appendPathSegment(dir, 'skills/'),
   };
+}
+
+function hasTrailingSeparator(input: string): boolean {
+  return input.endsWith('/') || input.endsWith('\\');
+}
+
+function ensureDirTrailingSeparator(input: string): string {
+  return hasTrailingSeparator(input) ? input : `${input}/`;
+}
+
+function appendPathSegment(baseDir: string, segment: string): string {
+  return `${ensureDirTrailingSeparator(baseDir)}${segment}`;
+}
+
+function isAbsoluteAgentInputPath(input: string): boolean {
+  if (input.startsWith('~/') || input.startsWith('~\\') || input.startsWith('/')) return true;
+  if (process.platform === 'win32' && (/^[A-Z]:[\\/]/i.test(input) || input.startsWith('\\\\'))) return true;
+  return false;
 }
 
 /* ─── Auto-detection ─── */
@@ -104,7 +122,7 @@ export function detectBaseDir(baseDir: string): DetectResult {
   const expanded = expandHome(baseDir);
 
   if (!fs.existsSync(expanded)) {
-    const dirName = path.basename(expanded.replace(/\/$/, ''));
+    const dirName = path.basename(expanded.replace(/[\\/]+$/, ''));
     return {
       exists: false,
       hasSkillsDir: false,
@@ -117,14 +135,14 @@ export function detectBaseDir(baseDir: string): DetectResult {
     hasSkillsDir: false,
   };
 
-  const dirName = path.basename(expanded.replace(/\/$/, ''));
+  const dirName = path.basename(expanded.replace(/[\\/]+$/, ''));
   result.suggestedName = dirName.charAt(0).toUpperCase() + dirName.slice(1);
 
   // Check for skills/ subdirectory and scan contents
   const skillsPath = path.join(expanded, 'skills');
   if (fs.existsSync(skillsPath)) {
     result.hasSkillsDir = true;
-    result.detectedSkillDir = baseDir.endsWith('/') ? baseDir + 'skills/' : baseDir + '/skills/';
+    result.detectedSkillDir = appendPathSegment(baseDir, 'skills/');
     try {
       const skillEntries = fs.readdirSync(skillsPath, { withFileTypes: true });
       const skillNames = skillEntries
@@ -156,13 +174,13 @@ export function detectBaseDir(baseDir: string): DetectResult {
       const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       if (raw && typeof raw === 'object') {
         if ('mcpServers' in raw) {
-          result.detectedConfig = baseDir.endsWith('/') ? baseDir + entry : baseDir + '/' + entry;
+          result.detectedConfig = appendPathSegment(baseDir, entry);
           result.detectedFormat = 'json';
           result.detectedConfigKey = 'mcpServers';
           return result;
         }
         if ('servers' in raw) {
-          result.detectedConfig = baseDir.endsWith('/') ? baseDir + entry : baseDir + '/' + entry;
+          result.detectedConfig = appendPathSegment(baseDir, entry);
           result.detectedFormat = 'json';
           result.detectedConfigKey = 'servers';
           return result;
@@ -183,7 +201,7 @@ export function detectBaseDir(baseDir: string): DetectResult {
         if (/^\s*\[mcp_servers/i.test(line) || /^\s*\[mcpServers/i.test(line)) {
           const lower = line.toLowerCase();
           const key = lower.includes('mcp_servers') ? 'mcp_servers' : 'mcpServers';
-          result.detectedConfig = baseDir.endsWith('/') ? baseDir + entry : baseDir + '/' + entry;
+          result.detectedConfig = appendPathSegment(baseDir, entry);
           result.detectedFormat = 'toml';
           result.detectedConfigKey = key;
           return result;
@@ -269,7 +287,7 @@ export function getAllAgents(): Record<string, AgentDef> {
  * Returns the same shape as detectAgentInstalledSkills.
  */
 export function scanCustomAgentSkills(custom: CustomAgentDef): { skills: string[]; sourcePath: string } {
-  const skillDir = custom.skillDir || (custom.baseDir.endsWith('/') ? custom.baseDir + 'skills/' : custom.baseDir + '/skills/');
+  const skillDir = custom.skillDir || appendPathSegment(custom.baseDir, 'skills/');
   const expanded = expandHome(skillDir);
   if (!fs.existsSync(expanded)) return { skills: [], sourcePath: expanded };
   try {
@@ -373,7 +391,7 @@ export function detectCustomAgentProfile(
   // 2. Scan Skill directory
   const skillDirPath = path.join(expanded, 'skills');
   if (fs.existsSync(skillDirPath)) {
-    result.skillDir = baseDir.endsWith('/') ? baseDir + 'skills/' : baseDir + '/skills/';
+    result.skillDir = appendPathSegment(baseDir, 'skills/');
     try {
       const entries = fs.readdirSync(skillDirPath, { withFileTypes: true });
       result.skillNames = entries
@@ -384,7 +402,7 @@ export function detectCustomAgentProfile(
       // Skill dir exists but not readable, continue
     }
   } else {
-    result.skillDir = baseDir.endsWith('/') ? baseDir + 'skills/' : baseDir + '/skills/';
+    result.skillDir = appendPathSegment(baseDir, 'skills/');
   }
 
   return result;
@@ -406,13 +424,7 @@ export function validateCustomAgentInput(input: {
   }
 
   const dir = input.baseDir.trim();
-  if (!dir.startsWith('~/') && !dir.startsWith('/')) {
-    if (process.platform === 'win32' && /^[A-Z]:\\/i.test(dir)) {
-      // Windows absolute path — OK
-    } else {
-      return 'Must be an absolute path (e.g. ~/.qclaw/)';
-    }
-  }
+  if (!isAbsoluteAgentInputPath(dir)) return 'Must be an absolute path (e.g. ~/.qclaw/)';
 
   if (!isEdit) {
     const key = input.key || slugify(input.name.trim());

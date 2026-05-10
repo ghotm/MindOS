@@ -2963,6 +2963,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/mindos/src/server.test.ts` 在 `win32` 平台 mock 下覆盖自定义 Agent 编辑 Windows `baseDir`。
 
+### Web 侧自定义 Agent helper 也要跟产品 handler 同步（2026-05-10）
+
+**症状**：产品 server handler 已支持 Windows 自定义 Agent 路径后，`packages/web/lib/custom-agents.ts` 仍会把 `C:\Users\Ada\.agent\` 变成 `C:\Users\Ada\.agent\/`，并拒绝 `~\.agent\` 这种 Windows 用户会输入的 home-relative 路径。`/api/mcp/agents` 仍复用这个 Web helper 扫描自定义 Agent skills。
+
+**根因**：Web helper 是历史遗留的重复实现，路径默认值、skillDir 拼接、detectBaseDir 和 validateCustomAgentInput 没有跟 `@geminilight/mindos/server` 里的修复同步。
+
+**修复**：Web helper 复用同样的尾部分隔符判断和 path segment 拼接；`expandHome()` 同时支持 `~/` 和 `~\`。
+
+**防回归**：`tests/unit/custom-agents.test.ts` 覆盖 Windows 尾反斜杠默认值与 `~\` 输入；`packages/web/__tests__/core/mcp-agents-windows-paths.test.ts` 覆盖 `~\` expansion。
+
 ### Web 全量测试中的动态 import smoke test 要给足超时预算（2026-05-10）
 
 **症状**：`@mindos/web` 全量 Vitest 并发执行时，`__tests__/core/request-scoped-tools.test.ts` 偶发在默认 5s 超时。单独运行约 0.7s 通过，但与多个 ESLint 合约测试、Next build 后续测试并发时，动态 import `@/lib/agent/tools` 会被 CPU/transform 竞争拖慢。

@@ -13,7 +13,7 @@ export function parseJsonc(text: string): any {
 }
 
 export function expandHome(p: string): string {
-  return p.startsWith('~/') ? path.resolve(os.homedir(), p.slice(2)) : p;
+  return p.startsWith('~/') || p.startsWith('~\\') ? path.resolve(os.homedir(), p.slice(2)) : p;
 }
 
 function normalizeConfigRoot(p: string): string {

@@ -148,6 +148,13 @@ describe('inferDefaults', () => {
     const result = inferDefaults('Test', '~/.test/');
     expect(result.skillDir).toBe('~/.test/skills/');
   });
+
+  it('preserves Windows trailing backslash in baseDir defaults', () => {
+    const result = inferDefaults('WinAgent', 'C:\\Users\\Ada\\.agent\\');
+    expect(result.baseDir).toBe('C:\\Users\\Ada\\.agent\\');
+    expect(result.global).toBe('C:\\Users\\Ada\\.agent\\mcp.json');
+    expect(result.skillDir).toBe('C:\\Users\\Ada\\.agent\\skills/');
+  });
 });
 
 /* ─── toAgentDef ─── */
@@ -260,6 +267,14 @@ describe('validateCustomAgentInput', () => {
   it('accepts absolute path starting with /', () => {
     const err = validateCustomAgentInput(
       { name: 'Test', baseDir: '/opt/test/' },
+      new Set(),
+    );
+    expect(err).toBeNull();
+  });
+
+  it('accepts Windows tilde-style absolute input', () => {
+    const err = validateCustomAgentInput(
+      { name: 'Test', baseDir: '~\\.test\\' },
       new Set(),
     );
     expect(err).toBeNull();
