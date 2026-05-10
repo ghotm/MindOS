@@ -33,6 +33,7 @@ export {
   isRootProtected,
   isWithinRoot,
   normalizePath,
+  resolveExistingSafe,
   resolveSafe,
   resolveSafeResult,
   validatePath,

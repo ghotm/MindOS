@@ -1,5 +1,5 @@
 import { existsSync, openSync, readFileSync, readSync, closeSync, statSync } from 'node:fs';
-import { resolveSafe } from '../../foundation/security/index.js';
+import { resolveExistingSafe } from '../../foundation/security/index.js';
 import { queryValue, type MindosRequestQuery } from '../context.js';
 import { json, privateCacheHeaders, type MindosServerResponse } from '../response.js';
 
@@ -50,7 +50,7 @@ export function handleRawFile(
 
   let resolved: string;
   try {
-    resolved = resolveSafe(services.mindRoot, filePath);
+    resolved = resolveExistingSafe(services.mindRoot, filePath);
   } catch {
     return json({ error: 'Access denied' }, { status: 403 });
   }

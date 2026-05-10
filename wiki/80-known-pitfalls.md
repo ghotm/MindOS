@@ -3325,6 +3325,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/web/__tests__/obsidian-compat/vault.test.ts` 构造指向 vault 外的目录 symlink，验证 `getFiles()` 不暴露外部文件，`getFileByPath()` 返回 null。
 
+### 核心文件读写不能只依赖词法路径 containment（2026-05-10）
+
+**症状**：文件读写入口虽然调用了 `resolveSafe()`，但如果知识库内存在 `linked-outside -> /tmp/outside`，`linked-outside/secret.md` 会在词法上落在 root 内，实际读写却跟随 symlink 到 root 外。更隐蔽的是 `linked-outside/new.md` 这类目标文件还不存在的写入，也会通过已存在的 symlink 父目录落到 root 外。
+
+**根因**：`resolveSafe()` 只保证字符串路径没有 traversal / absolute path；它不知道文件系统 realpath。写入新文件时只检查目标是否存在也不够，必须检查最近的已存在父路径是否仍真实位于 root 内。
+
+**修复**：共享安全层新增 `resolveExistingSafe()`，对目标或最近已存在父路径做 `realpath` containment 校验；Product Server 文件操作、raw file、runtime read/stat、Web core fs-ops/lines/pdf 分支统一使用该入口。
+
+**防回归**：`packages/mindos/src/foundation/security/path-safety.test.ts`、`packages/mindos/src/server.test.ts`、`packages/web/__tests__/core/fs-ops.test.ts`、`packages/web/__tests__/core/lines.test.ts` 覆盖 symlink escape 的读、写、新建和 raw file 场景。
+
 ### Monorepo 迁移后 workflow 仍引用旧顶层目录（2026-04-27）
 
 **症状**：GitHub Actions 在发版或构建 Desktop/Mobile 时直接失败，常见报错是 `cd app: No such file or directory`、`cd mcp: No such file or directory`、`cd desktop: No such file or directory`。

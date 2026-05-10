@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkTempMindRoot, cleanupMindRoot, seedFile, readSeeded } from './helpers';
+import fs from 'fs';
+import path from 'path';
 import {
   readLines,
   insertLines,
@@ -93,6 +95,19 @@ describe('lines', () => {
       seedFile(mindRoot, 'test.md', '');
       appendToFile(mindRoot, 'test.md', 'first');
       expect(readSeeded(mindRoot, 'test.md')).toBe('first');
+    });
+
+    it('does not append through symlinks that resolve outside mindRoot', () => {
+      const outsideRoot = fs.mkdtempSync(path.join(path.dirname(mindRoot), 'mindos-lines-outside-'));
+      try {
+        fs.writeFileSync(path.join(outsideRoot, 'secret.md'), 'outside', 'utf-8');
+        fs.symlinkSync(outsideRoot, path.join(mindRoot, 'linked-outside'), 'dir');
+
+        expect(() => appendToFile(mindRoot, 'linked-outside/secret.md', 'changed')).toThrow('Access denied');
+        expect(fs.readFileSync(path.join(outsideRoot, 'secret.md'), 'utf-8')).toBe('outside');
+      } finally {
+        fs.rmSync(outsideRoot, { recursive: true, force: true });
+      }
     });
   });
 

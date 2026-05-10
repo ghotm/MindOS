@@ -4,7 +4,30 @@ import {
   isRootProtected as packageIsRootProtected,
   assertNotProtected as packageAssertNotProtected,
 } from '@geminilight/mindos';
+import fs from 'fs';
+import path from 'path';
 import { MindOSError, ErrorCodes } from '@/lib/errors';
+
+function isPathWithinRoot(resolved: string, root: string): boolean {
+  const normalizedRoot = path.resolve(root);
+  const normalizedResolved = path.resolve(resolved);
+  const relative = path.relative(normalizedRoot, normalizedResolved);
+  return relative === '' || (
+    relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative)
+  );
+}
+
+function nearestExistingPath(resolved: string): string {
+  let current = resolved;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
 
 function toMindOSError(error: unknown, fallbackContext?: Record<string, unknown>): MindOSError {
   if (error instanceof MindOSError) {
@@ -40,6 +63,34 @@ export function resolveSafe(mindRoot: string, filePath: string): string {
   } catch (error) {
     throw toMindOSError(error, { mindRoot, filePath });
   }
+}
+
+/**
+ * Resolves a path against mindRoot and rejects realpath escapes for the
+ * nearest existing file or parent directory.
+ */
+export function resolveExistingSafe(mindRoot: string, filePath: string): string {
+  const resolved = resolveSafe(mindRoot, filePath);
+  const existing = nearestExistingPath(resolved);
+
+  let rootReal: string;
+  let targetReal: string;
+  try {
+    rootReal = fs.realpathSync(path.resolve(mindRoot));
+    targetReal = fs.realpathSync(existing);
+  } catch (error) {
+    throw toMindOSError(error, { mindRoot, filePath, resolved, existing });
+  }
+
+  if (!isPathWithinRoot(targetReal, rootReal)) {
+    throw new MindOSError(
+      ErrorCodes.PATH_OUTSIDE_ROOT,
+      'Access denied: symlink resolves outside MIND_ROOT',
+      { mindRoot, filePath, resolved, existing, targetReal },
+    );
+  }
+
+  return resolved;
 }
 
 /**

@@ -11,6 +11,7 @@ export type {
 // Security
 export {
   assertWithinRoot,
+  resolveExistingSafe,
   resolveSafe,
   isRootProtected,
   assertNotProtected,

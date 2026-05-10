@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, extname, join, relative, resolve } from 'node:path';
-import { resolveSafe } from '../foundation/security/index.js';
+import { resolveExistingSafe, resolveSafe } from '../foundation/security/index.js';
 
 export const MINDOS_ALLOWED_FILE_EXTENSIONS = new Set([
   '.md', '.csv', '.json', '.pdf',
@@ -81,7 +81,7 @@ export function getRecentlyModifiedFromMindRoot(mindRoot: string, limit = 10): A
   return collectAllFilesFromMindRoot(mindRoot)
     .map((filePath) => {
       try {
-        return { path: filePath, mtime: statSync(resolveSafe(mindRoot, filePath)).mtimeMs };
+        return { path: filePath, mtime: statSync(resolveExistingSafe(mindRoot, filePath)).mtimeMs };
       } catch {
         return null;
       }
@@ -97,7 +97,7 @@ export function getTreeVersionFromMindRoot(mindRoot: string): number {
   let version = 0;
   for (const filePath of collectAllFilesFromMindRoot(root)) {
     try {
-      const stat = statSync(resolveSafe(root, filePath));
+      const stat = statSync(resolveExistingSafe(root, filePath));
       version = Math.max(version, Math.floor(stat.mtimeMs));
     } catch {
       // Ignore files removed between the directory scan and stat.
@@ -107,7 +107,7 @@ export function getTreeVersionFromMindRoot(mindRoot: string): number {
 }
 
 export function readTextFileFromMindRoot(mindRoot: string, filePath: string): string {
-  return readFileSync(resolveSafe(mindRoot, filePath), 'utf-8');
+  return readFileSync(resolveExistingSafe(mindRoot, filePath), 'utf-8');
 }
 
 export function readLinesFromMindRoot(mindRoot: string, filePath: string): string[] {

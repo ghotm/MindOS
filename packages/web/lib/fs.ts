@@ -33,6 +33,7 @@ import {
   listContentChanges as coreListContentChanges,
   markContentChangesSeen as coreMarkContentChangesSeen,
   getContentChangeSummary as coreGetContentChangeSummary,
+  resolveExistingSafe,
   resolveSafe,
 } from './core';
 import type { MindSpaceSummary } from './core';
@@ -510,7 +511,7 @@ export function getRecentlyModified(limit = 10): Array<{ path: string; mtime: nu
 export function getFileContent(filePath: string): string {
   const root = getMindRoot();
   if (path.extname(filePath).toLowerCase() === '.pdf') {
-    const resolved = resolveSafe(root, filePath);
+    const resolved = resolveExistingSafe(root, filePath);
     if (!fs.existsSync(resolved)) {
       throw new MindOSError(
         ErrorCodes.FILE_NOT_FOUND,

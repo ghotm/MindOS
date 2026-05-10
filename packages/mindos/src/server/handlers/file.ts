@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, extname, join, posix, relative, resolve } from 'node:path';
-import { resolveSafe } from '../../foundation/security/index.js';
+import { resolveExistingSafe, resolveSafe } from '../../foundation/security/index.js';
 import { parsePermissionRules, type PermissionRule } from '../../foundation/permissions/index.js';
 import {
   createKnowledgeOperationActor,
@@ -249,7 +249,7 @@ function markdownTargetName(name: string): string {
 
 function saveFile(mindRoot: string, filePath: string, params: Record<string, unknown>) {
   const content = requireString(params.content, 'content');
-  const abs = resolveSafe(mindRoot, filePath);
+  const abs = resolveExistingSafe(mindRoot, filePath);
   if (typeof params.expectedMtime === 'number' && existsSync(abs) && statSync(abs).mtimeMs > params.expectedMtime) {
     return {
       response: json({ error: 'conflict', serverMtime: statSync(abs).mtimeMs } as unknown as { error: string }, { status: 409 }),
@@ -266,7 +266,7 @@ function saveFile(mindRoot: string, filePath: string, params: Record<string, unk
 
 function createFile(mindRoot: string, filePath: string, params: Record<string, unknown>) {
   const content = readString(params.content, '');
-  const abs = resolveSafe(mindRoot, filePath);
+  const abs = resolveExistingSafe(mindRoot, filePath);
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, content, { encoding: 'utf-8', flag: 'wx' });
   return {
@@ -283,7 +283,7 @@ function appendToFile(mindRoot: string, filePath: string, params: Record<string,
     return { response: json({ ok: true, path: filePath }), changeEvent: null };
   }
   const before = safeRead(mindRoot, filePath);
-  const abs = resolveSafe(mindRoot, filePath);
+  const abs = resolveExistingSafe(mindRoot, filePath);
   mkdirSync(dirname(abs), { recursive: true });
   appendFileSync(abs, appendSeparator(abs) + content, 'utf-8');
   return {
@@ -382,7 +382,7 @@ function deleteFile(mindRoot: string, filePath: string) {
 function renameFile(mindRoot: string, filePath: string, params: Record<string, unknown>) {
   const newName = requireString(params.new_name, 'new_name');
   validateLeafName(newName, 'filename');
-  const oldAbs = resolveSafe(mindRoot, filePath);
+  const oldAbs = resolveExistingSafe(mindRoot, filePath);
   const newRelPath = posix.join(posix.dirname(filePath), newName);
   const newAbs = resolveSafe(mindRoot, newRelPath);
   if (dirname(newAbs) !== dirname(oldAbs)) throw new Error('Invalid filename: must stay in the same directory');
@@ -399,8 +399,8 @@ function renameFile(mindRoot: string, filePath: string, params: Record<string, u
 function moveFile(mindRoot: string, filePath: string, params: Record<string, unknown>) {
   const toPath = requireString(params.to_path ?? params.toPath ?? params.newPath, 'to_path');
   const before = safeRead(mindRoot, filePath);
-  const fromAbs = resolveSafe(mindRoot, filePath);
-  const toAbs = resolveSafe(mindRoot, toPath);
+  const fromAbs = resolveExistingSafe(mindRoot, filePath);
+  const toAbs = resolveExistingSafe(mindRoot, toPath);
   if (existsSync(toAbs)) throw new Error(`Destination already exists: ${toPath}`);
   mkdirSync(dirname(toAbs), { recursive: true });
   renameSync(fromAbs, toAbs);
@@ -415,7 +415,7 @@ function createSpace(mindRoot: string, params: Record<string, unknown>) {
   validateLeafName(name, 'name');
   const parent = typeof params.parent_path === 'string' && params.parent_path.trim() ? params.parent_path.trim() : '';
   const spacePath = parent ? posix.join(parent, name) : name;
-  const abs = resolveSafe(mindRoot, spacePath);
+  const abs = resolveExistingSafe(mindRoot, spacePath);
   if (existsSync(abs)) throw new Error('Space already exists');
   mkdirSync(abs, { recursive: true });
   const description = readString(params.description, '');
@@ -430,7 +430,7 @@ function createSpace(mindRoot: string, params: Record<string, unknown>) {
 function renameSpace(mindRoot: string, filePath: string, params: Record<string, unknown>) {
   const newName = requireString(params.new_name, 'new_name').trim();
   validateLeafName(newName, 'space name');
-  const oldAbs = resolveSafe(mindRoot, filePath);
+  const oldAbs = resolveExistingSafe(mindRoot, filePath);
   if (!statSync(oldAbs).isDirectory()) throw new Error(`Not a directory: ${filePath}`);
   const newAbs = join(dirname(oldAbs), newName);
   if (existsSync(newAbs)) throw new Error('A space with that name already exists');
@@ -454,7 +454,7 @@ function appendCsv(mindRoot: string, filePath: string, params: Record<string, un
   if (!filePath.endsWith('.csv')) throw new Error('Only .csv files support row append');
   const before = safeRead(mindRoot, filePath);
   const escaped = row.map((cell) => cell.includes(',') || cell.includes('"') || cell.includes('\n') ? `"${cell.replace(/"/g, '""')}"` : cell);
-  const abs = resolveSafe(mindRoot, filePath);
+  const abs = resolveExistingSafe(mindRoot, filePath);
   mkdirSync(dirname(abs), { recursive: true });
   appendFileSync(abs, `${escaped.join(',')}\n`, 'utf-8');
   const newRowCount = readFileSync(abs, 'utf-8').trim().split('\n').filter(Boolean).length;
@@ -478,16 +478,16 @@ function atomicWriteFile(absPath: string, content: string): void {
 }
 
 function readLines(mindRoot: string, filePath: string): string[] {
-  return readFileSync(resolveSafe(mindRoot, filePath), 'utf-8').split('\n');
+  return readFileSync(resolveExistingSafe(mindRoot, filePath), 'utf-8').split('\n');
 }
 
 function writeText(mindRoot: string, filePath: string, content: string): void {
-  atomicWriteFile(resolveSafe(mindRoot, filePath), content);
+  atomicWriteFile(resolveExistingSafe(mindRoot, filePath), content);
 }
 
 function safeRead(mindRoot: string, filePath: string): string {
   try {
-    return readFileSync(resolveSafe(mindRoot, filePath), 'utf-8');
+    return readFileSync(resolveExistingSafe(mindRoot, filePath), 'utf-8');
   } catch {
     return '';
   }
@@ -509,7 +509,7 @@ function findHeading(lines: string[], heading: string): number {
 type TrashMeta = { id: string; originalPath: string; deletedAt: string; expiresAt: string; fileName: string; isDirectory: boolean };
 
 function moveToTrash(mindRoot: string, filePath: string): TrashMeta {
-  const src = resolveSafe(mindRoot, filePath);
+  const src = resolveExistingSafe(mindRoot, filePath);
   if (!existsSync(src)) throw new Error(`File not found: ${filePath}`);
   const isDirectory = statSync(src).isDirectory();
   const id = `${Date.now()}_${basename(filePath).replace(/[^a-zA-Z0-9._\-\u4e00-\u9fff]/g, '_')}`;

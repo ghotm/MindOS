@@ -1,8 +1,7 @@
 import fs from 'fs';
-import path from 'path';
 import { readFile, writeFile } from './fs-ops';
 import { MindOSError, ErrorCodes } from '@/lib/errors';
-import { resolveSafe } from './security';
+import { resolveExistingSafe } from './security';
 
 /**
  * Reads a file and returns its content split into lines.
@@ -50,7 +49,7 @@ export function updateLines(mindRoot: string, filePath: string, startIndex: numb
  * This is O(1) instead of O(file-size) for the common append-to-log/journal use case.
  */
 export function appendToFile(mindRoot: string, filePath: string, content: string): void {
-  const absPath = resolveSafe(mindRoot, filePath);
+  const absPath = resolveExistingSafe(mindRoot, filePath);
   try {
     const stat = fs.statSync(absPath);
     if (stat.size === 0) {

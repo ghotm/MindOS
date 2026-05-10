@@ -5,6 +5,7 @@ import {
   writeFile,
   createFile,
   deleteFile,
+  convertToSpace,
   renameFile,
   renameSpaceDirectory,
 } from '@/lib/core/fs-ops';
@@ -35,6 +36,18 @@ describe('fs-ops', () => {
     it('throws for path traversal', () => {
       expect(() => readFile(mindRoot, '../../../etc/passwd')).toThrow('Access denied');
     });
+
+    it('throws for symlinked files that resolve outside mindRoot', () => {
+      const outsideRoot = fs.mkdtempSync(path.join(path.dirname(mindRoot), 'mindos-fs-ops-outside-'));
+      try {
+        fs.writeFileSync(path.join(outsideRoot, 'secret.md'), 'outside', 'utf-8');
+        fs.symlinkSync(outsideRoot, path.join(mindRoot, 'linked-outside'), 'dir');
+
+        expect(() => readFile(mindRoot, 'linked-outside/secret.md')).toThrow('Access denied');
+      } finally {
+        fs.rmSync(outsideRoot, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('writeFile', () => {
@@ -54,6 +67,31 @@ describe('fs-ops', () => {
       writeFile(mindRoot, 'test.md', 'new');
       const files = fs.readdirSync(mindRoot);
       expect(files.filter(f => f.startsWith('.tmp-'))).toHaveLength(0);
+    });
+
+    it('does not overwrite files through symlinks that resolve outside mindRoot', () => {
+      const outsideRoot = fs.mkdtempSync(path.join(path.dirname(mindRoot), 'mindos-fs-ops-write-outside-'));
+      try {
+        fs.writeFileSync(path.join(outsideRoot, 'secret.md'), 'outside', 'utf-8');
+        fs.symlinkSync(outsideRoot, path.join(mindRoot, 'linked-outside'), 'dir');
+
+        expect(() => writeFile(mindRoot, 'linked-outside/secret.md', 'changed')).toThrow('Access denied');
+        expect(fs.readFileSync(path.join(outsideRoot, 'secret.md'), 'utf-8')).toBe('outside');
+      } finally {
+        fs.rmSync(outsideRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('does not create new files below symlinked parents outside mindRoot', () => {
+      const outsideRoot = fs.mkdtempSync(path.join(path.dirname(mindRoot), 'mindos-fs-ops-new-outside-'));
+      try {
+        fs.symlinkSync(outsideRoot, path.join(mindRoot, 'linked-outside'), 'dir');
+
+        expect(() => writeFile(mindRoot, 'linked-outside/new.md', 'changed')).toThrow('Access denied');
+        expect(fs.existsSync(path.join(outsideRoot, 'new.md'))).toBe(false);
+      } finally {
+        fs.rmSync(outsideRoot, { recursive: true, force: true });
+      }
     });
   });
 
@@ -76,6 +114,18 @@ describe('fs-ops', () => {
     it('defaults to empty content', () => {
       createFile(mindRoot, 'empty.md');
       expect(readSeeded(mindRoot, 'empty.md')).toBe('');
+    });
+
+    it('does not create through symlinked parents outside mindRoot', () => {
+      const outsideRoot = fs.mkdtempSync(path.join(path.dirname(mindRoot), 'mindos-fs-ops-create-outside-'));
+      try {
+        fs.symlinkSync(outsideRoot, path.join(mindRoot, 'linked-outside'), 'dir');
+
+        expect(() => createFile(mindRoot, 'linked-outside/new.md', 'changed')).toThrow('Access denied');
+        expect(fs.existsSync(path.join(outsideRoot, 'new.md'))).toBe(false);
+      } finally {
+        fs.rmSync(outsideRoot, { recursive: true, force: true });
+      }
     });
   });
 
@@ -157,6 +207,21 @@ describe('fs-ops', () => {
 
     it('throws for empty space path', () => {
       expect(() => renameSpaceDirectory(mindRoot, '', 'X')).toThrow('Space path');
+    });
+  });
+
+  describe('convertToSpace', () => {
+    it('does not scaffold space files through symlinks that resolve outside mindRoot', () => {
+      const outsideRoot = fs.mkdtempSync(path.join(path.dirname(mindRoot), 'mindos-fs-ops-space-outside-'));
+      try {
+        fs.symlinkSync(outsideRoot, path.join(mindRoot, 'linked-space'), 'dir');
+
+        expect(() => convertToSpace(mindRoot, 'linked-space')).toThrow('Access denied');
+        expect(fs.existsSync(path.join(outsideRoot, 'INSTRUCTION.md'))).toBe(false);
+        expect(fs.existsSync(path.join(outsideRoot, 'README.md'))).toBe(false);
+      } finally {
+        fs.rmSync(outsideRoot, { recursive: true, force: true });
+      }
     });
   });
 });

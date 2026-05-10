@@ -8,6 +8,7 @@
  */
 
 import * as path from 'path';
+import * as fs from 'fs';
 import { AppError, createError } from '../errors/index.js';
 import type { Result } from '../shared/index.js';
 
@@ -38,6 +39,16 @@ function isPathWithinRoot(resolved: string, root: string): boolean {
     && !relative.startsWith(`..${path.sep}`)
     && !path.isAbsolute(relative)
   );
+}
+
+function nearestExistingPath(resolved: string): string {
+  let current = resolved;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
 }
 
 /**
@@ -96,6 +107,42 @@ export function resolveSafe(root: string, filePath: string): string {
   const rootResolved = path.resolve(root);
   const resolved = path.resolve(path.join(rootResolved, normalizedFilePath));
   assertWithinRoot(resolved, rootResolved);
+  return resolved;
+}
+
+/**
+ * Resolves a path and validates the real filesystem target of the nearest
+ * existing path remains inside root. This blocks symlink escapes for existing
+ * files/dirs and for new files created below an existing symlinked parent.
+ */
+export function resolveExistingSafe(root: string, filePath: string): string {
+  const resolved = resolveSafe(root, filePath);
+  const existing = nearestExistingPath(resolved);
+
+  const rootResolved = path.resolve(root);
+  let rootReal: string;
+  let targetReal: string;
+  try {
+    rootReal = fs.realpathSync(rootResolved);
+    targetReal = fs.realpathSync(existing);
+  } catch (error) {
+    throw createError(
+      'VALIDATION_ERROR',
+      'Access denied: failed to validate real path',
+      { context: { root, filePath, resolved, existing }, cause: error as Error }
+    );
+  }
+
+  try {
+    assertWithinRoot(targetReal, rootReal);
+  } catch (error) {
+    throw createError(
+      'VALIDATION_ERROR',
+      'Access denied: symlink resolves outside root',
+      { context: { root, filePath, resolved, existing, targetReal }, cause: error as Error }
+    );
+  }
+
   return resolved;
 }
 

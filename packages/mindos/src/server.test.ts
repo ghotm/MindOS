@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -101,6 +101,7 @@ import {
   getDefaultMindRoot,
   getMindosServerContract,
   getRecentlyModifiedFromMindRoot,
+  readTextFileFromMindRoot,
   getTreeVersionFromMindRoot,
   handleTreeVersion,
   searchMindRoot,
@@ -605,6 +606,38 @@ describe('MindOS product server contract', () => {
     expect(existsSync(join(root, '..', '.trash', (deleted.body as { trashId: string }).trashId))).toBe(true);
   });
 
+  it('rejects Product Server writes through symlinks that resolve outside mindRoot', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-file-symlink-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-file-symlink-outside-'));
+    writeFileSync(join(outside, 'secret.md'), 'outside', 'utf-8');
+    symlinkSync(outside, join(root, 'linked-outside'), 'dir');
+
+    const saved = await handleFilePost(
+      { op: 'save_file', path: 'linked-outside/secret.md', content: 'changed' },
+      { mindRoot: root },
+    );
+
+    expect(saved.status).toBe(403);
+    expect(readFileSync(join(outside, 'secret.md'), 'utf-8')).toBe('outside');
+
+    const created = await handleFilePost(
+      { op: 'create_file', path: 'linked-outside/new.md', content: 'created' },
+      { mindRoot: root },
+    );
+
+    expect(created.status).toBe(403);
+    expect(existsSync(join(outside, 'new.md'))).toBe(false);
+  });
+
+  it('rejects Product runtime reads through symlinks that resolve outside mindRoot', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-runtime-symlink-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-runtime-symlink-outside-'));
+    writeFileSync(join(outside, 'secret.md'), 'outside', 'utf-8');
+    symlinkSync(outside, join(root, 'linked-outside'), 'dir');
+
+    expect(() => readTextFileFromMindRoot(root, 'linked-outside/secret.md')).toThrow(/Access denied/i);
+  });
+
   it('rejects unsafe rename leaf names in Product Server file operations', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mindos-file-rename-'));
     mkdirSync(join(root, 'Space'), { recursive: true });
@@ -824,6 +857,19 @@ describe('MindOS product server contract', () => {
       body: { error: 'Unsupported binary file type: .md' },
     });
     expect(handleRawFile(new URLSearchParams('path=../secret.pdf'), { mindRoot: root })).toMatchObject({
+      status: 403,
+      body: { error: 'Access denied' },
+    });
+  });
+
+  it('rejects raw files through symlinks that resolve outside mindRoot', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-raw-file-symlink-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-raw-file-symlink-outside-'));
+    mkdirSync(join(root, 'media'), { recursive: true });
+    writeFileSync(join(outside, 'secret.mp3'), Buffer.from('secret'));
+    symlinkSync(outside, join(root, 'media', 'linked-outside'), 'dir');
+
+    expect(handleRawFile(new URLSearchParams('path=media/linked-outside/secret.mp3'), { mindRoot: root })).toMatchObject({
       status: 403,
       body: { error: 'Access denied' },
     });

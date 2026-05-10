@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { resolveSafe, assertWithinRoot } from './security';
+import { resolveExistingSafe, assertWithinRoot } from './security';
 import { MindOSError, ErrorCodes } from '@/lib/errors';
 import { cleanDirName, INSTRUCTION_TEMPLATE, README_TEMPLATE } from './space-scaffold';
 
@@ -8,7 +8,7 @@ import { cleanDirName, INSTRUCTION_TEMPLATE, README_TEMPLATE } from './space-sca
  * Reads the content of a file given a relative path from mindRoot.
  */
 export function readFile(mindRoot: string, filePath: string): string {
-  const resolved = resolveSafe(mindRoot, filePath);
+  const resolved = resolveExistingSafe(mindRoot, filePath);
   return fs.readFileSync(resolved, 'utf-8');
 }
 
@@ -17,7 +17,7 @@ export function readFile(mindRoot: string, filePath: string): string {
  * Creates parent directories as needed.
  */
 export function writeFile(mindRoot: string, filePath: string, content: string): void {
-  const resolved = resolveSafe(mindRoot, filePath);
+  const resolved = resolveExistingSafe(mindRoot, filePath);
   const dir = path.dirname(resolved);
   const tmp = path.join(dir, `.tmp-${Date.now()}-${path.basename(resolved)}`);
   try {
@@ -37,7 +37,7 @@ export function writeFile(mindRoot: string, filePath: string, content: string): 
  * Use createSpaceFilesystem() or convertToSpace() for explicit Space creation.
  */
 export function createFile(mindRoot: string, filePath: string, initialContent = ''): void {
-  const resolved = resolveSafe(mindRoot, filePath);
+  const resolved = resolveExistingSafe(mindRoot, filePath);
   fs.mkdirSync(path.dirname(resolved), { recursive: true });
   try {
     // 'wx' flag: create exclusively — fails atomically if file already exists (no TOCTOU race)
@@ -54,7 +54,7 @@ export function createFile(mindRoot: string, filePath: string, initialContent = 
  * Deletes a file. Throws if the file does not exist.
  */
 export function deleteFile(mindRoot: string, filePath: string): void {
-  const resolved = resolveSafe(mindRoot, filePath);
+  const resolved = resolveExistingSafe(mindRoot, filePath);
   try {
     fs.unlinkSync(resolved);
   } catch (err: unknown) {
@@ -70,7 +70,7 @@ export function deleteFile(mindRoot: string, filePath: string): void {
  * Throws if the path does not exist, is outside mindRoot, or is not a directory.
  */
 export function deleteDirectory(mindRoot: string, dirPath: string): void {
-  const resolved = resolveSafe(mindRoot, dirPath);
+  const resolved = resolveExistingSafe(mindRoot, dirPath);
   if (!fs.existsSync(resolved)) {
     throw new MindOSError(ErrorCodes.FILE_NOT_FOUND, `Directory not found: ${dirPath}`, { dirPath });
   }
@@ -85,7 +85,7 @@ export function deleteDirectory(mindRoot: string, dirPath: string): void {
  * (and README.md if missing). Idempotent — skips files that already exist.
  */
 export function convertToSpace(mindRoot: string, dirPath: string): void {
-  const resolved = resolveSafe(mindRoot, dirPath);
+  const resolved = resolveExistingSafe(mindRoot, dirPath);
   if (!fs.existsSync(resolved)) {
     throw new MindOSError(ErrorCodes.FILE_NOT_FOUND, `Directory not found: ${dirPath}`, { dirPath });
   }
@@ -122,8 +122,7 @@ export function renameFile(mindRoot: string, oldPath: string, newName: string): 
     throw new MindOSError(ErrorCodes.INVALID_PATH, 'Invalid filename: must not contain path separators', { newName });
   }
   const root = path.resolve(mindRoot);
-  const oldResolved = path.resolve(path.join(root, oldPath));
-  assertWithinRoot(oldResolved, root);
+  const oldResolved = resolveExistingSafe(mindRoot, oldPath);
 
   const dir = path.dirname(oldResolved);
   const newResolved = path.join(dir, newName);
@@ -151,7 +150,7 @@ export function renameSpaceDirectory(mindRoot: string, spacePath: string, newNam
   }
 
   const root = path.resolve(mindRoot);
-  const oldResolved = resolveSafe(mindRoot, normalized);
+  const oldResolved = resolveExistingSafe(mindRoot, normalized);
   if (!fs.existsSync(oldResolved)) {
     throw new MindOSError(ErrorCodes.FILE_NOT_FOUND, `Space not found: ${normalized}`, { spacePath: normalized });
   }
@@ -181,8 +180,8 @@ export function moveFile(
   toPath: string,
   findBacklinksFn: (mindRoot: string, targetPath: string) => Array<{ source: string }>
 ): { newPath: string; affectedFiles: string[] } {
-  const fromResolved = resolveSafe(mindRoot, fromPath);
-  const toResolved = resolveSafe(mindRoot, toPath);
+  const fromResolved = resolveExistingSafe(mindRoot, fromPath);
+  const toResolved = resolveExistingSafe(mindRoot, toPath);
   if (!fs.existsSync(fromResolved)) throw new MindOSError(ErrorCodes.FILE_NOT_FOUND, `Source not found: ${fromPath}`, { fromPath });
   if (fs.existsSync(toResolved)) throw new MindOSError(ErrorCodes.FILE_ALREADY_EXISTS, `Destination already exists: ${toPath}`, { toPath });
   fs.mkdirSync(path.dirname(toResolved), { recursive: true });
@@ -201,7 +200,7 @@ export function getRecentlyModified(
 ): Array<{ path: string; mtime: number; mtimeISO: string }> {
   const withMtime = allFiles.flatMap((filePath) => {
     try {
-      const abs = path.join(mindRoot, filePath);
+      const abs = resolveExistingSafe(mindRoot, filePath);
       const stat = fs.statSync(abs);
       return [{ path: filePath, mtime: stat.mtimeMs, mtimeISO: stat.mtime.toISOString() }];
     } catch {

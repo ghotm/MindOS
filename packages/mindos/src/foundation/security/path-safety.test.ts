@@ -3,6 +3,7 @@ import {
   assertWithinRoot,
   isWithinRoot,
   resolveSafe,
+  resolveExistingSafe,
   resolveSafeResult,
   isRootProtected,
   assertNotProtected,
@@ -10,6 +11,8 @@ import {
   normalizePath,
 } from './index';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 
 describe('@mindos/security', () => {
   const testRoot = '/test/root';
@@ -127,6 +130,47 @@ describe('@mindos/security', () => {
     it('should return err for unsafe paths', () => {
       const result = resolveSafeResult(testRoot, '../../../etc/passwd');
       expect(result.ok).toBe(false);
+    });
+  });
+
+  describe('resolveExistingSafe', () => {
+    it('should reject existing paths whose real path escapes through a symlink', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mindos-resolve-existing-root-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'mindos-resolve-existing-outside-'));
+      try {
+        fs.writeFileSync(path.join(outside, 'secret.md'), 'outside', 'utf-8');
+        fs.symlinkSync(outside, path.join(root, 'linked-outside'), 'dir');
+
+        expect(() => resolveExistingSafe(root, 'linked-outside/secret.md')).toThrow();
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('should reject new paths below a symlinked parent that resolves outside root', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mindos-resolve-new-root-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'mindos-resolve-new-outside-'));
+      try {
+        fs.symlinkSync(outside, path.join(root, 'linked-outside'), 'dir');
+
+        expect(() => resolveExistingSafe(root, 'linked-outside/new.md')).toThrow();
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('should allow existing paths whose real path stays inside root', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mindos-resolve-existing-inside-'));
+      try {
+        fs.mkdirSync(path.join(root, 'notes'), { recursive: true });
+        fs.writeFileSync(path.join(root, 'notes', 'safe.md'), 'safe', 'utf-8');
+
+        expect(resolveExistingSafe(root, 'notes/safe.md')).toBe(path.join(root, 'notes', 'safe.md'));
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 
