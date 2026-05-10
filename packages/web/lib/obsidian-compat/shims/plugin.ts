@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 
 type StubElement = {
-  innerHTML: string;
+  textContent: string;
   title: string;
   addEventListener: (type: string, callback: EventListenerOrEventListenerObject) => void;
 };
@@ -20,7 +20,7 @@ function createHostElement(tagName: string): HTMLElement | StubElement {
   }
 
   return {
-    innerHTML: '',
+    textContent: '',
     title: '',
     addEventListener: () => {},
   };
@@ -80,7 +80,7 @@ export class Plugin extends Component implements IPlugin {
 
   addRibbonIcon(icon: string, title: string, callback: (evt: MouseEvent) => any): HTMLElement {
     const el = createHostElement('div');
-    el.innerHTML = icon;
+    el.textContent = icon;
     el.title = title;
     el.addEventListener('click', callback as EventListener);
     return el as HTMLElement;

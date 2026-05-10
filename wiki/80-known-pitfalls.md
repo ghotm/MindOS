@@ -557,8 +557,9 @@ rootcause: app/api/ask/route.ts:143 直接传递 llmHistoryMessages（pi-ai Mess
 - **Browser Extension 例外注意：** popup 里的目录名来自 MindOS API，必须用 `textContent` + `createElementNS` 组装图标，不能为了 SVG 图标方便把 `${childName}` 插进 `innerHTML`。
 - **Desktop 例外注意：** Electron connect 窗口展示 build/install stderr 时，保留 `<small>` 样式也必须用 DOM 节点 + `textContent`，不要把 stderr 拼进 `innerHTML`。
 - **Tauri 例外注意：** Tauri connection timeout / retry UI 也要用 `replaceChildren()` + `textContent` + `addEventListener()`，不要用 `innerHTML` 拼按钮或写 `onclick=`。
+- **Obsidian 兼容层注意：** community plugin 传入的 ribbon icon 参数是插件输入，只能当 icon name / text token 处理，不能直接 `innerHTML`。
 - **规则：** 新增 `dangerouslySetInnerHTML` 必须满足二选一：输入来自可信静态模板，或先经过明确的 escape/sanitize helper，并补一条包含 HTML 注入和危险链接的回归测试。
-- **验证：** `packages/web/__tests__/renderers/generated-html-safety.test.ts` 覆盖 Summary、Timeline 和 Skill detail 的 HTML 转义与危险链接降级；`tests/browser-extension-popup-safety.test.ts`、`tests/desktop-connect-renderer-safety.test.ts`、`tests/desktop-tauri-connect-safety.test.ts` 覆盖 app-specific DOM 渲染回归。
+- **验证：** `packages/web/__tests__/renderers/generated-html-safety.test.ts` 覆盖 Summary、Timeline 和 Skill detail 的 HTML 转义与危险链接降级；`packages/web/__tests__/obsidian-compat/component-plugin.test.ts` 覆盖 plugin ribbon icon 输入；`tests/browser-extension-popup-safety.test.ts`、`tests/desktop-connect-renderer-safety.test.ts`、`tests/desktop-tauri-connect-safety.test.ts` 覆盖 app-specific DOM 渲染回归。
 
 ### 渠道详情页若只展示配置表单，用户会误解为“聊天页”或“不知道下一步做什么”
 - **现象：** 用户点击 Feishu / Telegram 这类 Channel 后，会问“我能在这里聊天吗？”“这个页面到底是干嘛的？”

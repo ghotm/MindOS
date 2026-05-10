@@ -79,6 +79,7 @@ describe('Plugin', () => {
 
   afterEach(() => {
     fs.rmSync(pluginDir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
   });
 
   it('loads null when plugin data file does not exist', async () => {
@@ -126,5 +127,27 @@ describe('Plugin', () => {
 
     expect(ribbon).toBeTruthy();
     expect(status).toBeTruthy();
+  });
+
+  it('does not render plugin-provided ribbon icon names as HTML', () => {
+    const { app } = createAppStub();
+    const plugin = new Plugin(app, manifest, pluginDir);
+    const element = {
+      title: '',
+      textContent: '',
+      addEventListener: vi.fn(),
+      set innerHTML(_value: string) {
+        throw new Error('unsafe innerHTML assignment');
+      },
+    };
+
+    vi.stubGlobal('document', {
+      createElement: vi.fn(() => element),
+    });
+
+    const ribbon = plugin.addRibbonIcon('<img src=x onerror=alert(1)>', 'Title', vi.fn());
+
+    expect(ribbon.textContent).toBe('<img src=x onerror=alert(1)>');
+    expect(ribbon.title).toBe('Title');
   });
 });
