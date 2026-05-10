@@ -20,4 +20,18 @@ describe('install-cli-shim', () => {
       'C:\\Users\\A%%TEMP%%^^B^^!C\\cli.js',
     );
   });
+
+  it('generates a Windows cleanup script without touching the knowledge base', async () => {
+    const { buildWindowsUninstallScript } = await import('./install-cli-shim');
+
+    const script = buildWindowsUninstallScript();
+
+    expect(script).toContain('taskkill /PID');
+    expect(script).toContain('mindos.cmd');
+    expect(script).toContain('[Environment]::SetEnvironmentVariable');
+    expect(script).toContain('%~f0');
+    expect(script).not.toContain('rmdir /s /q "%USERPROFILE%\\MindOS\\mind"');
+    expect(script).not.toContain('del /f /q "%USERPROFILE%\\MindOS\\mind"');
+    expect(script).not.toContain('TODO: uninstall.bat');
+  });
 });

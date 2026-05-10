@@ -2805,6 +2805,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/desktop/src/ssh-tunnel.test.ts` 执行生成的 askpass 脚本，覆盖 `-n`、反斜杠和单引号组合，断言输出和原始 passphrase 完全一致。
 
+### Desktop 卸载残留清理脚本必须覆盖 Windows（2026-05-10）
+
+**症状**：macOS/Linux 会生成 `~/.mindos/uninstall.sh`，但 Windows 之前直接 `return`，导致用户删除 Desktop 后没有同等的残留清理入口；CLI shim、私有 Node、PATH 注入和状态文件都可能留在 `%USERPROFILE%\.mindos`。
+
+**根因**：`install-cli-shim.ts` 只实现了 Unix cleanup script，Windows 分支停留在 `TODO: uninstall.bat`。跨平台 Desktop 功能不能只给 Unix 留后路。
+
+**修复**：新增 `buildWindowsUninstallScript()`，生成 `uninstall.bat`：停止记录的 MindOS 进程、删除私有 runtime/CLI shim、从用户 PATH 移除 `.mindos\bin`、清理 Desktop 状态和 Electron app data，但不删除知识库。
+
+**防回归**：`packages/desktop/src/install-cli-shim.test.ts` 断言 Windows cleanup script 包含 `taskkill`、`mindos.cmd`、PATH registry 更新和自删除逻辑，并确认没有删除 `%USERPROFILE%\MindOS\mind`。
+
 ### Hook / Component 不要在 render 阶段读写 ref.current（2026-05-10）
 
 **症状**：React compiler lint 报 `react-hooks/refs`，典型位置是 hook / component 为了避免事件回调 stale closure，在组件 render 阶段直接执行 `someRef.current = value`，用 `someRef.current` 初始化 state，或在 JSX handler 中直接调用会读写 ref 的 callback。
