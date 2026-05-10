@@ -43,6 +43,7 @@ console.log(`[smoke-desktop-app] Log: ${logPath}`);
 const launchArgs = process.platform === 'linux' ? ['--no-sandbox'] : [];
 const child = spawn(executable, launchArgs, {
   cwd: dirname(executable),
+  detached: process.platform !== 'win32',
   env: {
     ...process.env,
     HOME: home,
@@ -73,11 +74,11 @@ try {
   console.error(log.split('\n').slice(-120).join('\n'));
   process.exitCode = 1;
 } finally {
-  child.kill('SIGTERM');
-  setTimeout(() => child.kill('SIGKILL'), 2_000).unref();
+  terminateChild();
   restoreSeededConfigs();
   rmSync(home, { recursive: true, force: true });
   rmSync(mindRoot, { recursive: true, force: true });
+  process.exit(process.exitCode ?? 0);
 }
 
 async function waitForApp(timeout) {
@@ -175,6 +176,29 @@ function resolveExecutable(app) {
     return join(app, 'Contents', 'MacOS', name);
   }
   return app;
+}
+
+function terminateChild() {
+  const pid = child.pid;
+  try {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+  } catch {
+    // ignore cleanup errors
+  }
+  try {
+    if (pid && process.platform !== 'win32') process.kill(-pid, 'SIGTERM');
+    else child.kill('SIGTERM');
+  } catch {
+    // already exited
+  }
+  try {
+    if (pid && process.platform !== 'win32') process.kill(-pid, 'SIGKILL');
+    else child.kill('SIGKILL');
+  } catch {
+    // already exited
+  }
+  child.unref();
 }
 
 function findPackagedApp() {

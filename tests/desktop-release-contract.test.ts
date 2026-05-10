@@ -73,6 +73,9 @@ describe('Desktop release packaging contract', () => {
     expect(smoke).toContain('setupPending: false');
     expect(smoke).toContain("join(homedir(), '.mindos', 'config.json')");
     expect(smoke).toContain('restoreSeededConfigs');
+    expect(smoke).toContain("detached: process.platform !== 'win32'");
+    expect(smoke).toContain("process.kill(-pid, 'SIGTERM')");
+    expect(smoke).toContain('process.exit(process.exitCode ?? 0)');
     expect(smoke).toContain("resolve('packages/desktop/dist')");
     expect(smoke).toContain("resolve('dist')");
     expect(smoke).toContain("join(desktopDist, 'linux-unpacked', 'MindOS')");
