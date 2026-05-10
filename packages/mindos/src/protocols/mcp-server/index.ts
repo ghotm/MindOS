@@ -30,6 +30,26 @@ const MCP_PORT       = parseInt(process.env.MCP_PORT ?? "8781", 10);
 const MCP_ENDPOINT   = process.env.MCP_ENDPOINT    ?? "/mcp";
 const CHARACTER_LIMIT = 25_000;
 
+interface NodeListenError extends Error {
+  code?: string;
+  port?: number;
+}
+
+function isNodeListenError(error: unknown): error is NodeListenError {
+  if (!(error instanceof Error)) return false;
+  const maybeListenError = error as NodeListenError;
+  return typeof maybeListenError.code === 'string'
+    && (typeof maybeListenError.port === 'number' || error.message.startsWith('listen '));
+}
+
+function formatMcpListenError(error: NodeListenError): string {
+  const port = error.port ?? MCP_PORT;
+  if (error.code === 'EADDRINUSE') {
+    return `MCP HTTP port ${port} is already in use on ${MCP_HOST}. Stop the existing server or set MINDOS_MCP_PORT to another port.`;
+  }
+  return `Failed to start MindOS MCP HTTP server on ${MCP_HOST}:${port}: ${error.message}`;
+}
+
 function headers(agentName?: string): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   if (AUTH_TOKEN) h["Authorization"] = `Bearer ${AUTH_TOKEN}`;
@@ -685,6 +705,23 @@ function createMcpServer(): McpServer {
   return server;
 }
 
+function listenHttpServer(httpServer: ReturnType<typeof createServer>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => {
+      httpServer.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      httpServer.off('error', onError);
+      resolve();
+    };
+
+    httpServer.once('error', onError);
+    httpServer.once('listening', onListening);
+    httpServer.listen(MCP_PORT, MCP_HOST);
+  });
+}
+
 // ─── Start ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -748,11 +785,10 @@ async function main() {
     });
 
     const httpServer = createServer(expressApp as Parameters<typeof createServer>[1]);
-    httpServer.listen(MCP_PORT, MCP_HOST, () => {
-      const displayHost = MCP_HOST === '0.0.0.0' ? '127.0.0.1' : MCP_HOST;
-      console.error(`MindOS MCP server (HTTP) listening on http://${displayHost}:${MCP_PORT}${MCP_ENDPOINT}`);
-      console.error(`API backend: ${BASE_URL}`);
-    });
+    await listenHttpServer(httpServer);
+    const displayHost = MCP_HOST === '0.0.0.0' ? '127.0.0.1' : MCP_HOST;
+    console.error(`MindOS MCP server (HTTP) listening on http://${displayHost}:${MCP_PORT}${MCP_ENDPOINT}`);
+    console.error(`API backend: ${BASE_URL}`);
 
     // Detect parent-exit via stdin EOF — but only when stdin is a real pipe
     // from a parent process (e.g. Desktop/Electron).  Under launchd/systemd,
@@ -778,6 +814,7 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error("Fatal:", e);
+  if (isNodeListenError(e)) console.error(formatMcpListenError(e));
+  else console.error("Fatal:", e);
   process.exit(1);
 });

@@ -114,6 +114,50 @@ describe('mindos mcp stdio transport (regression)', () => {
     expect(blocker!.listening).toBe(true);
     proc.kill('SIGTERM');
   }, 15_000);
+
+  it('reports an occupied HTTP port without an unhandled server error', async () => {
+    const port = await getFreePort();
+
+    blocker = createServer();
+    await new Promise<void>((resolve, reject) => {
+      blocker!.listen(port, '127.0.0.1', () => resolve());
+      blocker!.on('error', reject);
+    });
+
+    const proc = spawn(process.execPath, [CLI, 'mcp'], {
+      env: {
+        ...process.env,
+        MCP_TRANSPORT: 'http',
+        MCP_HOST: '127.0.0.1',
+        MINDOS_MCP_PORT: String(port),
+        MINDOS_URL: 'http://localhost:3456',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    children.push(proc);
+
+    let stderr = '';
+    proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error(`MCP HTTP process did not exit within 10s. stderr: ${stderr}`)),
+        10_000,
+      );
+      proc.on('exit', (exitCode) => {
+        clearTimeout(timeout);
+        resolve(exitCode);
+      });
+      proc.on('error', (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+    });
+
+    expect(code).not.toBe(0);
+    expect(stderr).toContain(`MCP HTTP port ${port} is already in use`);
+    expect(stderr).not.toContain("Unhandled 'error' event");
+  }, 15_000);
 });
 
 // ── CLI handler env construction (pure logic, no spawning) ────────────────

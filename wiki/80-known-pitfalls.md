@@ -3113,6 +3113,26 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/mindos/src/server.test.ts` 覆盖 `agent..skill` 可以从 skill root copy 到目标目录，同时保留 `../mindos` 和 target path 中真实 `..` 段的拒绝用例。
 
+### MCP HTTP server listen error 必须走显式错误路径（2026-05-10）
+
+**症状**：显式以 HTTP transport 启动 `mindos mcp`，且 MCP 端口已被占用时，Node 会输出 `Unhandled 'error' event` 和堆栈，用户看不到可执行的修复建议。
+
+**根因**：`httpServer.listen()` 只注册了成功 callback，没有注册 `error` listener。端口占用等启动失败会作为 server `error` 事件抛出，而不是进入 `main().catch()`。
+
+**修复**：把 HTTP server 启动包装成 `listenHttpServer()` promise，同时监听 `listening` 和 `error`；`EADDRINUSE` 输出明确的端口占用提示和 `MINDOS_MCP_PORT` 迁移建议。
+
+**防回归**：`tests/unit/cli-mcp-stdio-default.test.ts` 用临时 TCP server 占用动态端口，确认显式 HTTP transport 会非零退出、输出 `MCP HTTP port ... is already in use`，且不再出现 `Unhandled 'error' event`。
+
+### 时间边界测试必须固定 Date.now（2026-05-10）
+
+**症状**：`DailyEcho Storage > cleanupOldReports() > should keep reports at boundary (30 days ago)` 在全量 web 测试中偶发失败，刚创建的“正好 30 天前”报告被 cleanup 删除。
+
+**根因**：测试用一次 `Date.now()` 生成 boundary report，`cleanup()` 内部再调用一次 `Date.now()` 计算 cutoff。两次调用相差几毫秒，导致“正好 30 天前”的 report 实际变成 cutoff 之前。
+
+**修复**：边界测试必须用 fake clock 或 `vi.spyOn(Date, 'now')` 固定时间；不要用多个真实时钟调用验证精确毫秒边界。
+
+**防回归**：`packages/web/__tests__/lib/daily-echo-storage.test.ts` 固定 `Date.now()` 后再构造 30 天边界 report，避免全量 gate 因调度延迟随机失败。
+
 ### 删除风险评估不要把 `..name` 当成系统路径（2026-05-10）
 
 **症状**：Desktop 与产品 CLI 的 `assessDeletionRisk()` 会把 `.mindos/..cache/runtime` 这种仍在配置目录内的路径标记为 `isSystemPath: true`，误报为系统路径风险。

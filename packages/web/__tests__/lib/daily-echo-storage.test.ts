@@ -3,7 +3,7 @@
  * Save, retrieve, delete, cleanup reports
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { DailyEchoReport } from '../types';
 
 /**
@@ -338,7 +338,9 @@ describe('DailyEcho Storage', () => {
 
     it('should keep reports at boundary (30 days ago)', async () => {
       // Given: report exactly 30 days old
-      const boundaryTime = Date.now() - 30 * 86400000;
+      const now = new Date('2026-04-10T12:00:00.000Z').getTime();
+      const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      const boundaryTime = now - 30 * 86400000;
       const boundaryReport: DailyEchoReport = {
         id: 'boundary-1',
         date: '2026-03-11',
@@ -355,14 +357,18 @@ describe('DailyEcho Storage', () => {
         rawMarkdown: 'Boundary',
       };
 
-      await db.save(boundaryReport);
+      try {
+        await db.save(boundaryReport);
 
-      // When: cleaning up 30 days
-      await db.cleanup(30);
+        // When: cleaning up 30 days
+        await db.cleanup(30);
 
-      // Then: boundary report kept (inclusive)
-      const all = await db.getAll();
-      expect(all.length).toBeGreaterThanOrEqual(1);
+        // Then: boundary report kept (inclusive)
+        const all = await db.getAll();
+        expect(all.length).toBeGreaterThanOrEqual(1);
+      } finally {
+        dateNowSpy.mockRestore();
+      }
     });
   });
 
