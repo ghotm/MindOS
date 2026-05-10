@@ -478,7 +478,7 @@ function notifyPathAppendedOnce(): void {
 export function ensureMindosCliShim(opts?: {
   /** default true on macOS/Linux */
   appendPath?: boolean;
-}): { ok: boolean; error?: string } {
+}): { ok: boolean; error?: string; pathAppended?: boolean } {
   const cliJs = resolveCliJs();
   if (!cliJs) {
     const msg =
@@ -511,7 +511,37 @@ export function ensureMindosCliShim(opts?: {
   writeUninstallScript();
 
   console.info('[MindOS] CLI shim:', shimPath(), '→', cliJs);
-  return { ok: true };
+  return { ok: true, pathAppended: appended };
+}
+
+export function buildRefreshCliSuccessDialog(
+  platform: NodeJS.Platform,
+  zh: boolean,
+  pathAppended: boolean,
+): Electron.MessageBoxOptions {
+  if (platform === 'win32') {
+    return {
+      type: 'info',
+      title: zh ? 'mindos 命令' : 'mindos command',
+      message: pathAppended
+        ? (zh
+            ? `已更新 ${shimPath()}，并已将 ${shimDir()} 加入用户 PATH。请新开终端后运行 mindos --help。`
+            : `Updated ${shimPath()} and added ${shimDir()} to your user PATH. Open a new terminal, then run mindos --help.`)
+        : (zh
+            ? `已更新 ${shimPath()}。如果新终端仍找不到 mindos，请将以下目录加入用户 PATH：`
+            : `Updated ${shimPath()}. If a new terminal still cannot find mindos, add this folder to your user PATH:`),
+      detail: shimDir(),
+    };
+  }
+
+  return {
+    type: 'info',
+    title: zh ? 'mindos 命令' : 'mindos command',
+    message: zh
+      ? '已更新 ~/.mindos/bin/mindos。若终端仍提示找不到命令，请新开终端窗口，或执行 source ~/.zshrc。'
+      : 'Updated ~/.mindos/bin/mindos. Open a new terminal or run source ~/.zshrc if the command is not found.',
+    detail: shimPath(),
+  };
 }
 
 /** Tray / manual: refresh shim + show result (and Windows PATH hint). */
@@ -519,25 +549,7 @@ export function refreshMindosCliAndNotify(parent: BrowserWindow | null): void {
   const r = ensureMindosCliShim({ appendPath: true });
   const zh = app.getLocale()?.toLowerCase().startsWith('zh');
   if (r.ok) {
-    if (process.platform === 'win32') {
-      showMessageBoxSafe(parent, {
-        type: 'info',
-        title: zh ? 'mindos 命令' : 'mindos command',
-        message: zh
-          ? `已更新 ${shimPath()}。请将以下目录加入系统 PATH 后新开终端：`
-          : `Updated ${shimPath()}. Add this folder to your user PATH, then open a new terminal:`,
-        detail: shimDir(),
-      });
-    } else {
-      showMessageBoxSafe(parent, {
-        type: 'info',
-        title: zh ? 'mindos 命令' : 'mindos command',
-        message: zh
-          ? '已更新 ~/.mindos/bin/mindos。若终端仍提示找不到命令，请新开终端窗口，或执行 source ~/.zshrc。'
-          : 'Updated ~/.mindos/bin/mindos. Open a new terminal or run source ~/.zshrc if the command is not found.',
-        detail: shimPath(),
-      });
-    }
+    showMessageBoxSafe(parent, buildRefreshCliSuccessDialog(process.platform, zh, r.pathAppended === true));
     return;
   }
   showMessageBoxSafe(parent, {

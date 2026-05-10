@@ -34,4 +34,15 @@ describe('install-cli-shim', () => {
     expect(script).not.toContain('del /f /q "%USERPROFILE%\\MindOS\\mind"');
     expect(script).not.toContain('TODO: uninstall.bat');
   });
+
+  it('does not tell Windows users to manually add PATH after PATH was appended', async () => {
+    const { buildRefreshCliSuccessDialog } = await import('./install-cli-shim');
+
+    const dialog = buildRefreshCliSuccessDialog('win32', false, true);
+
+    expect(dialog.message).toContain('added');
+    expect(dialog.message).toContain('user PATH');
+    expect(dialog.message).toContain('Open a new terminal');
+    expect(dialog.message).not.toContain('add this folder');
+  });
 });

@@ -2873,6 +2873,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/web/__tests__/hooks/useResizeDrag-lint.test.ts`、`packages/web/__tests__/renderers/useRendererState-lint.test.ts`、`packages/web/__tests__/lib/LocaleStoreInit-lint.test.ts`、`packages/web/__tests__/hooks/acp-hooks-lint.test.ts`、`packages/web/__tests__/hooks/hook-ref-lint.test.ts`、`packages/web/__tests__/components/find-in-page-lint.test.ts`、`packages/web/__tests__/ask/provider-model-capsule-lint.test.ts`、`packages/web/__tests__/ask/ask-content-lint.test.ts` 和 `packages/web/__tests__/components/ref-cleanup-lint.test.ts` 用 ESLint JSON 输出断言关键启动/render hook/component 不再出现 `react-hooks/refs` warning。
 
+### Desktop CLI refresh 文案要跟随 PATH 实际结果（2026-05-10）
+
+**症状**：Windows Desktop 手动刷新 CLI shim 时，底层已经会尝试写入 User PATH registry，但成功对话框仍提示用户“手动把目录加入 PATH”。用户会误以为自动修复没有发生，重复修改系统环境变量。
+
+**根因**：`ensureMindosCliShim()` 只返回 `{ ok }`，`refreshMindosCliAndNotify()` 无法区分“PATH 已自动追加”和“只刷新了 shim 文件”，所以 Windows 分支一直展示旧的手动指引。
+
+**修复**：`ensureMindosCliShim()` 返回 `pathAppended`，成功弹窗由 `buildRefreshCliSuccessDialog()` 统一生成：PATH 已追加时明确提示“已加入 user PATH，请新开终端”；未追加时才提示手动添加 fallback。
+
+**防回归**：`packages/desktop/src/install-cli-shim.test.ts` 覆盖 Windows `pathAppended=true` 的成功对话框，断言不会再提示 “add this folder”。
+
 ### Monorepo 迁移后 workflow 仍引用旧顶层目录（2026-04-27）
 
 **症状**：GitHub Actions 在发版或构建 Desktop/Mobile 时直接失败，常见报错是 `cd app: No such file or directory`、`cd mcp: No such file or directory`、`cd desktop: No such file or directory`。
