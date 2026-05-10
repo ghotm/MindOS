@@ -29,6 +29,18 @@ function shimPath() {
   return resolve(shimDir(), platform() === 'win32' ? 'mindos.cmd' : 'mindos');
 }
 
+function pathDelimiterForPlatform() {
+  return platform() === 'win32' ? ';' : delimiter;
+}
+
+function normalizePathDirForCompare(value) {
+  const trimmed = String(value || '').trim();
+  if (platform() === 'win32') {
+    return trimmed.replace(/[\\/]+$/g, '').toLowerCase();
+  }
+  return trimmed.replace(/\/+$/g, '');
+}
+
 function shellSingleQuote(s) {
   return `'${s.replace(/'/g, `'\"'\"'`)}'`;
 }
@@ -131,8 +143,9 @@ function appendPathWindowsProfileFallback(binDir) {
  */
 function appendPathWindows() {
   const binDir = shimDir();
-  const dirs = (process.env.PATH || '').split(platform() === 'win32' ? ';' : delimiter);
-  if (dirs.some(d => d.toLowerCase() === binDir.toLowerCase())) return false;
+  const normalizedBinDir = normalizePathDirForCompare(binDir);
+  const dirs = (process.env.PATH || '').split(pathDelimiterForPlatform());
+  if (dirs.some(d => normalizePathDirForCompare(d) === normalizedBinDir)) return false;
 
   try {
     const psOpts = { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] };
@@ -258,7 +271,13 @@ export function ensureCliShim() {
 
 /** Check if ~/.mindos/bin is in the current PATH. */
 export function isShimInPath() {
-  const dirs = (process.env.PATH || '').split(delimiter);
+  const dirs = (process.env.PATH || '').split(pathDelimiterForPlatform());
   const binDir = shimDir();
-  return dirs.some(d => d === binDir || d === '$HOME/.mindos/bin' || d === '~/.mindos/bin');
+  const normalizedBinDir = normalizePathDirForCompare(binDir);
+  return dirs.some((d) => {
+    const normalized = normalizePathDirForCompare(d);
+    return normalized === normalizedBinDir
+      || normalized === normalizePathDirForCompare('$HOME/.mindos/bin')
+      || normalized === normalizePathDirForCompare('~/.mindos/bin');
+  });
 }

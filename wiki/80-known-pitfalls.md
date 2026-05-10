@@ -2903,6 +2903,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`tests/unit/cli-smoke.test.ts` 覆盖 Windows / Darwin 的 shim 可执行路径后缀。
 
+### CLI shim PATH 检测必须按平台归一化（2026-05-10）
+
+**症状**：Windows 上 `~/.mindos/bin` 已在 PATH，但目录大小写不同或测试环境 mock `win32` 平台时，`mindos doctor` 仍可能提示 shim 不在 PATH，并重复触发修复路径。
+
+**根因**：doctor 和 `cli-shim.js` 各自实现 PATH 检测；`isShimInPath()` 用当前 Node 的 `path.delimiter` 和精确字符串比较，未按 Windows 的分号分隔、大小写不敏感规则归一化。
+
+**修复**：PATH 检测集中到 `isShimInPath()`；该 helper 按 `os.platform()` 选择分隔符，比较前 trim、去尾部分隔符，并在 Windows 上转小写。doctor 不再维护独立检测逻辑。
+
+**防回归**：`tests/unit/cli-shim.test.ts` mock Windows 平台，用大小写不同的 shim 目录和 `;` 分隔 PATH 验证 `isShimInPath()`。
+
 ### Web 全量测试中的动态 import smoke test 要给足超时预算（2026-05-10）
 
 **症状**：`@mindos/web` 全量 Vitest 并发执行时，`__tests__/core/request-scoped-tools.test.ts` 偶发在默认 5s 超时。单独运行约 0.7s 通过，但与多个 ESLint 合约测试、Next build 后续测试并发时，动态 import `@/lib/agent/tools` 会被 CPU/transform 竞争拖慢。

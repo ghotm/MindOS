@@ -5,7 +5,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve, delimiter } from 'node:path';
+import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { CONFIG_PATH, PRODUCT_PACKAGE_JSON, WEB_APP_DIR } from '../lib/constants.js';
 import { bold, dim, cyan, green, red, yellow } from '../lib/colors.js';
@@ -122,9 +122,13 @@ export const run = async (_args, flags) => {
   }
 
   // 4c. ~/.mindos/bin in PATH (CLI shim)
-  const mindosBin = resolve(homedir(), '.mindos', 'bin');
-  const pathDirs = (process.env.PATH || '').split(delimiter);
-  if (pathDirs.some(d => d === mindosBin || d === '$HOME/.mindos/bin' || d === '~/.mindos/bin')) {
+  let shimVisible = false;
+  try {
+    const { isShimInPath } = await import('../lib/cli-shim.js');
+    shimVisible = isShimInPath();
+  } catch { /* fallback to repair attempt below */ }
+
+  if (shimVisible) {
     ok(`~/.mindos/bin is in PATH`);
   } else {
     try {

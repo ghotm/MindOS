@@ -75,4 +75,21 @@ describe('CLI shim generation', () => {
       expect.stringContaining("[Environment]::SetEnvironmentVariable('Path', '"),
     ], expect.any(Object));
   });
+
+  it('detects the Windows shim directory in PATH case-insensitively', async () => {
+    mockWindowsCliShim();
+    const shimDir = path.resolve(tempDir, '.mindos', 'bin');
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${shimDir.toUpperCase()};C:\\Tools`;
+
+    try {
+      const shim = await import('../../packages/mindos/bin/lib/cli-shim.js') as {
+        isShimInPath: () => boolean;
+      };
+
+      expect(shim.isShimInPath()).toBe(true);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
 });
