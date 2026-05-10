@@ -2211,6 +2211,12 @@ mindos onboard
 - **解决：** 增加 `/settings` 页面，复用 `SettingsContent` 的 `panel` variant，并支持 `?tab=` 初始化 tab；setup 未完成时保持和其他页面一致跳转 `/setup`。
 - **防回归：** `packages/web/__tests__/settings/settings-page-route.test.ts` 断言 `/settings` route 存在，并继续渲染共享 SettingsContent。
 
+### Command palette 内部导航必须指向真实 App Router 页面 (2026-05-10)
+
+- **问题：** SearchModal 的 Discover command 仍然 `router.push('/discover')`，但实际页面已经是 `/explore`。用户用 command palette 进入发现页时会落到 404。
+- **解决：** 将 Discover command 导航改为 `/explore`，保持文案不变但指向现有页面。
+- **防回归：** `packages/web/__tests__/components/search-modal-route.test.ts` 禁止 SearchModal 重新引入 `/discover`，并断言使用 `/explore`。
+
 ### Desktop SSH 隧道探测不要把 ssh 路径和 host 拼进 shell (2026-05-10)
 
 - **问题：** `packages/desktop/src/ssh-tunnel.ts` 用 `execAsync("ssh ... ${host}")`、`execAsync(\`ssh-add "${resolvedKey}"\`)`、`execSync(\`"${candidate}" -V\`)` 探测 SSH。Windows 安装路径、key 路径或 host 名含空格/引号时容易解析错，也扩大了 shell 注入面。

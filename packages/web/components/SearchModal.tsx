@@ -125,7 +125,7 @@ export default function SearchModal({ open, onClose }: SearchModalProps) {
       id: 'go-discover',
       label: t.search.goToDiscover,
       icon: <Compass size={15} />,
-      execute: () => { router.push('/discover'); onClose(); },
+      execute: () => { router.push('/explore'); onClose(); },
     },
     {
       id: 'go-help',
