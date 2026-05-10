@@ -2205,6 +2205,12 @@ mindos onboard
 - **解决：** 保留 `cmd` 作为 UI 展示字符串，但实际执行改为 argv 调用；默认优先用 `process.execPath` 运行 npm 的 `npx-cli.js`，避免 Windows `.cmd` shell shim。
 - **规则：** API/CLI 返回给前端看的命令字符串不能直接作为执行入口；执行入口必须保留结构化 command + args。Windows 下不要把 `.cmd` / `.bat` 当作 `execFile` 目标。
 
+### Client SDK 启动 MindOS server 不要让所有 Windows 命令进 shell (2026-05-10)
+
+- **问题：** `createMindosServer()` 为了兼容 Windows `mindos.cmd`，直接 `spawn(command, args, { shell: process.platform === 'win32' })`。这会让用户传入的 `command` 重新进入 shell 解析，`mindos && calc` 这类 command 名会从“找不到可执行文件”变成 shell 表达式。
+- **解决：** 新增 `resolveMindosServerSpawn()`：Windows 下先用 `where <command>` 找到实际 launcher，只有 `.cmd` / `.bat` 启用 shell；`.exe` 和未解析命令保持 `shell: false`。Unix 继续直接 argv spawn。
+- **防回归：** `packages/mindos/src/client.test.ts` 覆盖 Windows `.cmd`、Windows `.exe`、未解析 metacharacter command 三类路径。
+
 ### Product Server sync git metadata 不要用 `execSync('git ...')` (2026-05-10)
 
 - **问题：** `packages/mindos/src/server/handlers/sync.ts` 的默认 metadata path 用 `execSync('git remote ...')`、`execSync('git rev-list ...')`。命令当前是静态字符串，但这会让后续改动很容易把 branch/remote 参数拼回 shell。

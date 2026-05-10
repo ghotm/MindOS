@@ -1,5 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
-import { createMindosClient, MindosHttpError } from './client.js';
+import * as childProcess from 'node:child_process';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createMindosClient, MindosHttpError, resolveMindosServerSpawn } from './client.js';
+
+vi.mock('node:child_process', () => ({
+  execFileSync: vi.fn(),
+  spawn: vi.fn(),
+}));
+
+const mockExecFileSync = vi.mocked(childProcess.execFileSync);
 
 describe('MindOS client SDK boundary', () => {
   it('sends JSON requests with bearer auth and normalized paths', async () => {
@@ -130,5 +138,47 @@ describe('MindOS client SDK boundary', () => {
     ]);
     expect(String(fetchMock.mock.calls[0]![0])).toBe('http://localhost:3456/api/ask');
     expect(fetchMock.mock.calls[0]![1]?.method).toBe('POST');
+  });
+});
+
+describe('resolveMindosServerSpawn', () => {
+  const originalPlatform = process.platform;
+
+  afterEach(() => {
+    mockExecFileSync.mockReset();
+    Object.defineProperty(process, 'platform', { value: originalPlatform });
+  });
+
+  it('uses a shell for Windows cmd launchers only', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    mockExecFileSync.mockReturnValue('C:\\Users\\test\\AppData\\Roaming\\npm\\mindos.cmd\r\n' as any);
+
+    expect(resolveMindosServerSpawn('mindos')).toEqual({
+      command: 'C:\\Users\\test\\AppData\\Roaming\\npm\\mindos.cmd',
+      shell: true,
+    });
+    expect(mockExecFileSync).toHaveBeenCalledWith('where', ['mindos'], expect.any(Object));
+  });
+
+  it('does not use a shell for Windows exe launchers', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    mockExecFileSync.mockReturnValue('C:\\Program Files\\MindOS\\mindos.exe\r\n' as any);
+
+    expect(resolveMindosServerSpawn('mindos')).toEqual({
+      command: 'C:\\Program Files\\MindOS\\mindos.exe',
+      shell: false,
+    });
+  });
+
+  it('does not shell-evaluate unresolved command names with metacharacters', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error('not found');
+    });
+
+    expect(resolveMindosServerSpawn('mindos && calc')).toEqual({
+      command: 'mindos && calc',
+      shell: false,
+    });
   });
 });

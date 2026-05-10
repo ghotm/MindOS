@@ -123,6 +123,11 @@ export type MindosServer = {
   close(): Promise<void>;
 };
 
+export type MindosServerSpawnSpec = {
+  command: string;
+  shell: boolean;
+};
+
 const DEFAULT_HOSTNAME = '127.0.0.1';
 const DEFAULT_PORT = 3456;
 
@@ -361,6 +366,33 @@ function createProcessFailureWaiter(proc: childProcess.ChildProcess) {
   return { promise, cleanup };
 }
 
+function resolveWindowsCommand(command: string): string | null {
+  const trimmed = command.trim();
+  if (!trimmed) return null;
+  try {
+    const stdout = childProcess.execFileSync('where', [trimmed], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3000,
+    });
+    return stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveMindosServerSpawn(command: string): MindosServerSpawnSpec {
+  if (process.platform !== 'win32') {
+    return { command, shell: false };
+  }
+
+  const resolvedCommand = resolveWindowsCommand(command) ?? command.trim();
+  return {
+    command: resolvedCommand,
+    shell: /\.(?:cmd|bat)$/i.test(resolvedCommand),
+  };
+}
+
 export async function createMindosServer(options: MindosServerOptions = {}): Promise<MindosServer> {
   const hostname = options.hostname ?? DEFAULT_HOSTNAME;
   const port = options.port ?? process.env.MINDOS_WEB_PORT ?? DEFAULT_PORT;
@@ -371,7 +403,8 @@ export async function createMindosServer(options: MindosServerOptions = {}): Pro
   const args = ['serve', '--port', String(port)];
   if (options.verbose) args.push('--verbose');
 
-  const proc = childProcess.spawn(command, args, {
+  const serverSpawn = resolveMindosServerSpawn(command);
+  const proc = childProcess.spawn(serverSpawn.command, args, {
     env: {
       ...process.env,
       ...options.env,
@@ -379,7 +412,7 @@ export async function createMindosServer(options: MindosServerOptions = {}): Pro
       MINDOS_WEB_PORT: String(port),
       ...(options.token ? { MINDOS_AUTH_TOKEN: options.token } : {}),
     },
-    shell: process.platform === 'win32',
+    shell: serverSpawn.shell,
     stdio: 'ignore',
   });
 
