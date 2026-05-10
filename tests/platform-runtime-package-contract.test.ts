@@ -106,7 +106,8 @@ describe('OpenCode-style platform runtime packages', () => {
     const workflow = readText('.github/workflows/publish-npm.yml');
 
     expect(workflow).toContain('"dist/protocols/mcp-server/index.cjs"');
-    expect(workflow).toContain('"static-web/index.html"');
+    expect(workflow).toContain('"bin/mindos" "runtime-manifest.json" "package.json"');
+    expect(workflow).toContain('Published Bun single-binary platform package should not expose expanded runtime assets');
     expect(workflow).toContain('Published package missing $f');
     expect(workflow).toContain('Published platform package missing $f');
   });

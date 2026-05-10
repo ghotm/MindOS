@@ -125,7 +125,7 @@ jobs:
             echo "❌ npm pack failed — no platform .tgz file found"
             exit 1
           fi
-          for f in "bin/mindos" "runtime-manifest.json" "package.json" "dist/protocols/mcp-server/index.cjs" "static-web/index.html"; do
+          for f in "bin/mindos" "runtime-manifest.json" "package.json"; do
             if ! tar -tzf "$PTGZ" | grep -q "$f"; then
               echo "❌ Published platform package missing $f!"
               exit 1
@@ -135,6 +135,10 @@ jobs:
 
           if tar -tzf "$PTGZ" | grep -q "_standalone/"; then
             echo "❌ Published Bun single-binary platform package should not expose _standalone/"
+            exit 1
+          fi
+          if tar -tzf "$PTGZ" | grep -Eq "^(package/)?(static-web/|dist/protocols/)"; then
+            echo "❌ Published Bun single-binary platform package should not expose expanded runtime assets"
             exit 1
           fi
 
