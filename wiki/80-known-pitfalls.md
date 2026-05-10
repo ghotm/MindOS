@@ -3083,6 +3083,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/mindos/src/knowledge/spaces/space-manager.test.ts` 覆盖 `Research..2026` 可以创建，同时既有 unsafe name case 继续覆盖 `../evil`、nested path 和 absolute path。
 
+### 服务器生命周期测试不要绑定固定端口（2026-05-10）
+
+**症状**：`@mindos/api` 的 lifecycle 测试直接监听 `localhost:3000`，在本机或 CI 已有服务占用该端口时会出现不稳定失败。
+
+**根因**：测试验证的是 `ApiServer.start()/stop()` 生命周期，不需要固定端口；固定端口把外部环境状态引入了单元测试。
+
+**修复**：生命周期测试使用 `port: 0` 让 OS 分配空闲端口，保留 start/stop 与日志断言。
+
+**防回归**：`packages/retrieval/api/src/server.test.ts` 的 Server Lifecycle case 固定使用 `config.port = 0`，避免和开发服务器或其他测试进程抢端口。
+
 ### 删除风险评估不要把 `..name` 当成系统路径（2026-05-10）
 
 **症状**：Desktop 与产品 CLI 的 `assessDeletionRisk()` 会把 `.mindos/..cache/runtime` 这种仍在配置目录内的路径标记为 `isSystemPath: true`，误报为系统路径风险。

@@ -272,12 +272,13 @@ describe('ApiServer', () => {
 
   describe('Server Lifecycle', () => {
     it('should start and stop server successfully', async () => {
+      config.port = 0
       const server = new ApiServer(config, mockCtx)
       const startResult = await server.start()
       expect(startResult.ok).toBe(true)
       expect(mockCtx.logger.info).toHaveBeenCalledWith(
         'API server started',
-        expect.objectContaining({ host: 'localhost', port: 3000 })
+        expect.objectContaining({ host: 'localhost', port: 0 })
       )
 
       const stopResult = await server.stop()
