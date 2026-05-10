@@ -2181,6 +2181,12 @@ mindos onboard
 - **解决：** 抽出 `runGit(cwd, args)`，所有 git metadata 查询都用 `execFileSync('git', args, ...)`，stderr 走 stdio 配置而不是 shell 重定向。
 - **规则：** Product Server 只要调用 git，都保持 `command + args` 结构；不要把“现在没有用户输入”当作可以用 shell 字符串的理由。
 
+### Web sync-config git metadata 不要复制 shell 版实现 (2026-05-10)
+
+- **问题：** `packages/web/lib/sync-config.ts` 仍保留 `execSync('git remote get-url origin')`、`execSync('git rev-parse --abbrev-ref HEAD')`、`execSync('git rev-list --count @{u}..HEAD')`。这和 product server sync handler 已修复的 shell probe 是同一类问题，容易出现双份实现不一致。
+- **解决：** Web sync config 的 git metadata probe 也改成 `execFileSync('git', args, ...)`，和 product server 保持同一安全模式。
+- **防回归：** `packages/web/__tests__/lib/sync-config-subprocess.test.ts` 增加 source contract，禁止 Web sync-config 回退到 `execSync(` 或单字符串 git 命令。
+
 ### VS Code 系 MCP Agent Windows 配置路径不能落到 `~/.config` (2026-05-10)
 
 - **问题：** `github-copilot`、`cline`、`roo`、`trae-cn` 的 MCP global config 只区分 macOS 和 Linux；Windows 下会落到 `~/.config/...`，导致安装成功但写到目标 Agent 不会读取的位置。

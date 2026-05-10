@@ -4,7 +4,7 @@
  * Extracted from sync/route.ts — provides config/state I/O and Git query helpers
  * that can be reused by CLI commands and other modules.
  */
-import { execSync, execFile } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
@@ -51,15 +51,15 @@ export function isGitRepo(dir: string): boolean {
 }
 
 export function getRemoteUrl(cwd: string): string | null {
-  try { return execSync('git remote get-url origin', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim(); } catch { return null; }
+  try { return execFileSync('git', ['remote', 'get-url', 'origin'], { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim(); } catch { return null; }
 }
 
 export function getBranch(cwd: string): string {
-  try { return execSync('git rev-parse --abbrev-ref HEAD', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim(); } catch { return 'main'; }
+  try { return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim(); } catch { return 'main'; }
 }
 
 export function getUnpushedCount(cwd: string): string {
-  try { return execSync('git rev-list --count @{u}..HEAD', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim(); } catch { return '?'; }
+  try { return execFileSync('git', ['rev-list', '--count', '@{u}..HEAD'], { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim(); } catch { return '?'; }
 }
 
 // ---------------------------------------------------------------------------
