@@ -6,7 +6,7 @@
  */
 import { execFile, execFileSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
-import { isAbsolute, join, relative, resolve } from 'path';
+import { isAbsolute, join, relative, resolve, sep } from 'path';
 import { homedir } from 'os';
 import { resolveMindosCliPath } from './project-root';
 
@@ -71,7 +71,7 @@ export function isPathWithinMindRoot(mindRoot: string, filePath: string): boolea
   const root = resolve(mindRoot);
   const target = resolve(root, filePath);
   const rel = relative(root, target);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 // ---------------------------------------------------------------------------

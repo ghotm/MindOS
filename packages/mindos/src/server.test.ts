@@ -2143,8 +2143,11 @@ describe('MindOS product server contract', () => {
     const root = mkdtempSync(join(tmpdir(), 'mindos-sync-'));
     const mindRoot = join(root, 'mind');
     mkdirSync(join(mindRoot, '.git'), { recursive: true });
+    mkdirSync(join(mindRoot, '..notes'), { recursive: true });
     writeFileSync(join(mindRoot, 'note.md'), 'local');
     writeFileSync(join(mindRoot, 'note.md.sync-conflict'), 'remote');
+    writeFileSync(join(mindRoot, '..notes', 'note.md'), 'dotted local');
+    writeFileSync(join(mindRoot, '..notes', 'note.md.sync-conflict'), 'dotted remote');
 
     let config: Record<string, any> = {
       mindRoot,
@@ -2202,6 +2205,10 @@ describe('MindOS product server contract', () => {
     expect(await handleSyncPost({ action: 'conflict-preview', remote: 'note.md' }, services)).toMatchObject({
       status: 200,
       body: { local: 'local', remote: 'remote' },
+    });
+    expect(await handleSyncPost({ action: 'conflict-preview', remote: '..notes/note.md' }, services)).toMatchObject({
+      status: 200,
+      body: { local: 'dotted local', remote: 'dotted remote' },
     });
     expect(await handleSyncPost({ action: 'resolve-conflict', remote: '../outside.md' }, services)).toMatchObject({
       status: 400,

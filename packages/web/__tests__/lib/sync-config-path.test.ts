@@ -10,6 +10,12 @@ describe('sync-config path boundary checks', () => {
     expect(isPathWithinMindRoot(root + path.sep, 'notes/todo.md')).toBe(true);
   });
 
+  it('allows child paths whose segment starts with consecutive dots', () => {
+    const root = path.join(os.tmpdir(), 'mindos-sync-root');
+
+    expect(isPathWithinMindRoot(root, '..notes/todo.md')).toBe(true);
+  });
+
   it('blocks traversal outside mindRoot', () => {
     const root = path.join(os.tmpdir(), 'mindos-sync-root');
 

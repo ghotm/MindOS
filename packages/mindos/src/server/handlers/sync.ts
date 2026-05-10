@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { json, type MindosServerResponse } from '../response.js';
 
 export type MindosSyncConfig = Record<string, any> & {
@@ -367,7 +367,7 @@ function isPathWithinMindRoot(mindRoot: string, filePath: string): boolean {
   const root = resolve(mindRoot);
   const target = resolve(root, filePath);
   const rel = relative(root, target);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 async function runCli(args: string[], timeoutMs: number, services: MindosSyncServices): Promise<void> {

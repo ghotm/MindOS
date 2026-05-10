@@ -3033,6 +3033,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`packages/desktop/src/safe-paths.test.ts` 覆盖连续点号 home 目录下的合法 runtime path，以及 `.mindos-other` sibling 目录必须被拒绝。
 
+### Sync 冲突路径 containment 不要用 `startsWith('..')`（2026-05-10）
+
+**症状**：Git sync 冲突预览/解决合法文件 `..notes/note.md` 会返回 400 `Invalid file path`，虽然文件仍在 `mindRoot` 内。
+
+**根因**：Web 与 product server 各有一份 `isPathWithinMindRoot()`，都用 `relative(root, target).startsWith('..')` 判断越界，误把 `..notes` 这种普通目录名当成父目录穿越。
+
+**修复**：相对路径 containment 只拒绝 `rel === '..'`、`rel.startsWith('..' + path.sep)` 或 `path.isAbsolute(rel)`；不要拒绝普通文件名里的连续点号。
+
+**防回归**：`packages/web/__tests__/lib/sync-config-path.test.ts` 覆盖 `..notes/todo.md`；`packages/mindos/src/server.test.ts` 覆盖 product sync conflict preview 读取 `..notes/note.md`。
+
 ### Desktop updater 路径白名单要覆盖 getRuntimePaths 全量输出（2026-05-10）
 
 **症状**：Desktop updater 下载运行时后，`getRuntimePaths()` 生成的 `tarballPath` 是 `~/.mindos/runtime-download.tar.gz`，但 `validateRuntimePath()` 会报 `SECURITY: Subdirectory not whitelisted: runtime-download.tar.gz`。
