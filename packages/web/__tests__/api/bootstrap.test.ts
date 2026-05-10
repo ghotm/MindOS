@@ -43,6 +43,14 @@ describe('GET /api/bootstrap', () => {
     expect(body.target_instruction).toBe('# WF Instructions');
   });
 
+  it('rejects Windows absolute target_dir paths', async () => {
+    invalidateCache();
+    const req = new NextRequest('http://localhost/api/bootstrap?target_dir=C:/Users/Ada');
+    const res = await GET(req);
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({ error: 'invalid target_dir' });
+  });
+
   it('includes file_index with directory structure and file counts', async () => {
     seedFile('Projects/roadmap.md', '# Roadmap');
     seedFile('Projects/pricing.md', '# Pricing');

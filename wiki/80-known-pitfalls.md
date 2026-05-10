@@ -24,6 +24,16 @@
 
 **防回归**：`tests/unit/cli-file-safe-path.test.ts` 与 `tests/unit/cli-space-safe-path.test.ts` 通过真实 CLI subprocess 覆盖 Windows absolute path、反斜杠 traversal、以及安全反斜杠子路径规范化。
 
+### Bootstrap target_dir 也要拒绝 Windows absolute path（2026-05-10）
+
+**症状**：`/api/bootstrap?target_dir=C:/Users/Ada` 在 POSIX host 上不会返回 400，而是被当成普通知识库相对目录读取，导致跨平台路径语义不一致。
+
+**根因**：Bootstrap route 只用当前 OS 的 `path.isAbsolute()` 和完整 `..` segment 校验；POSIX host 不会把 Windows drive path 当成 absolute path。
+
+**修复**：`target_dir` 同时用 `path.win32.isAbsolute()` 校验，并拒绝反斜杠输入。Bootstrap 内部路径固定使用知识库相对 POSIX-style `/`。
+
+**防回归**：`packages/mindos/src/server.test.ts` 覆盖 `target_dir=C:/Users/Ada` 与 `target_dir=C:\Users\Ada`；`packages/web/__tests__/api/bootstrap.test.ts` 覆盖 Web route 返回 400。
+
 ## v1 Monorepo Migration
 
 ### v1 迁移后不要再把顶层 `app/` / `apps/` / `desktop/` / `mobile/` 当源码入口

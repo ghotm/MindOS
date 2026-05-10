@@ -21,12 +21,21 @@ function hasParentDirectorySegment(input: string): boolean {
   return input.split(/[\\/]+/).includes('..');
 }
 
+function isInvalidTargetDir(input: string): boolean {
+  return (
+    hasParentDirectorySegment(input)
+    || path.isAbsolute(input)
+    || path.win32.isAbsolute(input)
+    || input.includes('\\')
+  );
+}
+
 export function handleBootstrapGet(
   query: URLSearchParams,
   services: BootstrapHandlerServices,
 ): MindosServerResponse<BootstrapPayload | { error: string }> {
   const targetDir = query.get('target_dir') ?? undefined;
-  if (targetDir && (hasParentDirectorySegment(targetDir) || path.isAbsolute(targetDir))) {
+  if (targetDir && isInvalidTargetDir(targetDir)) {
     return json({ error: 'invalid target_dir' }, { status: 400 });
   }
 

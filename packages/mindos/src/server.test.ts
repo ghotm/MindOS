@@ -1978,6 +1978,14 @@ describe('MindOS product server contract', () => {
       status: 400,
       body: { error: 'invalid target_dir' },
     });
+    expect(handleBootstrapGet(new URLSearchParams('target_dir=C:/Users/Ada'), services)).toMatchObject({
+      status: 400,
+      body: { error: 'invalid target_dir' },
+    });
+    expect(handleBootstrapGet(new URLSearchParams('target_dir=C:\\Users\\Ada'), services)).toMatchObject({
+      status: 400,
+      body: { error: 'invalid target_dir' },
+    });
   });
 
   it('handles local connection metadata without Web dependencies', () => {
