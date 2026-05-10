@@ -217,6 +217,24 @@ Host tilde-test
         try { fs.rmdirSync(tmpDir); } catch { /* ignore */ }
       }
     });
+
+    it('builds Windows askpass scripts without embedding passphrases in batch syntax', async () => {
+      const { buildWindowsAskpassScript } = await import('./ssh-tunnel');
+      const passphrase = String.raw`pa&ss|word<>"^%!`;
+      const script = buildWindowsAskpassScript(passphrase);
+
+      expect(script).toContain('powershell.exe');
+      expect(script).toContain('-EncodedCommand');
+      expect(script).not.toContain(`echo ${passphrase}`);
+      expect(script).not.toContain(passphrase);
+
+      const encodedCommand = script.match(/-EncodedCommand\s+([A-Za-z0-9+/=]+)/)?.[1];
+      expect(encodedCommand).toBeTruthy();
+      const command = Buffer.from(encodedCommand!, 'base64').toString('utf16le');
+      const encodedPassphrase = command.match(/FromBase64String\('([^']+)'\)/)?.[1];
+      expect(encodedPassphrase).toBeTruthy();
+      expect(Buffer.from(encodedPassphrase!, 'base64').toString('utf8')).toBe(passphrase);
+    });
   });
 
   describe('SshTunnel class', () => {

@@ -59,6 +59,16 @@ printf '%s\\n' ${shellSingleQuote(passphrase)}
 `;
 }
 
+export function buildWindowsAskpassScript(passphrase: string): string {
+  const encodedPassphrase = Buffer.from(passphrase, 'utf8').toString('base64');
+  const powerShellCommand = [
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    `[Console]::Out.WriteLine([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encodedPassphrase}')))`,
+  ].join('; ');
+  const encodedCommand = Buffer.from(powerShellCommand, 'utf16le').toString('base64');
+  return `@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedCommand}\r\n`;
+}
+
 /** Write SSH child PID to disk so we can clean up orphans on next launch */
 function writeTunnelPid(pid: number): void {
   try { writeFileSync(SSH_TUNNEL_PID_FILE, String(pid), 'utf-8'); } catch { /* best effort */ }
@@ -240,12 +250,10 @@ export async function addKeyToAgent(keyPath: string, passphrase: string): Promis
   const resolvedKey = path.isAbsolute(keyPath) ? keyPath : path.join(home, '.ssh', keyPath);
 
   if (process.platform === 'win32') {
-    // On Windows, use a temporary script that echoes the passphrase
+    // On Windows, avoid putting the passphrase in cmd.exe syntax.
     const tmpScript = path.join(app.getPath('temp'), `mindos-askpass-${Date.now()}.bat`);
     try {
-      // Escape batch special characters in passphrase
-      const escaped = passphrase.replace(/([&|<>^%!])/g, '^$1').replace(/"/g, '\\"');
-      writeFileSync(tmpScript, `@echo off\necho ${escaped}`, 'utf-8');
+      writeFileSync(tmpScript, buildWindowsAskpassScript(passphrase), 'utf-8');
       await execFileAsync('ssh-add', [resolvedKey], {
         timeout: 10000,
         env: { ...process.env, SSH_ASKPASS: tmpScript, SSH_ASKPASS_REQUIRE: 'force', DISPLAY: ':0' },

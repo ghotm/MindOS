@@ -3225,6 +3225,16 @@ const visibleNodes = useMemo(() => {
 
 **防回归**：`tests/unit/cli-mcp-install-toml.test.ts`、`tests/unit/cli-mcp-install-yaml.test.ts` 和 `packages/mindos/src/server.test.ts` 覆盖含引号、换行和点号 key 的生成结果。
 
+### Windows SSH_ASKPASS 不能用 batch echo 拼接密钥口令（2026-05-10）
+
+**症状**：Desktop Remote mode 在 Windows 上给 `ssh-add` 提供 passphrase 时，如果口令含 `&`、`|`、`<`、`>`、`"`、`^`、`%`、`!` 等 cmd metachar，临时 askpass `.bat` 可能输出错误口令或被 `cmd.exe` 解释成额外语法。
+
+**根因**：Windows 分支用 `echo ${escaped}` 生成 askpass 脚本。batch escaping 很难覆盖所有组合，且 `echo` 本身有 option/状态语义。
+
+**修复**：Windows askpass 脚本只运行 `powershell.exe -EncodedCommand ...`，passphrase 用 UTF-8 base64 放进 encoded PowerShell command，由 PowerShell 解码后直接写 stdout，避免交给 batch 解析。
+
+**防回归**：`packages/desktop/src/ssh-tunnel.test.ts` 覆盖含 batch metachar 的 passphrase，确认脚本不包含 raw passphrase 或 `echo <passphrase>`，并能从 encoded command 还原原始口令。
+
 ### Monorepo 迁移后 workflow 仍引用旧顶层目录（2026-04-27）
 
 **症状**：GitHub Actions 在发版或构建 Desktop/Mobile 时直接失败，常见报错是 `cd app: No such file or directory`、`cd mcp: No such file or directory`、`cd desktop: No such file or directory`。
