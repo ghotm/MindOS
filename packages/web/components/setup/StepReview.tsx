@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { copyToClipboard } from '@/lib/clipboard';
 import { toast } from '@/lib/toast';
+import { fetchMindosHealth } from '@/lib/mindos-health';
 import type { SetupState, SetupMessages, AgentInstallStatus } from './types';
 import { PROVIDER_PRESETS } from '@/lib/agent/providers';
 import { useLocale } from '@/lib/stores/locale-store';
@@ -54,8 +55,7 @@ export function RestartButton({ s, newPort, webPassword }: { s: SetupMessages; n
       const startPoll = () => { pollRef.current = setInterval(async () => {
         attempts++;
         try {
-          const r = await fetch(`${baseUrl}/api/health`);
-          if (r.status < 500) {
+          if (await fetchMindosHealth(`${baseUrl}/api/health`)) {
             clearInterval(pollRef.current);
             // Auto-authenticate so the user doesn't have to re-enter their password
             if (webPassword) {

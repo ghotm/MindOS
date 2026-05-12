@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader2, CheckCircle2 } from 'lucide-react';
 import { useLocale } from '@/lib/stores/locale-store';
+import { fetchMindosHealth } from '@/lib/mindos-health';
 
 const UPDATE_STATE_KEY = 'mindos_update_in_progress';
 const POLL_INTERVAL = 3_000;
@@ -22,8 +23,7 @@ export default function UpdateOverlay() {
   const startPolling = useCallback(() => {
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch('/api/health', { signal: AbortSignal.timeout(3000) });
-        if (res.ok) {
+        if (await fetchMindosHealth('/api/health', { signal: AbortSignal.timeout(3000) })) {
           clearInterval(pollRef.current);
           pollRef.current = undefined;
           // Server is back — check if version changed

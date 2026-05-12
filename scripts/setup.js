@@ -21,7 +21,7 @@
  */
 
 import { existsSync, cpSync, writeFileSync, readFileSync, mkdirSync, createWriteStream, rmSync, openSync } from 'node:fs';
-import { resolve, dirname, join } from 'node:path';
+import { resolve, dirname, join, relative, isAbsolute, sep as pathSep } from 'node:path';
 import { homedir, tmpdir, networkInterfaces } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
@@ -30,6 +30,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
 import { createConnection } from 'node:net';
 import http from 'node:http';
+import { gunzipSync } from 'node:zlib';
 import { MCP_AGENTS, SKILL_AGENT_REGISTRY, detectAgentPresence } from '../packages/mindos/bin/lib/mcp-agents.js';
 import { resolveNpmInvocation, resolveNpxInvocation } from '../packages/mindos/bin/lib/npm-invocation.js';
 
@@ -542,7 +543,7 @@ async function downloadAndExtract(url, destDir) {
 
   const extractDir = join(tmp, 'extracted');
   mkdirSync(extractDir, { recursive: true });
-  execFileSync('tar', ['-xzf', tarPath, '-C', extractDir]);
+  extractTarGzSafe(tarPath, extractDir);
 
   const { readdirSync, statSync } = await import('node:fs');
   let contentRoot = extractDir;
@@ -554,6 +555,118 @@ async function downloadAndExtract(url, destDir) {
 
   cpSync(contentRoot, destDir, { recursive: true, filter: (src) => !src.endsWith('.gitkeep') });
   rmSync(tmp, { recursive: true, force: true });
+}
+
+function extractTarGzSafe(tarPath, destDir) {
+  const tar = gunzipSync(readFileSync(tarPath));
+  let offset = 0;
+  let longName = null;
+
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    offset += 512;
+    if (isZeroBlock(header)) break;
+
+    const nameRaw = readTarString(header, 0, 100);
+    const size = readTarOctal(header, 124, 12);
+    const typeflag = header[156];
+    const prefix = readTarString(header, 345, 155);
+    const dataEnd = offset + size;
+    if (dataEnd > tar.length) throw new Error('Invalid template tar entry size');
+
+    const paddedSize = Math.ceil(size / 512) * 512;
+    if (typeflag === 0x4c) {
+      longName = tar.subarray(offset, dataEnd).toString('utf-8').replace(/\0.*$/, '');
+      offset += paddedSize;
+      continue;
+    }
+    if (typeflag === 0x78) {
+      const paxPath = readPaxPath(tar.subarray(offset, dataEnd).toString('utf-8'));
+      if (paxPath) longName = paxPath;
+      offset += paddedSize;
+      continue;
+    }
+    if (typeflag === 0x67) {
+      offset += paddedSize;
+      continue;
+    }
+
+    const entryName = longName || (prefix ? `${prefix}/${nameRaw}` : nameRaw);
+    longName = null;
+    if (!entryName || entryName === '.' || entryName === './') {
+      offset += paddedSize;
+      continue;
+    }
+
+    const entryPath = resolveTarEntryPath(destDir, entryName);
+    const isDir = typeflag === 0x35 || entryName.endsWith('/');
+    const isFile = typeflag === 0 || typeflag === 0x30;
+    if (isDir) {
+      mkdirSync(entryPath, { recursive: true });
+    } else if (isFile) {
+      mkdirSync(dirname(entryPath), { recursive: true });
+      writeFileSync(entryPath, tar.subarray(offset, dataEnd));
+    }
+
+    offset += paddedSize;
+  }
+}
+
+function resolveTarEntryPath(destDir, entryName) {
+  const normalizedEntry = entryName.replaceAll('\\', '/');
+  if (
+    normalizedEntry.startsWith('/')
+    || normalizedEntry.startsWith('//')
+    || /^[A-Za-z]:/.test(entryName)
+    || /^[A-Za-z]:/.test(normalizedEntry)
+    || normalizedEntry.split('/').includes('..')
+  ) {
+    throw new Error(`Template tar entry outside extraction directory: ${entryName}`);
+  }
+
+  const root = resolve(destDir);
+  const target = resolve(root, normalizedEntry);
+  const rel = relative(root, target);
+  if (rel === '..' || rel.startsWith(`..${pathSep}`) || isAbsolute(rel)) {
+    throw new Error(`Template tar entry outside extraction directory: ${entryName}`);
+  }
+  return target;
+}
+
+function readTarString(buffer, offset, length) {
+  const slice = buffer.subarray(offset, offset + length);
+  const nul = slice.indexOf(0);
+  return slice.subarray(0, nul === -1 ? length : nul).toString('utf-8');
+}
+
+function readTarOctal(buffer, offset, length) {
+  const raw = readTarString(buffer, offset, length).trim();
+  if (!raw) return 0;
+  const parsed = Number.parseInt(raw.replace(/\0/g, ''), 8);
+  if (!Number.isFinite(parsed)) throw new Error('Invalid template tar entry size');
+  return parsed;
+}
+
+function readPaxPath(content) {
+  let cursor = 0;
+  while (cursor < content.length) {
+    const space = content.indexOf(' ', cursor);
+    if (space === -1) return null;
+    const length = Number.parseInt(content.slice(cursor, space), 10);
+    if (!Number.isFinite(length) || length <= 0) return null;
+    const record = content.slice(space + 1, cursor + length).replace(/\n$/, '');
+    const eq = record.indexOf('=');
+    if (eq > 0 && record.slice(0, eq) === 'path') return record.slice(eq + 1);
+    cursor += length;
+  }
+  return null;
+}
+
+function isZeroBlock(buffer) {
+  for (const byte of buffer) {
+    if (byte !== 0) return false;
+  }
+  return true;
 }
 
 async function applyTemplate(tpl, mindDir) {

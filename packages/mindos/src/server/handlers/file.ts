@@ -455,10 +455,12 @@ function renameSpace(mindRoot: string, filePath: string, params: Record<string, 
   validateLeafName(newName, 'space name');
   const oldAbs = resolveExistingSafe(mindRoot, filePath);
   if (!statSync(oldAbs).isDirectory()) throw new Error(`Not a directory: ${filePath}`);
-  const newAbs = join(dirname(oldAbs), newName);
+  const oldPath = relativeKnowledgePath(mindRoot, oldAbs);
+  const newRelPath = posix.join(posix.dirname(oldPath), newName);
+  const newAbs = resolveSafe(mindRoot, newRelPath);
+  if (dirname(newAbs) !== dirname(oldAbs)) throw new Error('Invalid space name: must stay in the same directory');
   if (existsSync(newAbs)) throw new Error('A space with that name already exists');
   renameSync(oldAbs, newAbs);
-  const oldPath = relativeKnowledgePath(mindRoot, oldAbs);
   const newPath = relativeKnowledgePath(mindRoot, newAbs);
   return {
     response: json({ ok: true, newPath }),

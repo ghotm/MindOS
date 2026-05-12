@@ -67,6 +67,7 @@ import {
   findMcpProcessIdsByPort,
   handleMcpRestartPost,
   handleMcpUninstallPost,
+  isMindosMcpCommandLine,
   parseNetstatListeningPids,
   handleMcpDirectToolsPost,
   handleMcpToolsGet,
@@ -829,6 +830,14 @@ describe('MindOS product server contract', () => {
 
     const spaceRename = await handleFilePost({ op: 'rename_space', path: 'Space', new_name: '.' }, { mindRoot: root });
     expect(spaceRename.status).toBe(400);
+    expect(existsSync(join(root, 'Space'))).toBe(true);
+
+    const windowsReservedSpace = await handleFilePost({ op: 'rename_space', path: 'Space', new_name: 'CON' }, { mindRoot: root });
+    expect(windowsReservedSpace.status).toBe(400);
+    expect(existsSync(join(root, 'Space'))).toBe(true);
+
+    const windowsInvalidSpace = await handleFilePost({ op: 'rename_space', path: 'Space', new_name: 'bad:name' }, { mindRoot: root });
+    expect(windowsInvalidSpace.status).toBe(400);
     expect(existsSync(join(root, 'Space'))).toBe(true);
   });
 
@@ -2179,6 +2188,9 @@ describe('MindOS product server contract', () => {
         }
         return '';
       },
+      getCommandLine: (pid) => pid === 1234
+        ? 'C:\\Program Files\\MindOS\\node.exe C:\\Users\\me\\.mindos\\runtime\\dist\\protocols\\mcp-server\\index.cjs'
+        : 'C:\\Windows\\System32\\svchost.exe',
     });
     expect(winPids).toEqual([1234]);
     expect(winCalls).toEqual([{ command: 'netstat', args: ['-ano'] }]);
@@ -2197,6 +2209,9 @@ describe('MindOS product server contract', () => {
         }
         return '';
       },
+      getCommandLine: (pid) => pid === 2468
+        ? '/usr/bin/node /home/me/.mindos/runtime/dist/protocols/mcp-server/index.cjs'
+        : '/usr/bin/python -m http.server 8781',
     });
     expect(unixPids).toEqual([2468]);
     expect(unixCalls).toEqual([
@@ -2208,6 +2223,27 @@ describe('MindOS product server contract', () => {
     expect(source).not.toContain('execSync(');
     expect(source).not.toContain('lsof -ti :${port}');
     expect(source).not.toContain('| xargs kill');
+    expect(source).toContain("execFileSync('powershell.exe', [");
+    expect(source).toContain("execFileSync('wmic', ['process', 'where', `ProcessId=${pid}`");
+  });
+
+  it('filters MCP restart port owners by MindOS MCP command line before killing', () => {
+    expect(isMindosMcpCommandLine('/usr/bin/node /home/me/.mindos/runtime/dist/protocols/mcp-server/index.cjs')).toBe(true);
+    expect(isMindosMcpCommandLine('C:\\MindOS\\node.exe C:\\MindOS\\dist\\protocols\\mcp-server\\index.cjs')).toBe(true);
+    expect(isMindosMcpCommandLine('/usr/bin/python -m http.server 8781')).toBe(false);
+
+    const pids = findMcpProcessIdsByPort(8781, {
+      platform: 'linux',
+      execFile: (command) => {
+        if (command === 'lsof') return '111\n222\n';
+        return '';
+      },
+      getCommandLine: (pid) => pid === 111
+        ? '/usr/bin/node /opt/mindos/dist/protocols/mcp-server/index.cjs'
+        : '/usr/bin/node /srv/other-service/server.js',
+    });
+
+    expect(pids).toEqual([111]);
   });
 
   it('handles content changes summary, list, and mark_seen from product runtime', async () => {

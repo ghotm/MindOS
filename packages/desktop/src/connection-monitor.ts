@@ -2,8 +2,7 @@
  * Connection monitor — periodic health checks for remote mode.
  * Detects disconnection and auto-reconnects with exponential backoff.
  */
-import http from 'http';
-import https from 'https';
+import { testConnection } from './connection-sdk';
 
 interface ConnectionMonitorCallbacks {
   onLost: () => void;
@@ -32,8 +31,8 @@ export class ConnectionMonitor {
     this.retryCount = 0;
     this.stopped = false;
 
-    this.interval = setInterval(() => this.check(), 30_000);
-    this.initialTimer = setTimeout(() => this.check(), 5000);
+    this.interval = setInterval(() => { void this.check(); }, 30_000);
+    this.initialTimer = setTimeout(() => { void this.check(); }, 5000);
   }
 
   stop(): void {
@@ -43,48 +42,25 @@ export class ConnectionMonitor {
     if (this.initialTimer) { clearTimeout(this.initialTimer); this.initialTimer = null; }
   }
 
-  private check(): void {
+  private async check(): Promise<void> {
     if (this.stopped) return;
 
-    let url: URL;
-    try {
-      url = new URL(this.address);
-    } catch {
-      this.handleDisconnect();
-      return;
-    }
+    const result = await testConnection(this.address);
+    if (this.stopped) return;
 
-    const isHttps = url.protocol === 'https:';
-    const port = parseInt(url.port || (isHttps ? '443' : '3456'), 10);
-    const transport = isHttps ? https : http;
-
-    const req = transport.get({
-      hostname: url.hostname,
-      port,
-      path: '/api/health',
-      timeout: 5000,
-    }, (res) => {
-      if (res.statusCode === 200) {
-        if (!this.isConnected) {
-          this.isConnected = true;
-          this.retryCount = 0;
-          // Restart periodic interval
-          if (!this.interval && !this.stopped) {
-            this.interval = setInterval(() => this.check(), 30_000);
-          }
-          this.callbacks.onRestored();
+    if (result.status === 'online') {
+      if (!this.isConnected) {
+        this.isConnected = true;
+        this.retryCount = 0;
+        // Restart periodic interval
+        if (!this.interval && !this.stopped) {
+          this.interval = setInterval(() => { void this.check(); }, 30_000);
         }
-      } else {
-        this.handleDisconnect();
+        this.callbacks.onRestored();
       }
-      res.resume();
-    });
-
-    req.on('error', () => this.handleDisconnect());
-    req.on('timeout', () => {
-      req.destroy();
+    } else {
       this.handleDisconnect();
-    });
+    }
   }
 
   private handleDisconnect(): void {
@@ -103,6 +79,6 @@ export class ConnectionMonitor {
     const delay = delays[Math.min(this.retryCount - 1, delays.length - 1)];
 
     if (this.retryTimer) clearTimeout(this.retryTimer);
-    this.retryTimer = setTimeout(() => this.check(), delay);
+    this.retryTimer = setTimeout(() => { void this.check(); }, delay);
   }
 }

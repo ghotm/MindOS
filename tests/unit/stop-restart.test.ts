@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isMindosOwnedCommandLine } from '../../packages/mindos/bin/lib/stop.js';
 
 const stopSource = () => readFileSync(join(process.cwd(), 'packages/mindos/bin/lib/stop.js'), 'utf-8');
 
@@ -146,6 +147,9 @@ describe('stop.js subprocess contract', () => {
     expect(source).not.toContain('pkill -f "next start|next dev"');
     expect(source).toContain("execFileSync('lsof', ['-ti', `:${port}`]");
     expect(source).toContain("execFileSync('taskkill', ['/PID', String(pid), '/T', '/F']");
+    expect(source).toContain('isMindosOwnedPid(pid)');
+    expect(source).toContain("execFileSync('ps', ['-p', String(pid), '-o', 'args=']");
+    expect(source).toContain("execFileSync('powershell.exe', [");
   });
 
   it('does not use broad fallback kills that can stop unrelated Node apps', () => {
@@ -155,6 +159,16 @@ describe('stop.js subprocess contract', () => {
     expect(source).not.toContain("pkill', ['-f', 'next start|next dev']");
     expect(source).not.toContain("pkill', ['-f', '(mcp|mcp-server)/(src/index|dist/index)']");
     expect(source).toContain('killMindosFallbackProcesses');
+  });
+});
+
+describe('stop.js ownership checks', () => {
+  it('matches MindOS command lines and rejects unrelated services on the same port', () => {
+    expect(isMindosOwnedCommandLine('/usr/bin/node /Users/me/.mindos/runtime/packages/web/.next/standalone/server.js')).toBe(true);
+    expect(isMindosOwnedCommandLine('/usr/bin/node /usr/local/lib/node_modules/@geminilight/mindos/bin/cli.js start')).toBe(true);
+    expect(isMindosOwnedCommandLine('/usr/bin/node /opt/mindos/dist/protocols/mcp-server/index.cjs')).toBe(true);
+    expect(isMindosOwnedCommandLine('/usr/bin/python -m http.server 3456')).toBe(false);
+    expect(isMindosOwnedCommandLine('/usr/bin/node /srv/other-service/server.js')).toBe(false);
   });
 });
 

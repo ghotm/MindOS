@@ -104,12 +104,15 @@ describe('OpenCode-style platform runtime packages', () => {
 
   it('verifies npm release tarballs include runtime-critical assets', () => {
     const workflow = readText('.github/workflows/publish-npm.yml');
+    const release = readText('scripts/release.sh');
 
     expect(workflow).toContain('"dist/protocols/mcp-server/index.cjs"');
     expect(workflow).toContain('"bin/mindos" "runtime-manifest.json" "package.json"');
     expect(workflow).toContain('Published Bun single-binary platform package should not expose expanded runtime assets');
     expect(workflow).toContain('Published package missing $f');
     expect(workflow).toContain('Published platform package missing $f');
+    expect(release).toContain('dist/index.js dist/protocols/acp/index.js dist/protocols/mcp-server/index.cjs');
+    expect(release).not.toContain('dist/foundation.js dist/protocols/acp/index.js');
   });
 
   it('documents the migration plan and acceptance criteria', () => {

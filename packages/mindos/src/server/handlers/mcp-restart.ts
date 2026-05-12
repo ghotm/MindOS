@@ -33,6 +33,7 @@ export type MindosMcpRestartPayload =
 export type FindMcpProcessIdsOptions = {
   platform?: NodeJS.Platform;
   execFile?(command: string, args: string[]): string;
+  getCommandLine?(pid: number, platform: NodeJS.Platform): string | null;
 };
 
 export async function handleMcpRestartPost(
@@ -112,12 +113,14 @@ export function findMcpProcessIdsByPort(port: number, options: FindMcpProcessIds
     execFileSync(command, args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }) as string
   ));
 
+  let candidates: number[];
   if (platform === 'win32') {
     try {
-      return parseNetstatListeningPids(port, execFile('netstat', ['-ano']));
+      candidates = parseNetstatListeningPids(port, execFile('netstat', ['-ano']));
     } catch {
       return [];
     }
+    return filterMindosMcpPids(candidates, platform, options);
   }
 
   const pids = new Set<number>();
@@ -139,7 +142,53 @@ export function findMcpProcessIdsByPort(port: number, options: FindMcpProcessIds
     }
   }
 
-  return [...pids];
+  return filterMindosMcpPids([...pids], platform, options);
+}
+
+export function isMindosMcpCommandLine(commandLine: string): boolean {
+  const normalized = commandLine.replace(/\\/g, '/').toLowerCase();
+  return normalized.includes('/dist/protocols/mcp-server/index.cjs')
+    || normalized.includes('/protocols/mcp-server/dist/index.cjs');
+}
+
+function filterMindosMcpPids(
+  pids: number[],
+  platform: NodeJS.Platform,
+  options: FindMcpProcessIdsOptions,
+): number[] {
+  const getCommandLine = options.getCommandLine ?? defaultGetCommandLine;
+  return pids.filter((pid) => {
+    const commandLine = getCommandLine(pid, platform);
+    return typeof commandLine === 'string' && isMindosMcpCommandLine(commandLine);
+  });
+}
+
+function defaultGetCommandLine(pid: number, platform: NodeJS.Platform): string | null {
+  try {
+    if (platform === 'win32') {
+      try {
+        return String(execFileSync('powershell.exe', [
+          '-NoProfile',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -ErrorAction SilentlyContinue).CommandLine`,
+        ], {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'ignore'],
+        }));
+      } catch {
+        return String(execFileSync('wmic', ['process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/format:value'], {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'ignore'],
+        }));
+      }
+    }
+    return String(execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+    }));
+  } catch {
+    return null;
+  }
 }
 
 export function parseNetstatListeningPids(port: number, output: string): number[] {

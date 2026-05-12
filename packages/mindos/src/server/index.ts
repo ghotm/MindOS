@@ -521,6 +521,7 @@ export {
   defaultWaitForPortFree,
   findMcpProcessIdsByPort,
   handleMcpRestartPost,
+  isMindosMcpCommandLine,
   killMcpProcessesByPort,
   parseNetstatListeningPids,
   waitForPortFreeWithProbe,

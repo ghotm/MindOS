@@ -79,7 +79,10 @@ export default function Panel({
 
   // File tree depth control: null = manual (no override), number = forced max open depth
   const [maxOpenDepth, setMaxOpenDepth] = useState<number | null>(null);
-  const treeMaxDepth = useMemo(() => getMaxDepth(fileTree), [fileTree]);
+  const treeMaxDepth = useMemo(
+    () => (activePanel === 'files' ? getMaxDepth(fileTree) : 0),
+    [activePanel, fileTree],
+  );
 
   // "New" dropdown popover
   const [newPopover, setNewPopover] = useState(false);
@@ -134,6 +137,8 @@ export default function Panel({
   const [inboxCount, setInboxCount] = useState(0);
 
   useEffect(() => {
+    if (activePanel !== 'files') return;
+
     const fetchTrash = () => {
       listTrashAction().then(items => setTrashCount(items.length)).catch(() => {});
     };
@@ -150,7 +155,7 @@ export default function Panel({
       window.removeEventListener('mindos:files-changed', fetchTrash);
       window.removeEventListener('mindos:inbox-updated', fetchInbox);
     };
-  }, []);
+  }, [activePanel]);
 
   // Double-click hint: show only until user has used it once.
   // Initialize false to match SSR; hydrate from localStorage in useEffect.

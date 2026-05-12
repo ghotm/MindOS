@@ -15,7 +15,10 @@ import os from 'os';
 import { gzipSync } from 'zlib';
 
 // The function under test — exported via _extractTarGzJs_forTest
-import { _extractTarGzJs_forTest as extractTarGzJs } from './core-updater';
+import {
+  _extractTarGz_forTest as extractTarGz,
+  _extractTarGzJs_forTest as extractTarGzJs,
+} from './core-updater';
 
 const TMP = path.join(os.tmpdir(), `core-updater-tar-test-${process.pid}`);
 const SRC_DIR = path.join(TMP, 'src');
@@ -110,6 +113,19 @@ function createTarGz(srcDir: string, tarball: string, format?: string): void {
 }
 
 describe('extractTarGzJs — GNU LongLink support', () => {
+  it('rejects traversal entries through the platform extraction entrypoint', async () => {
+    const data = Buffer.from('owned');
+    const chunks = [
+      tarHeader('../evil-platform.txt', data.length, '0'),
+      paddedData(data),
+      Buffer.alloc(1024),
+    ];
+    writeFileSync(TARBALL, gzipSync(Buffer.concat(chunks)));
+
+    await expect(extractTarGz(TARBALL, DEST_DIR)).rejects.toThrow(/outside extraction directory/);
+    expect(existsSync(path.join(TMP, 'evil-platform.txt'))).toBe(false);
+  });
+
   it('extracts files with paths > 100 chars (GNU tar format)', async () => {
     // Create a deeply nested file whose tar-internal path exceeds 100 characters
     // "a{50}/b{50}/file.txt" = 50 + 1 + 50 + 1 + 8 = 110 chars (> 100)

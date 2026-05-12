@@ -44,6 +44,54 @@
 
 **防回归**：`packages/desktop/src/core-updater-tar.test.ts` 构造 `../evil.txt` tar entry，要求 extractor reject 且 extraction root 外没有落盘文件。
 
+### Bun single-binary runtime extraction 也不能依赖系统 tar（2026-05-12）
+
+**症状**：Bun 单二进制首次运行时会把内嵌 `runtime.tar.gz` 解到 `~/.mindos/runtime-cache`。如果生成入口直接调用 `tar -xzf`，runtime archive 的 entry path 会被交给外部工具处理，安全语义和 Desktop runtime updater 不一致，Windows/精简环境还会依赖系统 tar 是否可用。
+
+**修复**：`scripts/build-bun-binary.mjs` 生成的入口改为 `extractTarGzSafe()`，用 Node/Bun 内置 `gunzipSync` 解析 tar，并在写入前拒绝 POSIX/Windows absolute path、drive prefix 和完整 `..` segment，再用 `relative(root, target)` 做 containment 校验；fallback runtime 中的 symlink 只在目标仍位于 extraction root 内时保留。
+
+**防回归**：`tests/bun-single-binary-contract.test.ts` 要求入口包含 `resolveTarEntryPath()` / `resolveTarSymlinkTarget()` 且不能重新出现 `spawnSync("tar", ["-xzf", tempArchive`。
+
+### Tar parser 不要把 global PAX header 当成下一个 entry path（2026-05-12）
+
+**症状**：自写 tar parser 同时处理 PAX local header (`x`) 和 global header (`g`) 时，如果把 `g` 里的 `path=` 缓存成下一个 entry name，会让 global metadata 意外改写后续文件路径。真实 Node/runtime 包通常使用 local PAX path，但 parser 语义不应混淆两者。
+
+**修复**：所有安全 tar 解压入口只从 `typeflag === 'x'` 的 local PAX header 读取 `path`，`typeflag === 'g'` 只跳过数据块。
+
+**防回归**：`packages/desktop/src/core-updater-tar.test.ts` 和相关 tar contract 覆盖 PAX long path；后续新增 parser 时遵循同一 `x`/`g` 分离规则。
+
+### Onboard 自定义模板 tarball 必须安全解压（2026-05-12）
+
+**症状**：`mindos onboard` 的 custom/GitHub template 会下载远端 tarball。如果直接调用系统 `tar -xzf`，模板包的路径安全完全依赖外部 tar 实现，和产品自己的 path containment 规则不一致。
+
+**修复**：`scripts/setup.js` 的 `downloadAndExtract()` 改为 `extractTarGzSafe()`，用内置 gzip+tar parser 解压，只写入 extraction root 内的 regular file/directory，拒绝 absolute path、Windows drive prefix 和 `..` segment。
+
+**防回归**：`tests/unit/cli-setup-subprocess.test.ts` 要求 setup 模板解压不再调用 `tar -xzf`，并保留 `resolveTarEntryPath()` containment helper。
+
+### Desktop 私有 Node.js bootstrap 不要把 tarball 交给系统 tar（2026-05-12）
+
+**症状**：Desktop 在用户机器没有可用 Node.js 时，会下载 Node.js tarball 并解压到 `~/.mindos/node`。如果直接调用系统 `tar xzf --strip-components=1`，路径 containment 和可执行位处理都依赖外部 tar 实现。
+
+**修复**：`packages/desktop/src/node-bootstrap.ts` 改为 `extractTarGzSafe(tmpFile, NODE_DIR, 1)`，本地解析 tar.gz，先拒绝 absolute path、Windows drive prefix 和 `..` segment，再做 strip-components，并保留 regular file 的 Unix mode 与 root 内 symlink，确保 `node`/`npm`/`npx` 可执行。Desktop 打包脚本 `packages/desktop/scripts/prepare-mindos-runtime.mjs` 同步使用同一安全解压策略，Windows zip 分支改用 PowerShell `Expand-Archive -LiteralPath`。打包后的全局 symlink 清理会跳过 `resources/mindos-runtime/node`，避免把官方 `npm`/`npx` launcher 删掉。
+
+**防回归**：`packages/desktop/src/node-bootstrap.test.ts` 要求 Node bootstrap 不再调用 `spawnAsync('tar', ...)`，并保留 `resolveTarEntryPath()` containment helper；`tests/desktop-release-contract.test.ts` 覆盖 Desktop runtime prepare 脚本不能回退到系统 tar，且 Windows zip 解压必须使用 `-LiteralPath`。
+
+### Desktop 端口耗尽提示不要建议用户管道 kill（2026-05-12）
+
+**症状**：Desktop 本地启动时如果默认端口窗口都被占用，错误提示会建议用户运行 `lsof -ti:<port> | xargs kill`。这会把“定位占用者”和“终止进程”混在一起，容易误杀非 MindOS 服务。
+
+**修复**：端口耗尽提示改成只展示查询命令：Unix 使用 `lsof -nP -iTCP:<port> -sTCP:LISTEN`，Windows 保留 `netstat -ano | findstr :<port>`；用户需要关闭哪个程序由 UI 文案明确说明。
+
+**防回归**：`packages/desktop/src/main-subprocess-contract.test.ts` 禁止 Desktop main 重新出现 `| xargs kill` 提示。
+
+### 本地 release smoke 必须检查 npm 主入口和 MCP bundle（2026-05-12）
+
+**症状**：`scripts/release.sh` 的本地 tarball smoke 检查 `dist/foundation.js`，但 `packages/mindos/package.json` 的 `main`/`exports["."]` 指向 `dist/index.js`，GitHub 发布后校验也检查 `dist/index.js` 和 `dist/protocols/mcp-server/index.cjs`。本地 release 可能放过真正 npm 入口或 MCP bundle 缺失。
+
+**修复**：本地 release smoke 改为检查 `bin/mindos-shim.cjs`、`dist/index.js`、`dist/protocols/acp/index.js`、`dist/protocols/mcp-server/index.cjs`，与发布 workflow 对齐。
+
+**防回归**：`tests/platform-runtime-package-contract.test.ts` 同时检查 GitHub workflow 和 `scripts/release.sh` 的关键文件清单。
+
 ## v1 Monorepo Migration
 
 ### v1 迁移后不要再把顶层 `app/` / `apps/` / `desktop/` / `mobile/` 当源码入口
@@ -3832,6 +3880,116 @@ const visibleNodes = useMemo(() => {
 **修复**：只在 `create` / `update` / `delete` 这类真正写 user skill 目录的分支解析并校验 `.skills`；`read` / `read-native` / `toggle` / `record-install` 不依赖该目录。
 
 **防回归**：`packages/mindos/src/server.test.ts` 的 symlinked user skill directory 用例覆盖 builtin skill 仍可读取，同时 create 仍因 symlinked `.skills` 被拒绝。
+
+### Desktop runtime 解包不要按平台分叉安全策略（2026-05-12）
+
+**症状**：Desktop Core Updater 过去在 macOS/Linux 上调用系统 `tar xzf`，只有 Windows 使用 JS extractor。这样 traversal entry、Windows drive-relative entry、GNU long path 等安全/兼容策略在不同平台不一致。
+
+**根因**：为规避 Windows bsdtar 长路径问题新增了 JS extractor，但平台入口仍让非 Windows 绕过了 JS extractor 的路径校验。
+
+**修复**：`extractTarGz()` 在所有平台统一走安全 JS extractor；系统 `tar` 不再参与 Desktop runtime 更新解包。
+
+**防回归**：`packages/desktop/src/core-updater-tar.test.ts` 覆盖平台 extraction entrypoint 对 traversal tar entry 的拒绝，同时保留 GNU LongLink、pax、深层 node_modules、空文件和 drive-relative 路径测试。
+
+### Desktop 停止子进程不能只重复发送 SIGTERM（2026-05-12）
+
+**症状**：Desktop 退出或重启时，如果 Web/MCP 子进程忽略 `SIGTERM`，旧逻辑在 5 秒超时后调用默认 `proc.kill()`，实际仍可能只是再次发送 `SIGTERM`。端口随后仍被旧进程占用，导致重启 fallback 到新端口，或下次启动误判为已有服务。
+
+**根因**：`ChildProcess.killed` 只表示信号已发送，不表示进程已退出；超时后的 force-kill 需要升级到平台强制终止，而不能复用默认信号。
+
+**修复**：`ProcessManager.stop()` 改为共享 `terminateChildProcess()`：先发 `SIGTERM`，未收到 `exit` 时 macOS/Linux 升级到 `SIGKILL`，Windows 继续走 `TerminateProcess` 语义的默认 kill。PID 文件和端口清理在确认命令行属于 MindOS 后也会等待短暂退出窗口，再升级强制终止。
+
+**防回归**：`packages/desktop/src/process-manager-subprocess-contract.test.ts` 覆盖子进程不退出时会从 `SIGTERM` 升级到强制终止；crash handler 测试继续覆盖停止/重启相关竞态。
+
+### Desktop 复用已有 Web 服务前必须校验 health payload（2026-05-12）
+
+**症状**：`mindos.pid` 里的 PID 只要仍然 alive，Desktop 会探测配置端口的 `/api/health`。如果该端口被其他本地服务占用，并且也返回 HTTP 200，旧逻辑会误认为 MindOS CLI 正在运行，直接加载错误服务。
+
+**根因**：探测只看 `res.ok`，没有校验 MindOS Web health body。`/api/health` 是公开接口，很多本地服务都可能存在同名路径。
+
+**修复**：Desktop 的 `verifyMindOsWebHealth()` 现在要求 JSON payload 同时满足 `ok === true` 和 `service === 'mindos'`，否则视为不可复用并启动自己的本地 runtime。
+
+**防回归**：`packages/desktop/src/mindos-web-health.test.ts` 覆盖非 MindOS health endpoint 和非 JSON 响应都会返回 false。
+
+### Web 端重启轮询不要只看 /api/health 的 HTTP 200（2026-05-12）
+
+**症状**：设置页修改 Web 端口、setup wizard 重启跳转、更新 overlay 等待服务恢复时，前端轮询 `/api/health` 后只看 HTTP 成功状态。如果目标端口被其他本地服务占用且也返回 200，用户可能被重定向到错误服务，或更新 overlay 误判服务已恢复。
+
+**根因**：前端与 Desktop 主进程的 health 判断不一致，没有统一校验 MindOS health payload。
+
+**修复**：新增 `packages/web/lib/mindos-health.ts`，统一要求 health JSON 满足 `ok === true` 且 `service === 'mindos'`。WebPortSection、StepReview 和 UpdateOverlay 都使用该 helper。
+
+**防回归**：`packages/web/__tests__/lib/mindos-health.test.ts` 覆盖有效 MindOS payload、非 MindOS 服务 payload、非 ok payload 和空值。
+
+### Desktop 内部 ready/recovery 也不能只看 health HTTP 200（2026-05-12）
+
+**症状**：即使启动路径已经校验 mindos.pid 指向的 Web 服务，ProcessManager 等待 Web/MCP ready 和更新恢复 overlay 过去仍只看 `/api/health` 是否返回 200。若端口被其他本地服务占用，Desktop 可能误判服务 ready 或恢复完成，随后加载错误页面。
+
+**根因**：启动复用、子进程 ready、崩溃恢复三条路径的 health 语义不一致；部分路径仍用原始 HTTP status。
+
+**修复**：ProcessManager 的 Web ready、MCP 复用检查，以及 main 进程更新恢复轮询都复用 `verifyMindOsWebHealth()`，要求 payload 为 `{ ok: true, service: 'mindos' }`。
+
+**防回归**：`packages/desktop/src/process-manager-subprocess-contract.test.ts` 和 `packages/desktop/src/main-subprocess-contract.test.ts` 禁止这些路径回退到原始 HTTP 200 判断。
+
+### Remote 连接恢复监控必须复用 MindOS health 语义（2026-05-12）
+
+**症状**：Remote mode 断线后，`ConnectionMonitor` 过去直接请求远端 `/api/health`，只要 HTTP 200 就触发 `onRestored()`。如果远端地址被其他服务占用，Desktop 会误报连接已恢复，用户继续停留在不可用的远程会话。
+
+**根因**：初次连接的 `testConnection()` 已校验 `{ ok: true, service: 'mindos' }`，但持续监控路径绕过了该 SDK，导致初连和恢复判断不一致。
+
+**修复**：`ConnectionMonitor` 改为复用 `testConnection()`，只有 `status === 'online'` 才恢复连接；非 MindOS health payload 继续按断线处理。
+
+**防回归**：`packages/desktop/src/connection-monitor.test.ts` 覆盖先断线、再收到非 MindOS 200 health 不恢复、最后收到 MindOS health 才恢复。
+
+### Product Server rename_space 也必须走统一路径校验（2026-05-12）
+
+**症状**：`rename_file` 会通过 `resolveSafe()` 校验新路径，但 `rename_space` 过去只检查新名字不含 `/` 或 `\\`。在 macOS/Linux 上可以把 Space 改成 `CON`、`bad:name`、尾随空格/点等 Windows 无效名字，之后同步到 Windows 或跨平台打开时失败。
+
+**根因**：Space rename 手写 `join(dirname(oldAbs), newName)`，绕过了 foundation security 的跨平台 segment 校验。
+
+**修复**：`rename_space` 现在根据旧的 POSIX knowledge path 生成新相对路径，并通过 `resolveSafe()` 得到目标绝对路径，同时校验目标仍在同一父目录。
+
+**防回归**：`packages/mindos/src/server.test.ts` 的 unsafe rename leaf names 用例覆盖 `CON` 和 `bad:name` 这类 Windows 无效 Space 名。
+
+### MCP restart 按端口清理前必须确认进程属于 MindOS MCP（2026-05-12）
+
+**症状**：`POST /api/mcp/restart` 会查找占用 MCP 端口的 PID 并 kill。过去只按端口匹配，若用户配置的 MCP 端口被其他本地服务占用，restart 可能误杀无关进程。
+
+**根因**：Product Server 的 MCP restart handler 没有复用 Desktop ProcessManager 的“先查命令行 ownership，再 kill”安全策略。
+
+**修复**：`findMcpProcessIdsByPort()` 现在会读取候选 PID 命令行，只保留命令行指向 MindOS MCP bundle（`dist/protocols/mcp-server/index.cjs`）的进程。无法读取命令行或不匹配时不 kill。Windows 命令行读取优先用 PowerShell `Get-CimInstance`，再 fallback 到 `wmic`，避免新 Windows 缺少 `wmic` 时无法重启。
+
+**防回归**：`packages/mindos/src/server.test.ts` 覆盖 Windows/Unix 端口 PID 解析后按命令行过滤、PowerShell + wmic fallback 入口，以及非 MindOS 进程占用端口时不会返回为可 kill PID。
+
+### CLI stop 的端口 fallback 也不能误杀非 MindOS 服务（2026-05-12）
+
+**症状**：`mindos stop` 在没有 PID 文件或存在 Next worker 孤儿进程时会按 Web/MCP 端口清理。过去只要进程监听配置端口就 kill；如果用户把端口配置成已有服务，或配置文件陈旧，可能误杀无关本地服务。
+
+**根因**：CLI `killByPort()` 只做端口匹配，没有读取候选 PID 的命令行确认 ownership。
+
+**修复**：CLI `killByPort()` 现在先用 `ps` / PowerShell `Get-CimInstance` / `wmic` 读取命令行，只杀 `.mindos/runtime`、`@geminilight/mindos`、MindOS Web standalone 或 MCP bundle 相关进程。
+
+**防回归**：`tests/unit/stop-restart.test.ts` 覆盖 stop.js 必须调用 ownership 过滤，以及 MindOS/非 MindOS 命令行的匹配结果。
+
+### Desktop 端口耗尽 fallback 必须等待 orphan cleanup 完成（2026-05-12）
+
+**症状**：启动时如果默认端口范围被旧进程占用，fallback 会调用 `ProcessManager.cleanupOrphanedChildren()` 后立刻再次 `findAvailablePort()`。清理尚未完成时重试仍会失败，用户看到“端口均被占用”，但实际稍等一会端口就释放了。
+
+**根因**：异步 cleanup 没有 `await`。在 cleanup 需要等待 `SIGTERM` 或升级强杀时，这个竞态更明显。
+
+**修复**：端口耗尽 fallback 在重试端口发现前 `await ProcessManager.cleanupOrphanedChildren()`。
+
+**防回归**：`packages/desktop/src/main-subprocess-contract.test.ts` 覆盖 main 启动 fallback 必须等待 orphan cleanup。
+
+### Static Web snapshot 必须隔离到 standalone 依赖闭包（2026-05-12）
+
+**症状**：`prepare-static-web` 需要临时启动 Next standalone server 渲染静态页面。如果子进程继承了会影响 Node 解析的环境变量，或 standalone trace 漏掉 Next 内部相对依赖，脚本可能从 workspace 的 pnpm `node_modules` 解析 Next 文件，出现 `Cannot find module './cpu-profile'` 这类非确定性失败。
+
+**根因**：snapshot 渲染阶段过去直接继承 `process.env`，且启动前没有验证 `next`、`next/dist/server/lib/start-server` 和它的内部依赖是否都来自 `.next/standalone/node_modules`。
+
+**修复**：`prepare-static-web` 启动前用 `createRequire(webStandaloneServer)` 校验 Next 运行时依赖都解析到 `.next/standalone` 内，并为子进程构造最小环境，只透传 PATH 和临时目录等必要变量。
+
+**防回归**：`tests/static-web-artifact-contract.test.ts` 覆盖 static snapshot 脚本必须包含 standalone closure 校验和隔离环境，避免重新回到全量继承 `process.env`。
 
 ### Monorepo 迁移后 workflow 仍引用旧顶层目录（2026-04-27）
 

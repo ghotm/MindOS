@@ -10,7 +10,9 @@ export async function verifyMindOsWebHealth(port: number, timeoutMs = 2500): Pro
     const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
       signal: ac.signal,
     } as RequestInit);
-    return res.ok;
+    if (!res.ok) return false;
+    const body = await res.json().catch(() => null) as { ok?: unknown; service?: unknown } | null;
+    return body?.ok === true && body.service === 'mindos';
   } catch {
     return false;
   } finally {

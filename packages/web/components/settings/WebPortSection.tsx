@@ -5,6 +5,7 @@ import { Monitor, Loader2, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/lib/toast';
 import { SettingCard } from './Primitives';
+import { fetchMindosHealth } from '@/lib/mindos-health';
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
@@ -139,8 +140,7 @@ export default function WebPortSection({ m }: { m: Record<string, any> }) {
           return;
         }
         try {
-          const r = await fetch(`${newOrigin}/api/health`, { signal: AbortSignal.timeout(2000) });
-          if (r.ok) {
+          if (await fetchMindosHealth(`${newOrigin}/api/health`, { signal: AbortSignal.timeout(2000) })) {
             clearInterval(pollRef.current);
             window.location.href = newOrigin;
           }

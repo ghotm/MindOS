@@ -31,6 +31,14 @@ describe('Desktop release packaging contract', () => {
     expect(runtimePrep).toContain('targetNodePlatform');
     expect(runtimePrep).toContain('targetNodeArch');
     expect(runtimePrep).toContain('platform: `${targetNodePlatform}-${targetNodeArch}`');
+    expect(runtimePrep).not.toContain("spawnSync('tar', ['xzf', tmpFile");
+    expect(runtimePrep).toContain('extractTarGzSafe(tmpFile, nodeDest, 1)');
+    expect(runtimePrep).toContain('function resolveTarSymlinkTarget(destDir, entryPath, linkName)');
+    expect(runtimePrep).toContain('symlinkSync(safeLinkName, entryPath)');
+    expect(runtimePrep).toContain('Expand-Archive -LiteralPath');
+    expect(runtimePrep).toContain('Node.js tar entry outside extraction directory');
+    expect(runtimePrep).toContain("const symlinkSkipRoots = [path.resolve(dest, 'node')]");
+    expect(runtimePrep).toContain('official npm/npx launchers are');
   });
 
   it('keeps Electron main and preload builds externalized for Node runtime modules', () => {

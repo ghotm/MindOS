@@ -9,8 +9,9 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -43,6 +44,13 @@ if (!existsSync(nextStaticDir)) {
   process.exit(1);
 }
 
+try {
+  assertStandaloneNextDependencyClosure();
+} catch (error) {
+  console.error(`[prepare-static-web] ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
+
 const tempRoot = mkdtempSync(resolve(tmpdir(), 'mindos-static-web-'));
 const tempHome = resolve(tempRoot, 'home');
 const tempMind = resolve(tempRoot, 'mind');
@@ -58,14 +66,13 @@ writeFileSync(resolve(tempHome, '.mindos', 'config.json'), JSON.stringify({
 const port = await getFreePort();
 const child = spawn(process.execPath, [webStandaloneServer], {
   cwd: webStandaloneDir,
-  env: {
-    ...process.env,
+  env: createStandaloneServerEnv({
     HOME: tempHome,
     MIND_ROOT: tempMind,
     NODE_ENV: 'production',
     HOSTNAME: '127.0.0.1',
     PORT: String(port),
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 
@@ -158,4 +165,45 @@ async function fetchHtml(url) {
   const html = await response.text();
   if (!html.includes('<html')) throw new Error(`Snapshot ${url} did not return HTML`);
   return html;
+}
+
+function assertStandaloneNextDependencyClosure() {
+  const requireFromStandaloneServer = createRequire(webStandaloneServer);
+  const requiredModules = [
+    'next',
+    'next/dist/server/lib/start-server',
+    'next/dist/server/lib/cpu-profile',
+  ];
+
+  for (const moduleName of requiredModules) {
+    const resolvedPath = requireFromStandaloneServer.resolve(moduleName);
+    const relativePath = relative(webStandaloneDir, resolvedPath);
+    if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+      throw new Error(
+        `Standalone Web snapshot would resolve ${moduleName} outside .next/standalone: ${resolvedPath}`
+      );
+    }
+  }
+}
+
+function createStandaloneServerEnv(overrides) {
+  const allowedPassthrough = [
+    'PATH',
+    'SystemRoot',
+    'WINDIR',
+    'COMSPEC',
+    'TEMP',
+    'TMP',
+    'TMPDIR',
+  ];
+  const env = {};
+
+  for (const key of allowedPassthrough) {
+    if (process.env[key]) env[key] = process.env[key];
+  }
+
+  return {
+    ...env,
+    ...overrides,
+  };
 }

@@ -15,7 +15,6 @@ import {
 } from 'fs';
 import { createHash } from 'crypto';
 import { createGunzip } from 'zlib';
-import { execFile } from 'child_process';
 import https from 'https';
 import http from 'http';
 import type { ClientRequest, IncomingMessage } from 'http';
@@ -243,22 +242,10 @@ export const _downloadFile_forTest = downloadFile;
 /**
  * Extract a tar.gz archive.
  *
- * On macOS/Linux: uses system `tar` (fast, reliable).
- * On Windows: uses a pure-JS implementation (Node zlib + minimal tar parser)
- * because Windows' built-in bsdtar silently fails on long paths (>260 chars),
- * which is common in standalone node_modules trees like packages/web/.next/standalone/node_modules/...
+ * Uses a pure-JS implementation (Node zlib + minimal tar parser) on every
+ * platform so traversal rejection and long-path handling stay consistent.
  */
 function extractTarGz(tarball: string, destDir: string): Promise<void> {
-  if (process.platform !== 'win32') {
-    // macOS / Linux — system tar is reliable
-    return new Promise((resolve, reject) => {
-      execFile('tar', ['xzf', tarball, '-C', destDir], { timeout: 120_000 }, (err) => {
-        if (err) reject(new Error(`tar extract failed: ${err.message}`));
-        else resolve();
-      });
-    });
-  }
-  // Windows — pure-JS extraction to avoid bsdtar long-path bugs
   return extractTarGzJs(tarball, destDir);
 }
 
@@ -313,7 +300,7 @@ async function extractTarGzJs(tarball: string, destDir: string): Promise<void> {
     }
 
     // ── POSIX pax extended header (typeflag 'x' = 0x78): skip data, may set name ──
-    if (typeflag === 0x78 || typeflag === 0x67) {
+    if (typeflag === 0x78) {
       // Parse pax headers to extract path if present
       const paxData = buf.subarray(offset, offset + fileSize).toString('utf-8');
       const pathMatch = paxData.match(/\d+ path=(.+)\n/);
@@ -325,7 +312,10 @@ async function extractTarGzJs(tarball: string, destDir: string): Promise<void> {
     }
 
     // ── Global pax header (typeflag 'g' = 0x67) — skip ──
-    // (already handled above alongside 'x')
+    if (typeflag === 0x67) {
+      offset += dataBlocks;
+      continue;
+    }
 
     // Determine final entry name: GNU long name takes priority, then POSIX prefix+name
     let entryName: string;
@@ -427,7 +417,10 @@ function winLongPath(p: string): string {
 }
 
 /** Exported for testing. */
-export { extractTarGzJs as _extractTarGzJs_forTest };
+export {
+  extractTarGz as _extractTarGz_forTest,
+  extractTarGzJs as _extractTarGzJs_forTest,
+};
 
 // ── CoreUpdater ──
 

@@ -39,6 +39,7 @@ export default function AgentsMcpSection({
   copy: {
     title: string;
     refresh: string;
+    connectionGraph: string;
     tabs: { byAgent: string; byServer: string; [k: string]: string };
     searchPlaceholder: string;
     emptyState: string;
@@ -448,10 +449,16 @@ function ByServerView({
 
   return (
     <>
-      <div className="space-y-3">
-        <p className="text-2xs text-muted-foreground tabular-nums">{copy.resultCount(servers.length)}</p>
+      <div className="relative overflow-hidden rounded-xl border border-border/70 bg-muted/20 p-3 pl-8">
+        <div className="pointer-events-none absolute left-5 top-8 bottom-8 w-px bg-border" aria-hidden="true" />
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <p className="text-2xs font-medium uppercase tracking-wider text-muted-foreground">
+            {copy.connectionGraph}
+          </p>
+          <p className="text-2xs text-muted-foreground tabular-nums">{copy.resultCount(servers.length)}</p>
+        </div>
         {hintMessage && (
-          <div role="status" aria-live="polite" className="rounded-md border border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground animate-in fade-in duration-200">
+          <div role="status" aria-live="polite" className="mb-3 rounded-md border border-border bg-background/80 px-3 py-2 text-xs text-muted-foreground animate-in fade-in duration-200">
             {hintMessage}
           </div>
         )}
@@ -467,14 +474,18 @@ function ByServerView({
           const notFoundCount = agentDetails.length - connectedCount - detectedCount + orphanNames.length;
 
           return (
-            <div key={srv.serverName} className="rounded-xl border border-border bg-card p-4 hover:shadow-[0_2px_8px_rgba(0,0,0,0.04)] transition-all duration-200">
+            <div key={srv.serverName} className="relative mb-3 last:mb-0 rounded-lg border border-border/70 bg-card/90 p-4 shadow-sm transition-all duration-200 hover:border-[var(--amber)]/35 hover:bg-card hover:shadow-md">
+              <span className="absolute -left-[1.08rem] top-5 h-3 w-3 rounded-full border-2 border-background bg-[var(--amber)] shadow-[0_0_0_3px_var(--background)]" aria-hidden="true" />
               {/* Server header */}
-              <div className="flex items-center justify-between gap-2 mb-3">
+              <div className="flex items-start justify-between gap-3 mb-4">
                 <div className="flex items-center gap-2.5 min-w-0">
-                  <div className="w-7 h-7 rounded-lg bg-[var(--amber)]/[0.08] flex items-center justify-center shrink-0">
+                  <div className="w-8 h-8 rounded-md bg-[var(--amber-subtle)] border border-[var(--amber)]/15 flex items-center justify-center shrink-0">
                     <Server size={13} className="text-[var(--amber)]" aria-hidden="true" />
                   </div>
-                  <span className="text-sm font-semibold text-foreground truncate">{srv.serverName}</span>
+                  <div className="min-w-0">
+                    <span className="block text-sm font-semibold text-foreground truncate">{srv.serverName}</span>
+                    <span className="mt-0.5 block text-2xs text-muted-foreground tabular-nums">{copy.serverAgentCount(srv.agents.length)}</span>
+                  </div>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
                   {agentDetails.length > 0 && (
@@ -487,39 +498,38 @@ function ByServerView({
                     />
                   )}
                   <div className="relative">
-                      <AddAvatarButton
-                        onClick={() => setPickerServer(pickerServer === srv.serverName ? null : srv.serverName)}
-                        label={copy.addAgent}
-                        size="sm"
-                      />
-                      <AgentPickerPopover
-                        open={pickerServer === srv.serverName}
-                        agents={availableToAdd.map((a) => ({ key: a.key, name: a.name }))}
-                        emptyLabel={copy.noAvailableAgents}
-                        onSelect={(key) => void handleAddAgent(key, srv.serverName)}
-                        onClose={() => setPickerServer(null)}
-                      />
-                    </div>
+                    <AddAvatarButton
+                      onClick={() => setPickerServer(pickerServer === srv.serverName ? null : srv.serverName)}
+                      label={copy.addAgent}
+                      size="sm"
+                    />
+                    <AgentPickerPopover
+                      open={pickerServer === srv.serverName}
+                      agents={availableToAdd.map((a) => ({ key: a.key, name: a.name }))}
+                      emptyLabel={copy.noAvailableAgents}
+                      onSelect={(key) => void handleAddAgent(key, srv.serverName)}
+                      onClose={() => setPickerServer(null)}
+                    />
+                  </div>
                 </div>
               </div>
 
               {/* Agent status breakdown */}
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-foreground mb-3">
-                <span className="tabular-nums">{copy.serverAgentCount(srv.agents.length)}</span>
+              <div className="flex flex-wrap items-center gap-1.5 text-2xs text-muted-foreground mb-3">
                 {connectedCount > 0 && (
-                  <span className="inline-flex items-center gap-1">
+                  <span className="inline-flex min-h-[22px] items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-[var(--success)]" aria-hidden="true" />
                     {connectedCount}
                   </span>
                 )}
                 {detectedCount > 0 && (
-                  <span className="inline-flex items-center gap-1">
+                  <span className="inline-flex min-h-[22px] items-center gap-1 rounded-full border border-[var(--amber)]/20 bg-[var(--amber-dim)] px-2 text-[var(--amber-text)]">
                     <span className="w-1.5 h-1.5 rounded-full bg-[var(--amber)]" aria-hidden="true" />
                     {detectedCount}
                   </span>
                 )}
                 {notFoundCount > 0 && (
-                  <span className="inline-flex items-center gap-1">
+                  <span className="inline-flex min-h-[22px] items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground" aria-hidden="true" />
                     {notFoundCount}
                   </span>
@@ -535,7 +545,13 @@ function ByServerView({
                 {agentDetails.map((agent) => {
                   const agentStatus = resolveAgentStatus(agent);
                   return (
-                    <Link key={agent.key} href={`/agents/${encodeURIComponent(agent.key)}`} className="cursor-pointer">
+                    <Link
+                      key={agent.key}
+                      href={`/agents/${encodeURIComponent(agent.key)}`}
+                      aria-label={agent.name}
+                      title={agent.name}
+                      className="rounded-full transition-transform duration-150 hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
                       <AgentAvatar
                         name={agent.name}
                         status={agentStatus}
@@ -545,7 +561,9 @@ function ByServerView({
                   );
                 })}
                 {orphanNames.map((name) => (
-                  <AgentAvatar key={name} name={name} status="notFound" />
+                  <div key={name} title={name} aria-label={name}>
+                    <AgentAvatar name={name} status="notFound" />
+                  </div>
                 ))}
               </div>
             </div>

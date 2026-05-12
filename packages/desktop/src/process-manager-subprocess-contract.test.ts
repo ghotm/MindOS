@@ -1,7 +1,8 @@
 import { readFileSync } from 'fs';
 import path from 'path';
+import { EventEmitter } from 'events';
 import { describe, expect, it } from 'vitest';
-import { isMindosOwnedCommandLine } from './process-manager';
+import { _terminateChildProcess_forTest, isMindosOwnedCommandLine } from './process-manager';
 
 describe('process-manager subprocess cleanup contract', () => {
   it('uses argv-safe subprocess calls for port and process probes', () => {
@@ -27,5 +28,46 @@ describe('process-manager subprocess cleanup contract', () => {
     expect(isMindosOwnedCommandLine('/usr/local/bin/node /Users/me/.mindos/runtime/packages/web/.next/standalone/server.js')).toBe(true);
     expect(isMindosOwnedCommandLine('/usr/local/bin/node /Applications/MindOS.app/Contents/Resources/mindos-runtime/dist/protocols/mcp-server/index.cjs')).toBe(true);
     expect(isMindosOwnedCommandLine('/usr/local/bin/node /usr/local/lib/node_modules/@geminilight/mindos/bin/cli.js start')).toBe(true);
+  });
+
+  it('validates MindOS health payloads before treating ports as ready', () => {
+    const source = readFileSync(path.join(__dirname, 'process-manager.ts'), 'utf-8');
+
+    expect(source).toContain("import { verifyMindOsWebHealth } from './mindos-web-health'");
+    expect(source).toContain('if (await verifyMindOsWebHealth(port, 2000)) return true;');
+    expect(source).toContain('return verifyMindOsWebHealth(port, 800);');
+    expect(source).toContain('const res = await verifyMindOsWebHealth(port, 3000);');
+    expect(source).not.toContain('res.statusCode === 200');
+  });
+
+  it('does not depend on raw HTTP health checks for process readiness', () => {
+    const source = readFileSync(path.join(__dirname, 'process-manager.ts'), 'utf-8');
+
+    expect(source).not.toContain("import http from 'http'");
+    expect(source).not.toContain("path: '/api/health'");
+  });
+
+  it('escalates child process shutdown when SIGTERM does not exit', async () => {
+    const signals: Array<NodeJS.Signals | undefined> = [];
+    const proc = new EventEmitter() as EventEmitter & {
+      killed: boolean;
+      kill: (signal?: NodeJS.Signals) => boolean;
+    };
+    proc.killed = false;
+    proc.kill = (signal?: NodeJS.Signals) => {
+      signals.push(signal);
+      proc.killed = true;
+      return true;
+    };
+
+    await _terminateChildProcess_forTest(proc as never, 1);
+
+    expect(signals[0]).toBe('SIGTERM');
+    expect(signals.length).toBe(2);
+    if (process.platform === 'win32') {
+      expect(signals[1]).toBeUndefined();
+    } else {
+      expect(signals[1]).toBe('SIGKILL');
+    }
   });
 });

@@ -8,19 +8,6 @@ import ActivityBar, { type PanelId } from './ActivityBar';
 import Panel from './Panel';
 import FileTree from './FileTree';
 import Logo from './Logo';
-import SearchPanel from './panels/SearchPanel';
-
-import AgentsPanel from './panels/AgentsPanel';
-import DiscoverPanel from './panels/DiscoverPanel';
-import EchoPanel from './panels/EchoPanel';
-import WorkflowsPanel from './panels/WorkflowsPanel';
-
-import RightAskPanel from './RightAskPanel';
-import RightAgentDetailPanel, {
-  RIGHT_AGENT_DETAIL_DEFAULT_WIDTH,
-  RIGHT_AGENT_DETAIL_MIN_WIDTH,
-  RIGHT_AGENT_DETAIL_MAX_WIDTH,
-} from './RightAgentDetailPanel';
 import AskFab from './AskFab';
 import SyncPopover from './panels/SyncPopover';
 import KeyboardShortcuts from './KeyboardShortcuts';
@@ -47,8 +34,21 @@ import { useAiOrganize } from '@/hooks/useAiOrganize';
 import { toast } from '@/lib/toast';
 import { quickDropToInbox } from '@/lib/inbox-upload';
 import type { Tab } from './settings/types';
+import { RIGHT_AGENT_DETAIL_PANEL } from '@/lib/config/panel-sizes';
 
 const noop = () => {};
+
+const SearchPanel = dynamic(() => import('./panels/SearchPanel'), { ssr: false });
+const AgentsPanel = dynamic(() => import('./panels/AgentsPanel'), { ssr: false });
+const DiscoverPanel = dynamic(() => import('./panels/DiscoverPanel'), { ssr: false });
+const EchoPanel = dynamic(() => import('./panels/EchoPanel'), { ssr: false });
+const WorkflowsPanel = dynamic(() => import('./panels/WorkflowsPanel'), { ssr: false });
+const RightAskPanel = dynamic(() => import('./RightAskPanel'), { ssr: false });
+const RightAgentDetailPanel = dynamic(() => import('./RightAgentDetailPanel'), { ssr: false });
+
+const RIGHT_AGENT_DETAIL_DEFAULT_WIDTH = RIGHT_AGENT_DETAIL_PANEL.DEFAULT;
+const RIGHT_AGENT_DETAIL_MIN_WIDTH = RIGHT_AGENT_DETAIL_PANEL.MIN;
+const RIGHT_AGENT_DETAIL_MAX_WIDTH = RIGHT_AGENT_DETAIL_PANEL.MAX_ABS;
 
 function collectDirPaths(nodes: FileNode[], prefix = ''): string[] {
   const result: string[] = [];
@@ -188,6 +188,39 @@ export default function SidebarLayout({ fileTree, children }: SidebarLayoutProps
 
   const agentsContentActive = pathname?.startsWith('/agents');
   const railActivePanel = lp.activePanel ?? (agentsContentActive ? 'agents' : null);
+  const agentDockOpen = agentDetailKey !== null && lp.activePanel === 'agents';
+  const [mountedPanels, setMountedPanels] = useState<Set<PanelId>>(() => new Set());
+  const [rightAskMounted, setRightAskMounted] = useState(false);
+  const [rightAgentDetailMounted, setRightAgentDetailMounted] = useState(false);
+  const [mobileSearchMounted, setMobileSearchMounted] = useState(false);
+  const [desktopAskPopupMounted, setDesktopAskPopupMounted] = useState(false);
+  const [mobileAskMounted, setMobileAskMounted] = useState(false);
+  const [settingsMounted, setSettingsMounted] = useState(false);
+  const [importMounted, setImportMounted] = useState(false);
+
+  useEffect(() => {
+    const active = lp.activePanel;
+    if (!active || active === 'files') return;
+    setMountedPanels((prev) => {
+      if (prev.has(active)) return prev;
+      const next = new Set(prev);
+      next.add(active);
+      return next;
+    });
+  }, [lp.activePanel]);
+
+  useEffect(() => { if (ap.askPanelOpen) setRightAskMounted(true); }, [ap.askPanelOpen]);
+  useEffect(() => { if (agentDockOpen) setRightAgentDetailMounted(true); }, [agentDockOpen]);
+  useEffect(() => { if (mobileSearchOpen) setMobileSearchMounted(true); }, [mobileSearchOpen]);
+  useEffect(() => { if (ap.desktopAskPopupOpen) setDesktopAskPopupMounted(true); }, [ap.desktopAskPopupOpen]);
+  useEffect(() => { if (mobileAskOpen) setMobileAskMounted(true); }, [mobileAskOpen]);
+  useEffect(() => { if (settingsOpen) setSettingsMounted(true); }, [settingsOpen]);
+  useEffect(() => { if (importModalOpen) setImportMounted(true); }, [importModalOpen]);
+
+  const isPanelMounted = useCallback(
+    (panel: PanelId) => lp.activePanel === panel || mountedPanels.has(panel),
+    [lp.activePanel, mountedPanels],
+  );
 
   // ── Event listeners ──
 
@@ -323,8 +356,6 @@ export default function SidebarLayout({ fileTree, children }: SidebarLayoutProps
   }, []);
 
   const closeAgentDetailPanel = useCallback(() => setAgentDetailKey(null), []);
-
-  const agentDockOpen = agentDetailKey !== null && lp.activePanel === 'agents';
 
   // Refresh file tree when server-side tree version changes.
   // Polls a lightweight version counter every 5s — only calls router.refresh()
@@ -564,71 +595,87 @@ export default function SidebarLayout({ fileTree, children }: SidebarLayoutProps
         onMaximize={lp.handlePanelMaximize}
         onImport={handleOpenImport}
       >
-        <div className={`flex flex-col h-full ${lp.activePanel === 'echo' ? '' : 'hidden'}`}>
-          <EchoPanel active={lp.activePanel === 'echo'} maximized={lp.panelMaximized} onMaximize={lp.handlePanelMaximize} />
-        </div>
-        <div className={`flex flex-col h-full ${lp.activePanel === 'search' ? '' : 'hidden'}`}>
-          <SearchPanel active={lp.activePanel === 'search'} maximized={lp.panelMaximized} onMaximize={lp.handlePanelMaximize} />
-        </div>
-        <div className={`flex flex-col h-full ${lp.activePanel === 'agents' ? '' : 'hidden'}`}>
-          <AgentsPanel
-            active={lp.activePanel === 'agents'}
-            maximized={lp.panelMaximized}
-            onMaximize={lp.handlePanelMaximize}
-            selectedAgentKey={agentDockOpen ? agentDetailKey : null}
-          />
-        </div>
-        <div className={`flex flex-col h-full ${lp.activePanel === 'discover' ? '' : 'hidden'}`}>
-          <DiscoverPanel active={lp.activePanel === 'discover'} maximized={lp.panelMaximized} onMaximize={lp.handlePanelMaximize} />
-        </div>
-        <div className={`flex flex-col h-full ${lp.activePanel === 'workflows' ? '' : 'hidden'}`}>
-          <WorkflowsPanel active={lp.activePanel === 'workflows'} maximized={lp.panelMaximized} onMaximize={lp.handlePanelMaximize} />
-        </div>
+        {isPanelMounted('echo') && (
+          <div className={`flex flex-col h-full ${lp.activePanel === 'echo' ? '' : 'hidden'}`}>
+            <EchoPanel active={lp.activePanel === 'echo'} maximized={lp.panelMaximized} onMaximize={lp.handlePanelMaximize} />
+          </div>
+        )}
+        {isPanelMounted('search') && (
+          <div className={`flex flex-col h-full ${lp.activePanel === 'search' ? '' : 'hidden'}`}>
+            <SearchPanel active={lp.activePanel === 'search'} maximized={lp.panelMaximized} onMaximize={lp.handlePanelMaximize} />
+          </div>
+        )}
+        {isPanelMounted('agents') && (
+          <div className={`flex flex-col h-full ${lp.activePanel === 'agents' ? '' : 'hidden'}`}>
+            <AgentsPanel
+              active={lp.activePanel === 'agents'}
+              maximized={lp.panelMaximized}
+              onMaximize={lp.handlePanelMaximize}
+              selectedAgentKey={agentDockOpen ? agentDetailKey : null}
+            />
+          </div>
+        )}
+        {isPanelMounted('discover') && (
+          <div className={`flex flex-col h-full ${lp.activePanel === 'discover' ? '' : 'hidden'}`}>
+            <DiscoverPanel active={lp.activePanel === 'discover'} maximized={lp.panelMaximized} onMaximize={lp.handlePanelMaximize} />
+          </div>
+        )}
+        {isPanelMounted('workflows') && (
+          <div className={`flex flex-col h-full ${lp.activePanel === 'workflows' ? '' : 'hidden'}`}>
+            <WorkflowsPanel active={lp.activePanel === 'workflows'} maximized={lp.panelMaximized} onMaximize={lp.handlePanelMaximize} />
+          </div>
+        )}
       </Panel>
 
       {/* ── Right-side Ask AI Panel ── */}
-      <RightAskPanel
-        open={ap.askPanelOpen}
-        onClose={ap.closeAskPanel}
-        currentFile={currentFile}
-        initialMessage={ap.askInitialMessage}
-        initialAcpAgent={ap.askAcpAgent}
-        onFirstMessage={handleFirstMessage}
-        width={ap.askPanelWidth}
-        onWidthChange={ap.handleAskWidthChange}
-        onWidthCommit={ap.handleAskWidthCommit}
-        askMode={ap.askMode}
-        onModeSwitch={ap.handleAskModeSwitch}
-        maximized={ap.askMaximized}
-        onMaximize={ap.toggleAskMaximized}
-        sidebarOffset={lp.panelOpen ? lp.railWidth + lp.effectivePanelWidth : lp.railWidth}
-      />
+      {rightAskMounted && (
+        <RightAskPanel
+          open={ap.askPanelOpen}
+          onClose={ap.closeAskPanel}
+          currentFile={currentFile}
+          initialMessage={ap.askInitialMessage}
+          initialAcpAgent={ap.askAcpAgent}
+          onFirstMessage={handleFirstMessage}
+          width={ap.askPanelWidth}
+          onWidthChange={ap.handleAskWidthChange}
+          onWidthCommit={ap.handleAskWidthCommit}
+          askMode={ap.askMode}
+          onModeSwitch={ap.handleAskModeSwitch}
+          maximized={ap.askMaximized}
+          onMaximize={ap.toggleAskMaximized}
+          sidebarOffset={lp.panelOpen ? lp.railWidth + lp.effectivePanelWidth : lp.railWidth}
+        />
+      )}
 
-      <RightAgentDetailPanel
-        open={agentDockOpen}
-        agentKey={agentDetailKey}
-        onClose={closeAgentDetailPanel}
-        rightOffset={ap.askPanelOpen ? ap.askPanelWidth : 0}
-        width={agentDetailWidth}
-        onWidthChange={setAgentDetailWidth}
-        onWidthCommit={handleAgentDetailWidthCommit}
-      />
+      {rightAgentDetailMounted && (
+        <RightAgentDetailPanel
+          open={agentDockOpen}
+          agentKey={agentDetailKey}
+          onClose={closeAgentDetailPanel}
+          rightOffset={ap.askPanelOpen ? ap.askPanelWidth : 0}
+          width={agentDetailWidth}
+          onWidthChange={setAgentDetailWidth}
+          onWidthCommit={handleAgentDetailWidthCommit}
+        />
+      )}
 
-      <AskModal
-        open={ap.desktopAskPopupOpen}
-        onClose={ap.closeDesktopAskPopup}
-        currentFile={currentFile}
-        initialMessage={ap.askInitialMessage}
-        initialAcpAgent={ap.askAcpAgent}
-        onFirstMessage={handleFirstMessage}
-        askMode={ap.askMode}
-        onModeSwitch={ap.handleAskModeSwitch}
-      />
+      {desktopAskPopupMounted && (
+        <AskModal
+          open={ap.desktopAskPopupOpen}
+          onClose={ap.closeDesktopAskPopup}
+          currentFile={currentFile}
+          initialMessage={ap.askInitialMessage}
+          initialAcpAgent={ap.askAcpAgent}
+          onFirstMessage={handleFirstMessage}
+          askMode={ap.askMode}
+          onModeSwitch={ap.handleAskModeSwitch}
+        />
+      )}
 
       <AskFab onToggle={ap.toggleAskPanel} askPanelOpen={ap.askPanelOpen || ap.desktopAskPopupOpen} />
       <KeyboardShortcuts />
 
-      <SettingsModal open={settingsOpen} onClose={closeSettings} initialTab={settingsTab} />
+      {settingsMounted && <SettingsModal open={settingsOpen} onClose={closeSettings} initialTab={settingsTab} />}
 
       <SyncPopover
         open={syncPopoverOpen}
@@ -678,8 +725,8 @@ export default function SidebarLayout({ fileTree, children }: SidebarLayoutProps
         </div>
       </aside>
 
-      <SearchModal open={mobileSearchOpen} onClose={() => setMobileSearchOpen(false)} />
-      <AskModal open={mobileAskOpen} onClose={() => setMobileAskOpen(false)} currentFile={currentFile} />
+      {mobileSearchMounted && <SearchModal open={mobileSearchOpen} onClose={() => setMobileSearchOpen(false)} />}
+      {mobileAskMounted && <AskModal open={mobileAskOpen} onClose={() => setMobileAskOpen(false)} currentFile={currentFile} />}
 
       <main
         id="main-content"
@@ -727,14 +774,16 @@ export default function SidebarLayout({ fileTree, children }: SidebarLayoutProps
         )}
       </main>
 
-      <ImportModal
-        open={importModalOpen}
-        onClose={handleCloseImport}
-        defaultSpace={importDefaultSpace}
-        initialFiles={importInitialFiles}
-        aiOrganize={aiOrganize}
-        dirPaths={dirPaths}
-      />
+      {importMounted && (
+        <ImportModal
+          open={importModalOpen}
+          onClose={handleCloseImport}
+          defaultSpace={importDefaultSpace}
+          initialFiles={importInitialFiles}
+          aiOrganize={aiOrganize}
+          dirPaths={dirPaths}
+        />
+      )}
 
       {organizeToastVisible && (
         <OrganizeToast

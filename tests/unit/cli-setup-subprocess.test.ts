@@ -10,7 +10,10 @@ describe('setup.js subprocess contract', () => {
 
     expect(source).not.toContain('execSync(');
     expect(source).not.toContain('exec(`node');
-    expect(source).toContain("execFileSync('tar', ['-xzf', tarPath, '-C', extractDir]");
+    expect(source).not.toContain("execFileSync('tar', ['-xzf', tarPath, '-C', extractDir]");
+    expect(source).toContain('extractTarGzSafe(tarPath, extractDir)');
+    expect(source).toContain('function resolveTarEntryPath(destDir, entryName)');
+    expect(source).toContain('Template tar entry outside extraction directory');
     expect(source).toContain("execFileSync('open', [url]");
     expect(source).toContain("execFileSync('cmd.exe', ['/c', 'start', '', url]");
     expect(source).toContain("execFileSync(process.execPath, [cliPath, 'restart']");

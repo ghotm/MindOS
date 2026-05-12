@@ -5,15 +5,17 @@
 import { ChildProcess, execFile, spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import path from 'path';
-import http from 'http';
 import net from 'net';
 import { promisify } from 'util';
 import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, chmodSync, appendFileSync } from 'fs';
 import { desktopTelemetry } from './telemetry';
 import { resolveCliPath, resolveMcpBundlePath, resolveMcpDir, resolveWebAppDir } from './mindos-runtime-layout';
+import { verifyMindOsWebHealth } from './mindos-web-health';
 
 const IS_WIN = process.platform === 'win32';
 const execFileAsync = promisify(execFile);
+const CHILD_PROCESS_TERM_TIMEOUT_MS = 5000;
+const PID_TERM_TIMEOUT_MS = 1500;
 
 export function isMindosOwnedCommandLine(commandLine: string): boolean {
   const normalized = commandLine.replace(/\\/g, '/').toLowerCase();
@@ -27,6 +29,70 @@ export function isMindosOwnedCommandLine(commandLine: string): boolean {
     '/dist/protocols/mcp-server/index.cjs',
   ].some((marker) => normalized.includes(marker));
 }
+
+function forceKillChildProcess(proc: ChildProcess): void {
+  try {
+    if (IS_WIN) proc.kill();
+    else proc.kill('SIGKILL');
+  } catch { /* already dead */ }
+}
+
+function terminateChildProcess(proc: ChildProcess | null, timeoutMs = CHILD_PROCESS_TERM_TIMEOUT_MS): Promise<void> {
+  return new Promise((resolve) => {
+    if (!proc || proc.killed) { resolve(); return; }
+
+    let resolved = false;
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(forceKillTimer);
+      resolve();
+    };
+
+    const forceKillTimer = setTimeout(() => {
+      forceKillChildProcess(proc);
+      done();
+    }, timeoutMs);
+
+    proc.once('exit', done);
+
+    try {
+      proc.kill('SIGTERM');
+    } catch {
+      done();
+    }
+  });
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function terminatePid(pid: number, timeoutMs = PID_TERM_TIMEOUT_MS): Promise<void> {
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    return;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (!isPidAlive(pid)) return;
+  }
+
+  try {
+    if (IS_WIN) process.kill(pid);
+    else process.kill(pid, 'SIGKILL');
+  } catch { /* already dead */ }
+}
+
+export const _terminateChildProcess_forTest = terminateChildProcess;
 
 export interface ProcessManagerOptions {
   nodePath: string;
@@ -131,7 +197,7 @@ export class ProcessManager extends EventEmitter {
 
       // 4. Wait for health (exits early if web process dies)
       const stopHealthCheck = desktopTelemetry.startTimer('desktop.boot.health_check', { port: this.opts.webPort });
-      const healthy = await this.waitForReady(this.opts.webPort, '/api/health', 60_000);
+      const healthy = await this.waitForReady(this.opts.webPort, 60_000);
       stopHealthCheck({ port: this.opts.webPort, success: healthy });
       if (!healthy) {
         const stderr = this.webStderrLines.slice(-20).join('\n');
@@ -170,33 +236,10 @@ export class ProcessManager extends EventEmitter {
     for (const t of this.respawnTimers) clearTimeout(t);
     this.respawnTimers = [];
 
-    const killProcess = (proc: ChildProcess | null): Promise<void> => {
-      return new Promise((resolve) => {
-        if (!proc || proc.killed) { resolve(); return; }
-
-        const forceKillTimer = setTimeout(() => {
-          try { proc.kill(); } catch { /* already dead */ }
-          resolve();
-        }, 5000);
-
-        proc.once('exit', () => {
-          clearTimeout(forceKillTimer);
-          resolve();
-        });
-
-        try {
-          proc.kill('SIGTERM');
-        } catch {
-          clearTimeout(forceKillTimer);
-          resolve();
-        }
-      });
-    };
-
     await Promise.all([
-      killProcess(this.webProcess),
+      terminateChildProcess(this.webProcess),
       // Don't kill external MCP (owned by CLI)
-      this.externalMcp ? Promise.resolve() : killProcess(this.mcpProcess),
+      this.externalMcp ? Promise.resolve() : terminateChildProcess(this.mcpProcess),
     ]);
 
     this.webProcess = null;
@@ -344,46 +387,23 @@ export class ProcessManager extends EventEmitter {
   }
 
   /**
-   * Poll /api/health until 200, timeout, or web process death.
+   * Poll /api/health until MindOS responds, timeout, or web process death.
    * Exits early when the web process crashes (no point waiting 120s for a dead process).
    */
-  private waitForReady(port: number, urlPath: string, timeoutMs: number): Promise<boolean> {
-    return new Promise((resolve) => {
-      let resolved = false;
-      const done = (result: boolean) => {
-        if (resolved) return;
-        resolved = true;
-        clearInterval(interval);
-        resolve(result);
-      };
+  private async waitForReady(port: number, timeoutMs: number): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start <= timeoutMs) {
+      if (this.stopped) return false;
 
-      const start = Date.now();
-      const interval = setInterval(() => {
-        if (this.stopped) { done(false); return; }
-        if (Date.now() - start > timeoutMs) { done(false); return; }
+      // If web process has been marked dead AND crash handler exhausted retries (>=3),
+      // bail out immediately instead of polling until timeout.
+      if (this.webProcessDied && this.crashCount.web >= 3) return false;
 
-        // If web process has been marked dead AND crash handler exhausted retries (>=3),
-        // bail out immediately instead of polling until timeout.
-        if (this.webProcessDied && this.crashCount.web >= 3) {
-          done(false);
-          return;
-        }
+      if (await verifyMindOsWebHealth(port, 2000)) return true;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
 
-        const req = http.get({
-          hostname: '127.0.0.1',
-          port,
-          path: urlPath,
-          timeout: 2000,
-        }, (res) => {
-          if (res.statusCode === 200) {
-            done(true);
-          }
-          res.resume(); // drain
-        });
-        req.on('error', () => { /* not ready yet */ });
-        req.on('timeout', () => { req.destroy(); });
-      }, 500);
-    });
+    return false;
   }
 
   /** Prevent unhandled 'error' event (e.g. ENOENT when binary not found) from crashing Electron */
@@ -427,19 +447,7 @@ export class ProcessManager extends EventEmitter {
 
   /** Quick check if a MindOS MCP is already listening on a port */
   private checkMcpHealth(port: number): Promise<boolean> {
-    return new Promise((resolve) => {
-      const req = http.get({
-        hostname: '127.0.0.1',
-        port,
-        path: '/api/health',
-        timeout: 800,  // Socket connect + response timeout (tightened from 1500ms)
-      }, (res) => {
-        resolve(res.statusCode === 200);
-        res.resume();
-      });
-      req.on('error', () => resolve(false));
-      req.on('timeout', () => { req.destroy(); resolve(false); });
-    });
+    return verifyMindOsWebHealth(port, 800);
   }
 
   /** Find next available port starting from the given one */
@@ -602,14 +610,7 @@ export class ProcessManager extends EventEmitter {
               setTimeout(async () => {
                 if (this.stopped) return;
                 try {
-                  const res = await new Promise<boolean>((resolve) => {
-                    const req = require('http').get(
-                      { hostname: '127.0.0.1', port, path: '/api/health', timeout: 3000 },
-                      (r: any) => { resolve(r.statusCode === 200); r.resume(); },
-                    );
-                    req.on('error', () => resolve(false));
-                    req.on('timeout', () => { req.destroy(); resolve(false); });
-                  });
+                  const res = await verifyMindOsWebHealth(port, 3000);
                   if (res) {
                     console.info('[MindOS:web] respawn healthy');
                     this.emit('status-change', 'running');
@@ -876,7 +877,7 @@ export class ProcessManager extends EventEmitter {
       }
 
       console.warn(`[MindOS] Killing ${label} process (PID ${pid})`);
-      process.kill(pid, 'SIGTERM');
+      await terminatePid(pid);
       stop({ pid, label, verifiedMindosProcess: true, success: true });
     } catch {
       stop({ pid, label, verifiedMindosProcess: false, success: false });

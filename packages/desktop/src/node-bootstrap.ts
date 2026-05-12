@@ -8,12 +8,13 @@
  * Platform support: macOS (arm64/x64), Linux (x64), Windows (arm64/x64).
  */
 import { app } from 'electron';
-import { createWriteStream, existsSync, mkdirSync, chmodSync, statSync, type WriteStream } from 'fs';
+import { createWriteStream, existsSync, mkdirSync, chmodSync, statSync, readFileSync, writeFileSync, symlinkSync, type WriteStream } from 'fs';
 import { rm } from 'fs/promises';
 import { execFileSync, spawn } from 'child_process';
 import path from 'path';
 import https from 'https';
 import type { ClientRequest, IncomingMessage } from 'http';
+import { gunzipSync } from 'zlib';
 
 // Node.js LTS version to download (also used by prepare-mindos-runtime to bundle Node)
 export const NODE_VERSION = '22.16.0';
@@ -111,7 +112,7 @@ export async function downloadNode(
   // 2. Extract (using spawn with argument arrays — no shell injection)
   onProgress?.(80, 'extracting');
   if (format === 'tar.gz') {
-    await spawnAsync('tar', ['xzf', tmpFile, '-C', NODE_DIR, '--strip-components=1'], 60000);
+    extractTarGzSafe(tmpFile, NODE_DIR, 1);
   } else {
     // Windows: PowerShell extract — use -NoProfile and -ExecutionPolicy Bypass
     // to avoid user profile interference and restrictive execution policies.
@@ -154,6 +155,142 @@ export async function downloadNode(
 
   onProgress?.(100, 'done');
   return nodeBin;
+}
+
+function extractTarGzSafe(tarPath: string, destDir: string, stripComponents = 0): void {
+  const tar = gunzipSync(readFileSync(tarPath));
+  let offset = 0;
+  let longName: string | null = null;
+
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    offset += 512;
+    if (isZeroBlock(header)) break;
+
+    const nameRaw = readTarString(header, 0, 100);
+    const mode = readTarOctal(header, 100, 8) || 0o644;
+    const linkName = readTarString(header, 157, 100);
+    const size = readTarOctal(header, 124, 12);
+    const typeflag = header[156];
+    const prefix = readTarString(header, 345, 155);
+    const dataEnd = offset + size;
+    if (dataEnd > tar.length) throw new Error('Invalid Node.js tar entry size');
+
+    const paddedSize = Math.ceil(size / 512) * 512;
+    if (typeflag === 0x4c) {
+      longName = tar.subarray(offset, dataEnd).toString('utf-8').replace(/\0.*$/, '');
+      offset += paddedSize;
+      continue;
+    }
+    if (typeflag === 0x78) {
+      const paxPath = readPaxPath(tar.subarray(offset, dataEnd).toString('utf-8'));
+      if (paxPath) longName = paxPath;
+      offset += paddedSize;
+      continue;
+    }
+    if (typeflag === 0x67) {
+      offset += paddedSize;
+      continue;
+    }
+
+    const rawEntryName = longName || (prefix ? `${prefix}/${nameRaw}` : nameRaw);
+    longName = null;
+    const entryName = stripTarEntryPath(rawEntryName, stripComponents);
+    if (!entryName || entryName === '.' || entryName === './') {
+      offset += paddedSize;
+      continue;
+    }
+
+    const entryPath = resolveTarEntryPath(destDir, entryName);
+    const isDir = typeflag === 0x35 || entryName.endsWith('/');
+    const isFile = typeflag === 0 || typeflag === 0x30;
+    const isSymlink = typeflag === 0x32;
+    if (isDir) {
+      mkdirSync(entryPath, { recursive: true });
+    } else if (isFile) {
+      mkdirSync(path.dirname(entryPath), { recursive: true });
+      writeFileSync(entryPath, tar.subarray(offset, dataEnd));
+      if (process.platform !== 'win32') chmodSync(entryPath, mode & 0o777);
+    } else if (isSymlink && process.platform !== 'win32') {
+      const safeLinkName = resolveTarSymlinkTarget(destDir, entryPath, linkName);
+      mkdirSync(path.dirname(entryPath), { recursive: true });
+      symlinkSync(safeLinkName, entryPath);
+    }
+
+    offset += paddedSize;
+  }
+}
+
+function stripTarEntryPath(entryName: string, stripComponents: number): string {
+  const normalizedEntry = entryName.replaceAll('\\', '/');
+  if (normalizedEntry.startsWith('/') || normalizedEntry.startsWith('//') || /^[A-Za-z]:/.test(normalizedEntry)) {
+    throw new Error(`Node.js tar entry outside extraction directory: ${entryName}`);
+  }
+  const parts = normalizedEntry.split('/').filter((part) => part.length > 0 && part !== '.');
+  if (parts.includes('..')) {
+    throw new Error(`Node.js tar entry outside extraction directory: ${entryName}`);
+  }
+  return parts.slice(stripComponents).join('/');
+}
+
+function resolveTarEntryPath(destDir: string, entryName: string): string {
+  const root = path.resolve(destDir);
+  const target = path.resolve(root, entryName);
+  const rel = path.relative(root, target);
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    throw new Error(`Node.js tar entry outside extraction directory: ${entryName}`);
+  }
+  return target;
+}
+
+function resolveTarSymlinkTarget(destDir: string, entryPath: string, linkName: string): string {
+  const normalizedLink = linkName.replaceAll('\\', '/');
+  if (!normalizedLink || normalizedLink.startsWith('/') || normalizedLink.startsWith('//') || /^[A-Za-z]:/.test(normalizedLink)) {
+    throw new Error(`Node.js tar symlink outside extraction directory: ${linkName}`);
+  }
+  const root = path.resolve(destDir);
+  const target = path.resolve(path.dirname(entryPath), normalizedLink);
+  const rel = path.relative(root, target);
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    throw new Error(`Node.js tar symlink outside extraction directory: ${linkName}`);
+  }
+  return normalizedLink;
+}
+
+function readTarString(buffer: Buffer, offset: number, length: number): string {
+  const slice = buffer.subarray(offset, offset + length);
+  const nul = slice.indexOf(0);
+  return slice.subarray(0, nul === -1 ? length : nul).toString('utf-8');
+}
+
+function readTarOctal(buffer: Buffer, offset: number, length: number): number {
+  const raw = readTarString(buffer, offset, length).trim();
+  if (!raw) return 0;
+  const parsed = Number.parseInt(raw.replace(/\0/g, ''), 8);
+  if (!Number.isFinite(parsed)) throw new Error('Invalid Node.js tar entry metadata');
+  return parsed;
+}
+
+function readPaxPath(content: string): string | null {
+  let cursor = 0;
+  while (cursor < content.length) {
+    const space = content.indexOf(' ', cursor);
+    if (space === -1) return null;
+    const length = Number.parseInt(content.slice(cursor, space), 10);
+    if (!Number.isFinite(length) || length <= 0) return null;
+    const record = content.slice(space + 1, cursor + length).replace(/\n$/, '');
+    const eq = record.indexOf('=');
+    if (eq > 0 && record.slice(0, eq) === 'path') return record.slice(eq + 1);
+    cursor += length;
+  }
+  return null;
+}
+
+function isZeroBlock(buffer: Buffer): boolean {
+  for (const byte of buffer) {
+    if (byte !== 0) return false;
+  }
+  return true;
 }
 
 type ExecFileSyncLike = (command: string, args: string[], options: { stdio: 'ignore' }) => unknown;
@@ -277,6 +414,7 @@ function downloadFile(
 }
 
 export const _downloadFile_forTest = downloadFile;
+export const _extractTarGzSafe_forTest = extractTarGzSafe;
 
 /** Spawn a process and wait for exit. Rejects on non-zero exit or timeout. */
 function spawnAsync(cmd: string, args: string[], timeoutMs: number): Promise<void> {

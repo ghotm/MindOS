@@ -36,6 +36,18 @@ describe('Bun single-binary runtime contract', () => {
     expect(script).toContain('.cjs');
   });
 
+  it('extracts the embedded runtime without delegating archive paths to system tar', () => {
+    const script = read('scripts/build-bun-binary.mjs');
+
+    expect(script).toContain('extractTarGzSafe(tempArchive, tempRoot)');
+    expect(script).toContain('function resolveTarEntryPath(destDir, entryName)');
+    expect(script).toContain('function resolveTarSymlinkTarget(destDir, entryPath, linkName)');
+    expect(script).toContain('symlinkSync(safeLinkName, entryPath)');
+    expect(script).toContain('normalizedEntry.split("/").includes("..")');
+    expect(script).toContain('Tar entry outside extraction directory');
+    expect(script).not.toContain('spawnSync("tar", ["-xzf", tempArchive');
+  });
+
   it('lets the shared manifest describe Bun single-binary artifacts', () => {
     const manifest = createRuntimeManifest({
       productPkg: { name: '@geminilight/mindos', version: '1.2.3' },

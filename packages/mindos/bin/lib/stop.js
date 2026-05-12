@@ -83,15 +83,18 @@ export function killByPort(port) {
   let killed = 0;
   if (isWin) {
     for (const pid of pidsToKill) {
+      if (!isMindosOwnedPid(pid)) continue;
       try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); killed++; } catch {}
     }
   } else {
     for (const pid of pidsToKill) {
+      if (!isMindosOwnedPid(pid)) continue;
       try { process.kill(pid, 'SIGTERM'); killed++; } catch {}
     }
     if (killed > 0) {
       syncSleep(2000);
       for (const pid of pidsToKill) {
+        if (!isMindosOwnedPid(pid)) continue;
         try {
           process.kill(pid, 0);
           process.kill(pid, 'SIGKILL');
@@ -101,6 +104,48 @@ export function killByPort(port) {
   }
 
   return killed;
+}
+
+export function isMindosOwnedCommandLine(commandLine) {
+  const normalized = String(commandLine || '').replace(/\\/g, '/').toLowerCase();
+  return [
+    '/.mindos/runtime/',
+    '/node_modules/@geminilight/mindos/',
+    '/@geminilight/mindos/',
+    '/packages/mindos/bin/cli.js',
+    '/packages/web/.next/standalone/server.js',
+    '/dist/protocols/mcp-server/index.cjs',
+  ].some((marker) => normalized.includes(marker));
+}
+
+function isMindosOwnedPid(pid) {
+  const commandLine = getCommandLine(pid);
+  return commandLine !== null && isMindosOwnedCommandLine(commandLine);
+}
+
+function getCommandLine(pid) {
+  try {
+    if (isWin) {
+      try {
+        return execFileSync('powershell.exe', [
+          '-NoProfile',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -ErrorAction SilentlyContinue).CommandLine`,
+        ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
+      } catch {
+        return execFileSync('wmic', ['process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/format:value'], {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'ignore'],
+        });
+      }
+    }
+    return execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+  } catch {
+    return null;
+  }
 }
 
 /**

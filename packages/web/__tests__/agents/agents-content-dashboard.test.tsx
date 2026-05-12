@@ -126,11 +126,14 @@ describe('Agents content dashboard', () => {
 
     expect(html).toContain(a.mcp.tabs.byAgent);
     expect(html).toContain(a.mcp.tabs.byServer);
+    expect(html).toContain(a.mcp.connectionGraph);
     expect(html).toContain(a.mcp.searchServersPlaceholder);
     expect(html).toContain('mindos');
     expect(html).toContain('github');
     expect(html).toContain('Cursor');
     expect(html).toContain('Codex');
+    expect(html).toContain('/agent-icons/cursor.svg');
+    expect(html).toContain('/agent-icons/openai.svg');
   });
 
   it('renders skills section with By Skill / By Agent views and management', () => {

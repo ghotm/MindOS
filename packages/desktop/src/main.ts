@@ -40,7 +40,7 @@ import {
   shouldSeedWebSetupPendingForLocal,
 } from './mindos-desktop-config';
 import { ensureMindosCliShim, refreshMindosCliAndNotify } from './install-cli-shim';
-import { verifyMindOsWebListening } from './mindos-web-health';
+import { verifyMindOsWebHealth, verifyMindOsWebListening } from './mindos-web-health';
 import { resolvePreferUnpacked } from './resolve-packaged-asset';
 import { registerMindosConnectSchemePrivileged, registerMindosConnectProtocol } from './mindos-connect-protocol';
 import { CoreUpdater } from './core-updater';
@@ -495,7 +495,7 @@ async function startLocalMode(): Promise<string | null> {
   } catch (portErr) {
     // Port range exhausted — likely orphaned processes from a previous crash.
     // Kill them and retry instead of showing a dead-end error.
-    ProcessManager.cleanupOrphanedChildren();
+    await ProcessManager.cleanupOrphanedChildren();
     try {
       webPort = await findAvailablePort(config.port || DEFAULT_WEB_PORT);
       mcpPort = await findAvailablePort(config.mcpPort || DEFAULT_MCP_PORT);
@@ -503,11 +503,11 @@ async function startLocalMode(): Promise<string | null> {
       const basePort = config.port || DEFAULT_WEB_PORT;
       const portHint = process.platform === 'win32'
         ? `netstat -ano | findstr :${basePort}`
-        : `lsof -ti:${basePort} | xargs kill`;
+        : `lsof -nP -iTCP:${basePort} -sTCP:LISTEN`;
       splashStatus({
         error: zh
-          ? `端口 ${basePort}-${basePort + 9} 均被占用。\n请关闭其他占用这些端口的程序，或在终端运行:\n  ${portHint}`
-          : `Ports ${basePort}-${basePort + 9} are all in use.\nClose other programs using these ports, or run:\n  ${portHint}`,
+          ? `端口 ${basePort}-${basePort + 9} 均被占用。\n请关闭其他占用这些端口的程序，或用以下命令查看占用者:\n  ${portHint}`
+          : `Ports ${basePort}-${basePort + 9} are all in use.\nClose other programs using these ports, or inspect the owner with:\n  ${portHint}`,
         actions: [
           { id: 'retry', label: 'retry', primary: true },
           { id: 'quit', label: 'quit' },
@@ -651,8 +651,7 @@ async function startLocalMode(): Promise<string | null> {
         activeRecoveryPoll = setInterval(async () => {
           try {
             const effectiveWebPort = processManager?.webPort ?? webPort;
-            const res = await fetch(`http://127.0.0.1:${effectiveWebPort}/api/health`, { signal: AbortSignal.timeout(3000) });
-            if (res.ok) {
+            if (await verifyMindOsWebHealth(effectiveWebPort, 3000)) {
               clearInterval(activeRecoveryPoll!);
               activeRecoveryPoll = null;
               mainWindow?.loadURL(

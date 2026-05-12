@@ -95,7 +95,7 @@ fi
 echo "   ✅ mindos --help works"
 
 # Verify key files are present in the installed main package
-for f in bin/mindos-shim.cjs dist/foundation.js dist/protocols/acp/index.js; do
+for f in bin/mindos-shim.cjs dist/index.js dist/protocols/acp/index.js dist/protocols/mcp-server/index.cjs; do
   if [ ! -f "$SMOKE_DIR/node_modules/@geminilight/mindos/$f" ]; then
     echo "❌ Missing file in package: $f"
     rm -rf "$SMOKE_DIR"

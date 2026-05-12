@@ -20,6 +20,15 @@ describe('static Web artifact runtime contract', () => {
     expect(script).toContain('static-web-manifest.json');
   });
 
+  it('keeps static snapshot rendering isolated to the standalone dependency closure', () => {
+    const script = read('scripts/prepare-static-web.mjs');
+
+    expect(script).toContain('assertStandaloneNextDependencyClosure');
+    expect(script).toContain('next/dist/server/lib/cpu-profile');
+    expect(script).toContain('createStandaloneServerEnv');
+    expect(script).not.toContain('...process.env');
+  });
+
   it('allows the Bun runtime envelope to use static Web instead of Next standalone', () => {
     const buildBinary = read('scripts/build-bun-binary.mjs');
     const platformPackages = read('scripts/build-platform-packages.mjs');

@@ -9,12 +9,31 @@ describe('verifyMindOsWebHealth', () => {
   });
 
   it('returns true when /api/health responds ok', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, service: 'mindos' }),
+    });
     await expect(verifyMindOsWebHealth(3456)).resolves.toBe(true);
     expect(globalThis.fetch).toHaveBeenCalledWith(
       'http://127.0.0.1:3456/api/health',
       expect.objectContaining({ signal: expect.anything() }),
     );
+  });
+
+  it('returns false when another service exposes an ok health endpoint', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, service: 'other' }),
+    });
+    await expect(verifyMindOsWebHealth(3456)).resolves.toBe(false);
+  });
+
+  it('returns false when the health payload is not JSON', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => { throw new Error('invalid json'); },
+    });
+    await expect(verifyMindOsWebHealth(3456)).resolves.toBe(false);
   });
 
   it('returns false on non-ok response', async () => {
@@ -40,7 +59,7 @@ describe('verifyMindOsWebListening', () => {
     globalThis.fetch = vi.fn().mockImplementation(async () => {
       calls += 1;
       if (calls < 3) throw new Error('down');
-      return { ok: true };
+      return { ok: true, json: async () => ({ ok: true, service: 'mindos' }) };
     });
 
     await expect(

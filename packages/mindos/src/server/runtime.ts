@@ -78,30 +78,15 @@ export function collectAllFilesFromMindRoot(mindRoot: string): string[] {
 
 export function getRecentlyModifiedFromMindRoot(mindRoot: string, limit = 10): Array<{ path: string; mtime: number }> {
   const boundedLimit = Math.max(1, Math.min(limit, 30));
-  return collectAllFilesFromMindRoot(mindRoot)
-    .map((filePath) => {
-      try {
-        return { path: filePath, mtime: statSync(resolveExistingSafe(mindRoot, filePath)).mtimeMs };
-      } catch {
-        return null;
-      }
-    })
-    .filter((item): item is { path: string; mtime: number } => !!item)
+  return collectFileStatsFromMindRoot(mindRoot)
     .sort((a, b) => b.mtime - a.mtime)
     .slice(0, boundedLimit);
 }
 
 export function getTreeVersionFromMindRoot(mindRoot: string): number {
-  const root = resolve(mindRoot);
-  if (!existsSync(root)) return 0;
   let version = 0;
-  for (const filePath of collectAllFilesFromMindRoot(root)) {
-    try {
-      const stat = statSync(resolveExistingSafe(root, filePath));
-      version = Math.max(version, Math.floor(stat.mtimeMs));
-    } catch {
-      // Ignore files removed between the directory scan and stat.
-    }
+  for (const file of collectFileStatsFromMindRoot(mindRoot)) {
+    version = Math.max(version, Math.floor(file.mtime));
   }
   return version;
 }
@@ -281,4 +266,19 @@ function walkMindRoot(
     }
     if (includeFiles && entry.isFile()) visit(abs, rel, entry);
   }
+}
+
+function collectFileStatsFromMindRoot(mindRoot: string): Array<{ path: string; mtime: number }> {
+  const root = resolve(mindRoot);
+  if (!existsSync(root)) return [];
+  const files: Array<{ path: string; mtime: number }> = [];
+  walkMindRoot(root, root, (abs, rel) => {
+    if (!MINDOS_ALLOWED_FILE_EXTENSIONS.has(extname(abs).toLowerCase())) return;
+    try {
+      files.push({ path: rel, mtime: statSync(abs).mtimeMs });
+    } catch {
+      // Ignore files removed between directory traversal and stat.
+    }
+  });
+  return files;
 }

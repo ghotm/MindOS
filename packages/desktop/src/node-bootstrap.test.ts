@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'fs';
 import path from 'path';
 import { EventEmitter } from 'events';
 import os from 'os';
+import { gzipSync } from 'zlib';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { _downloadFile_forTest, removeMacQuarantineAttribute } from './node-bootstrap';
+import { _downloadFile_forTest, _extractTarGzSafe_forTest, removeMacQuarantineAttribute } from './node-bootstrap';
 
 const httpsGetMock = vi.hoisted(() => vi.fn());
 
@@ -17,6 +18,40 @@ vi.mock('https', () => ({
   default: { get: httpsGetMock },
   get: httpsGetMock,
 }));
+
+function writeOctal(buf: Buffer, offset: number, length: number, value: number): void {
+  const text = value.toString(8).padStart(length - 1, '0') + '\0';
+  buf.write(text, offset, length, 'ascii');
+}
+
+function writeTarString(buf: Buffer, offset: number, length: number, value: string): void {
+  buf.write(value.slice(0, length), offset, length, 'utf-8');
+}
+
+function tarHeader(name: string, size: number, typeflag: string, options: { mode?: number; linkName?: string } = {}): Buffer {
+  const header = Buffer.alloc(512);
+  writeTarString(header, 0, 100, name);
+  writeOctal(header, 100, 8, options.mode ?? 0o644);
+  writeOctal(header, 108, 8, 0);
+  writeOctal(header, 116, 8, 0);
+  writeOctal(header, 124, 12, size);
+  writeOctal(header, 136, 12, 0);
+  header.fill(0x20, 148, 156);
+  header.write(typeflag, 156, 1, 'ascii');
+  if (options.linkName) writeTarString(header, 157, 100, options.linkName);
+  writeTarString(header, 257, 6, 'ustar ');
+  writeTarString(header, 263, 2, ' \0');
+
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  header.write(checksum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+  return header;
+}
+
+function paddedData(data: Buffer): Buffer {
+  const padding = (512 - (data.length % 512)) % 512;
+  return padding === 0 ? data : Buffer.concat([data, Buffer.alloc(padding)]);
+}
 
 describe('node-bootstrap', () => {
   beforeEach(() => {
@@ -49,6 +84,51 @@ describe('node-bootstrap', () => {
     expect(source).not.toContain('shell: IS_WIN');
     expect(source).toContain('shell: needsWindowsShell(cmd)');
     expect(source).toContain('shell: needsWindowsShell(npmBin)');
+  });
+
+  it('extracts downloaded Node.js tarballs with local path containment', () => {
+    const source = readFileSync(path.join(__dirname, 'node-bootstrap.ts'), 'utf-8');
+
+    expect(source).not.toContain("spawnAsync('tar', ['xzf', tmpFile");
+    expect(source).toContain('extractTarGzSafe(tmpFile, NODE_DIR, 1)');
+    expect(source).toContain('function resolveTarEntryPath(destDir: string, entryName: string)');
+    expect(source).toContain('function resolveTarSymlinkTarget(destDir: string, entryPath: string, linkName: string)');
+    expect(source).toContain('symlinkSync(safeLinkName, entryPath)');
+    expect(source).toContain('Node.js tar entry outside extraction directory');
+  });
+
+  it('preserves safe Node.js tarball symlinks and executable mode', () => {
+    if (process.platform === 'win32') return;
+
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'mindos-node-bootstrap-tar-'));
+    const tarball = path.join(tmpDir, 'node.tar.gz');
+    const dest = path.join(tmpDir, 'node');
+    const nodeData = Buffer.from('#!/bin/sh\n');
+    const npmData = Buffer.from('// npm cli\n');
+    const chunks = [
+      tarHeader('node-v22/bin/', 0, '5', { mode: 0o755 }),
+      tarHeader('node-v22/bin/node', nodeData.length, '0', { mode: 0o755 }),
+      paddedData(nodeData),
+      tarHeader('node-v22/lib/node_modules/npm/bin/npm-cli.js', npmData.length, '0', { mode: 0o644 }),
+      paddedData(npmData),
+      tarHeader('node-v22/bin/npm', 0, '2', {
+        mode: 0o777,
+        linkName: '../lib/node_modules/npm/bin/npm-cli.js',
+      }),
+      Buffer.alloc(1024),
+    ];
+
+    try {
+      writeFileSync(tarball, gzipSync(Buffer.concat(chunks)));
+      _extractTarGzSafe_forTest(tarball, dest, 1);
+
+      const nodePath = path.join(dest, 'bin', 'node');
+      expect(existsSync(nodePath)).toBe(true);
+      expect(statSync(nodePath).mode & 0o111).not.toBe(0);
+      expect(readlinkSync(path.join(dest, 'bin', 'npm'))).toBe('../lib/node_modules/npm/bin/npm-cli.js');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('destroys the active download request when the overall timeout fires', async () => {

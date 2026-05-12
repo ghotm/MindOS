@@ -160,6 +160,31 @@ function initials(name: string): string {
   return name.slice(0, 2).toUpperCase();
 }
 
+const AGENT_ICON_BY_KEY: Record<string, string> = {
+  'claude-code': 'claude',
+  claude: 'claude',
+  cursor: 'cursor',
+  windsurf: 'windsurf',
+  codex: 'openai',
+  'github-copilot': 'github-copilot',
+  copilot: 'github-copilot',
+  'gemini-cli': 'google',
+  gemini: 'google',
+  antigravity: 'google',
+};
+
+function agentIconSlug(name: string): string | null {
+  const key = name.trim().toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  if (AGENT_ICON_BY_KEY[key]) return AGENT_ICON_BY_KEY[key];
+  if (key.includes('claude')) return 'claude';
+  if (key.includes('cursor')) return 'cursor';
+  if (key.includes('windsurf')) return 'windsurf';
+  if (key.includes('codex')) return 'openai';
+  if (key.includes('copilot')) return 'github-copilot';
+  if (key.includes('gemini') || key.includes('google')) return 'google';
+  return null;
+}
+
 export function AgentAvatar({
   name,
   status,
@@ -175,12 +200,23 @@ export function AgentAvatar({
 }) {
   const [bg, border, text] = AVATAR_PALETTES[hashName(name) % AVATAR_PALETTES.length];
   const sizeClasses = size === 'sm' ? 'w-7 h-7 text-[10px]' : 'w-9 h-9 text-xs';
+  const iconSizeClasses = size === 'sm' ? 'w-3.5 h-3.5' : 'w-5 h-5';
   const dotColor = status === 'connected' ? 'bg-[var(--success)]' : status === 'detected' ? 'bg-[var(--amber)]' : 'bg-muted-foreground';
+  const iconSlug = agentIconSlug(name);
 
   return (
     <div className="relative group/avatar" title={name}>
-      <div className={`${sizeClasses} ${bg} ${border} ${text} border rounded-full flex items-center justify-center font-semibold select-none`}>
-        {initials(name)}
+      <div className={`${sizeClasses} ${bg} ${border} ${text} border rounded-full flex items-center justify-center font-semibold select-none shadow-sm dark:shadow-none`}>
+        {iconSlug ? (
+          <img
+            src={`/agent-icons/${iconSlug}.svg`}
+            alt=""
+            aria-hidden="true"
+            className={`${iconSizeClasses} object-contain opacity-90`}
+          />
+        ) : (
+          initials(name)
+        )}
       </div>
       {status && (
         <span className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-card ${dotColor}`} aria-hidden="true" />
