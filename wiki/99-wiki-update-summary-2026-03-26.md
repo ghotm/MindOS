@@ -11,7 +11,7 @@
 ### 1. Activity Bar + Panel 布局重构 (P0 - 已完成)
 
 **变化描述：**
-从传统 Sidebar 布局改为类似 VS Code 的 Activity Bar + 可切换 Panel 布局。
+从旧 sidebar 布局改为类似 VS Code 的 Activity Bar + 可切换 Panel 布局。
 
 **代码位置：**
 - `components/ActivityBar.tsx` - 左侧 48px 导航栏
@@ -240,7 +240,6 @@ components/
 ├── SidebarLayout.tsx          # 主布局
 ├── ActivityBar.tsx            # Activity Bar (新增)
 ├── Panel.tsx                  # Panel 容器 (新增)
-├── Sidebar.tsx                # 传统 Sidebar
 ├── FileTree.tsx               # 文件树
 ├── HomeContent.tsx            # 首页
 ├── ViewPageClient.tsx         # 查看/编辑页
