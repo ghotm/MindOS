@@ -179,22 +179,6 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
 
-.sidebar-panel {
-}
-.sidebar-panel::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 15%;
-  bottom: 15%;
-  width: 1.5px;
-  background: linear-gradient(to bottom, transparent, var(--amber), transparent);
-  opacity: 0.45;
-  border-radius: 99px;
-  pointer-events: none;
-  z-index: 1;
-}
-
 .prose {
   font-family: var(--prose-font-override, var(--font-ui));
   color: var(--prose-body);

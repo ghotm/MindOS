@@ -797,7 +797,7 @@ rootcause: app/api/ask/route.ts:143 直接传递 llmHistoryMessages（pi-ai Mess
 - **解决：**
   1. `next.config.ts` 加 `experimental.staleTimes.dynamic = 0`，禁用 dynamic 路由的客户端 router cache
   2. `/api/file` route 的 tree-changing ops（create/delete/rename/move）加 `revalidatePath('/', 'layout')`
-  3. `Sidebar.tsx` 加 `visibilitychange` 监听 + 30s 定时 `router.refresh()`
+  3. `SidebarLayout.tsx` 通过 `/api/tree-version` 轮询触发 `router.refresh()`，并广播 `mindos:files-changed`
 - **注意：** `export const dynamic = 'force-dynamic'` 只对 page/route 有效，对 layout.tsx 无效
 - **规则：** 凡是新增文件写操作的 API route，必须调用 `revalidatePath('/', 'layout')` 来通知 layout 刷新 file tree
 

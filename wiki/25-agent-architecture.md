@@ -273,7 +273,7 @@ MindOS 集成了 ACP 协议，可作为客户端调用远程 ACP Agent：
 ### 导航同步
 - **改进 1**：点击 Sidebar 导航时自动关闭 Ask 最大化状态（同步进行）
 - **改进 2**：导航到 Home 时自动关闭 Ask Panel，清理界面
-- **代码**：`packages/web/components/Sidebar.tsx` → `AskPanel` 通信
+- **代码**：`packages/web/components/SidebarLayout.tsx` → `RightAskPanel` / `AskModal` 通信
 
 ### Save Session 新功能
 - **功能**：一键保存整个对话到知识库，支持 AI 自动总结
