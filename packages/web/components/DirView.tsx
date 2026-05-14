@@ -499,14 +499,14 @@ export default function DirView({ dirPath, entries, spacePreview }: DirViewProps
             <div className="flex items-center gap-1 p-1 bg-muted rounded-lg">
               <button
                 onClick={() => setView('grid')}
-                className={`p-1.5 rounded transition-colors ${view === 'grid' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                className={`inline-flex h-8 w-8 items-center justify-center rounded transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation ${view === 'grid' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
                 title={t.dirView.gridView}
               >
                 <LayoutGrid size={14} />
               </button>
               <button
                 onClick={() => setView('list')}
-                className={`p-1.5 rounded transition-colors ${view === 'list' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                className={`inline-flex h-8 w-8 items-center justify-center rounded transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation ${view === 'list' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
                 title={t.dirView.listView}
               >
                 <List size={14} />

@@ -46,6 +46,15 @@ export type MindosRuntimeSkillRoot = {
   editable: boolean;
 };
 
+export function expandMindosSkillPath(input: string, home: string): string {
+  const trimmed = input.trim();
+  if (trimmed === '~') return home;
+  if (trimmed.startsWith('~/') || trimmed.startsWith('~\\')) {
+    return join(home, trimmed.slice(2));
+  }
+  return trimmed;
+}
+
 export type MindosRuntimeSearchResult = {
   path: string;
   snippet: string;
@@ -166,7 +175,7 @@ export function getSkillRootsFromRuntime(options: {
   const customSkillPaths = Array.isArray(settings.skillPaths?.custom) ? settings.skillPaths.custom : [];
   for (const custom of customSkillPaths) {
     if (typeof custom !== 'string') continue;
-    const trimmed = custom.trim();
+    const trimmed = expandMindosSkillPath(custom, home);
     if (!trimmed) continue;
     roots.push({
       path: trimmed,

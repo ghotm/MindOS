@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 
 interface ActionTooltipProps {
   label: string;
-  /** Delay in ms before tooltip shows (default 800) */
+  /** Delay in ms before tooltip shows (kept short so fast toolbar scans still feel responsive). */
   delay?: number;
   children: React.ReactNode;
 }
@@ -13,27 +13,34 @@ interface ActionTooltipProps {
  * Lightweight tooltip wrapper — shows a brief label above the child element
  * after a hover delay. Auto-hides on mouse leave.
  */
-export default function ActionTooltip({ label, delay = 800, children }: ActionTooltipProps) {
+export default function ActionTooltip({ label, delay = 140, children }: ActionTooltipProps) {
   const [visible, setVisible] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const handleEnter = useCallback(() => {
-    timerRef.current = setTimeout(() => setVisible(true), delay);
-  }, [delay]);
-
-  const handleLeave = useCallback(() => {
+  const clearTimer = useCallback(() => {
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
-    setVisible(false);
   }, []);
+
+  const handleEnter = useCallback(() => {
+    clearTimer();
+    timerRef.current = setTimeout(() => setVisible(true), delay);
+  }, [clearTimer, delay]);
+
+  const handleLeave = useCallback(() => {
+    clearTimer();
+    setVisible(false);
+  }, [clearTimer]);
+
+  useEffect(() => clearTimer, [clearTimer]);
 
   return (
     <span
-      className="relative inline-flex"
-      onMouseEnter={handleEnter}
-      onMouseLeave={handleLeave}
+      className="relative inline-flex items-center justify-center"
+      onPointerEnter={handleEnter}
+      onPointerLeave={handleLeave}
     >
       {children}
       {visible && (

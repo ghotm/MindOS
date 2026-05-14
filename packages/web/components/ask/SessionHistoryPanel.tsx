@@ -373,11 +373,11 @@ function SessionCard({
             </span>
 
             {/* Action buttons — visible on hover */}
-            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-0.5 opacity-0 transition-opacity duration-75 group-hover:opacity-100 focus-within:opacity-100" onClick={e => e.stopPropagation()}>
               <button
                 type="button"
                 onClick={onTogglePin}
-                className={`p-1 rounded-md transition-colors ${s.pinned ? 'text-[var(--amber)] hover:text-muted-foreground' : 'text-muted-foreground/40 hover:text-[var(--amber)]'}`}
+                className={`inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation ${s.pinned ? 'text-[var(--amber)] hover:bg-muted/60 hover:text-muted-foreground' : 'text-muted-foreground/40 hover:bg-[var(--amber)]/10 hover:text-[var(--amber)]'}`}
                 title={s.pinned ? 'Unpin' : 'Pin'}
               >
                 {s.pinned ? <PinOff size={11} /> : <Pin size={11} />}
@@ -385,7 +385,7 @@ function SessionCard({
               <button
                 type="button"
                 onClick={onStartRename}
-                className="p-1 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-muted/60 transition-colors"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/40 transition-colors duration-75 hover:text-foreground hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
                 title={ask?.renameSession ?? 'Rename'}
               >
                 <Pencil size={11} />
@@ -393,7 +393,7 @@ function SessionCard({
               <button
                 type="button"
                 onClick={onDelete}
-                className="p-1 rounded-md text-muted-foreground/40 hover:text-error hover:bg-error/5 transition-colors"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/40 transition-colors duration-75 hover:text-error hover:bg-error/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
                 title="Delete"
               >
                 <Trash2 size={11} />

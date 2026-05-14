@@ -24,13 +24,13 @@ export default function Breadcrumb({ filePath }: { filePath: string }) {
       <nav className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground flex-nowrap overflow-hidden">
         <Link
           href="/"
-          className="inline-flex items-center justify-center h-7 w-7 rounded-md hover:bg-muted/50 hover:text-foreground transition-colors shrink-0"
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-75 hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
           title="Home"
         >
           <Home size={14} />
         </Link>
-        <ChevronRight size={12} className="text-muted-foreground/50 shrink-0" />
-        <span className="min-w-0 flex items-center gap-1.5 px-1.5 py-1 text-foreground font-medium">
+        <ChevronRight size={12} className="pointer-events-none text-muted-foreground/50 shrink-0" />
+        <span className="min-w-0 inline-flex min-h-8 items-center gap-1.5 px-2 text-foreground font-medium">
           {friendly.icon}
           <span className="block truncate max-w-[180px] sm:max-w-[260px] md:max-w-[360px]">{friendly.getLabel(t)}</span>
         </span>
@@ -43,7 +43,7 @@ export default function Breadcrumb({ filePath }: { filePath: string }) {
     <nav className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground flex-nowrap overflow-hidden">
       <Link
         href="/"
-        className="inline-flex items-center justify-center h-7 w-7 rounded-md hover:bg-muted/50 hover:text-foreground transition-colors shrink-0"
+        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-75 hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
         title="Home"
       >
         <Home size={14} />
@@ -53,15 +53,15 @@ export default function Breadcrumb({ filePath }: { filePath: string }) {
         const href = '/view/' + parts.slice(0, i + 1).map(encodeURIComponent).join('/');
         return (
           <span key={i} className="flex items-center gap-1 min-w-0">
-            <ChevronRight size={12} className="text-muted-foreground/50 shrink-0" />
+            <ChevronRight size={12} className="pointer-events-none text-muted-foreground/50 shrink-0" />
             {isLast ? (
-              <span className="min-w-0 flex items-center gap-1.5 px-1.5 py-1 text-foreground font-medium">
+              <span className="min-w-0 inline-flex min-h-8 items-center gap-1.5 px-2 text-foreground font-medium">
                 <FileTypeIcon name={part} />
                 <span className="block truncate max-w-[180px] sm:max-w-[260px] md:max-w-[360px]" suppressHydrationWarning>{part}</span>
               </span>
             ) : (
-              <Link href={href} className="block px-1.5 py-1 rounded-md hover:bg-muted/50 hover:text-foreground transition-colors truncate max-w-[120px] sm:max-w-[160px] md:max-w-[200px]" title={part}>
-                <span suppressHydrationWarning>{part}</span>
+              <Link href={href} className="inline-flex min-h-8 max-w-[120px] items-center rounded-md px-2 transition-colors duration-75 hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation sm:max-w-[160px] md:max-w-[200px]" title={part}>
+                <span className="truncate" suppressHydrationWarning>{part}</span>
               </Link>
             )}
           </span>

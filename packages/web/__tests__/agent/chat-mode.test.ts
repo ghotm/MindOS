@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getChatTools, knowledgeBaseTools, WRITE_TOOLS } from '@/lib/agent/tools';
+import { getChatTools, getOrganizeTools, knowledgeBaseTools, WRITE_TOOLS } from '@/lib/agent/tools';
 import { CHAT_SYSTEM_PROMPT, AGENT_SYSTEM_PROMPT } from '@/lib/agent/prompt';
 
 // ---------------------------------------------------------------------------
@@ -14,11 +14,11 @@ describe('getChatTools', () => {
     expect(chatTools.length).toBeGreaterThan(0);
   });
 
-  it('returns exactly the 6 approved read-only tools', () => {
+  it('returns the approved read-only tools including skill loading', () => {
     // web_search and web_fetch are now provided by pi-web-access extension
     const expected = [
       'list_files', 'read_file', 'read_file_chunk',
-      'search', 'get_recent', 'get_backlinks',
+      'search', 'load_skill', 'get_recent', 'get_backlinks',
     ];
     expect(new Set(chatToolNames)).toEqual(new Set(expected));
   });
@@ -44,6 +44,12 @@ describe('getChatTools', () => {
     for (const tool of chatTools) {
       expect(typeof tool.execute).toBe('function');
     }
+  });
+});
+
+describe('getOrganizeTools', () => {
+  it('keeps skill loading available for selected skill workflows', () => {
+    expect(getOrganizeTools().map(t => t.name)).toContain('load_skill');
   });
 });
 

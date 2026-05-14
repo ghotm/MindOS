@@ -51,16 +51,16 @@ export default function UserMessageActions({
     onResend?.();
   }, [onResend, isLoading]);
 
-  const btnBase = 'p-1 rounded-md bg-card border border-border/60 shadow-sm text-muted-foreground transition-colors';
+  const btnBase = 'inline-flex h-7 w-7 items-center justify-center rounded-md bg-card border border-border/60 shadow-sm text-muted-foreground transition-colors duration-75 touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
 
   return (
-    <div className="absolute -bottom-1 left-1 z-10 flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+    <div className="absolute -bottom-3 left-1 z-10 flex items-center gap-1 opacity-100 transition-opacity duration-75 md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">
       {/* Copy */}
       <ActionTooltip label={labels.copy}>
         <button
           type="button"
           onClick={handleCopy}
-          className={`${btnBase} hover:text-foreground`}
+          className={`${btnBase} hover:bg-muted hover:text-foreground`}
         >
           {copied
             ? <Check size={11} className="text-success" />
@@ -74,7 +74,7 @@ export default function UserMessageActions({
           <button
             type="button"
             onClick={onEdit}
-            className={`${btnBase} hover:text-foreground`}
+            className={`${btnBase} hover:bg-muted hover:text-foreground`}
           >
             <PenLine size={11} />
           </button>
@@ -87,7 +87,7 @@ export default function UserMessageActions({
           <button
             type="button"
             onClick={handleResend}
-            className={`${btnBase} hover:text-[var(--amber)]`}
+            className={`${btnBase} hover:bg-[var(--amber)]/10 hover:text-[var(--amber)]`}
           >
             <RotateCcw size={11} />
           </button>

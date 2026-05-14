@@ -53,9 +53,17 @@ export function readSkillContentByName(name: string, options: Omit<ScanSkillOpti
   const { projectRoot, mindRoot, settings } = options;
 
   for (const dir of getSkillSearchPaths(projectRoot, mindRoot, settings)) {
-    const file = path.join(dir, name, 'SKILL.md');
-    if (fs.existsSync(file)) {
-      return fs.readFileSync(file, 'utf-8');
+    const nestedFile = path.join(dir, name, 'SKILL.md');
+    if (fs.existsSync(nestedFile)) {
+      return fs.readFileSync(nestedFile, 'utf-8');
+    }
+
+    const directFile = path.join(dir, 'SKILL.md');
+    if (fs.existsSync(directFile)) {
+      const content = fs.readFileSync(directFile, 'utf-8');
+      const parsed = parseSkillMd(content);
+      const directName = parsed.name || path.basename(dir);
+      if (directName === name) return content;
     }
   }
 

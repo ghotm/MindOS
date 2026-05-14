@@ -65,6 +65,21 @@ describe('pi skill integration', () => {
     expect(content).toContain('Hello from global');
   });
 
+  it('reads custom skill paths that use ~ and point directly at a skill directory', () => {
+    writeSkill(path.join(tempRoot, 'direct-skills'), 'direct-skill', '---\nname: direct-skill\ndescription: direct\n---\n\nHello from direct custom path');
+
+    const content = readSkillContentByName('direct-skill', {
+      projectRoot,
+      mindRoot,
+      settings: {
+        skillPaths: {
+          custom: ['~/direct-skills/direct-skill'],
+        },
+      },
+    });
+    expect(content).toContain('Hello from direct custom path');
+  });
+
   it('returns null for non-existent skill', () => {
     const content = readSkillContentByName('nonexistent', { projectRoot, mindRoot });
     expect(content).toBeNull();

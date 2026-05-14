@@ -407,6 +407,8 @@ function SkillSearchPathsSection({
   const [customPaths, setCustomPaths] = useState<string[]>([]);
   const [newPath, setNewPath] = useState('');
   const [loaded, setLoaded] = useState(false);
+  const [savingPaths, setSavingPaths] = useState(false);
+  const [pathMessage, setPathMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Load settings on mount
   useEffect(() => {
@@ -421,6 +423,8 @@ function SkillSearchPathsSection({
   }, []);
 
   const save = async (agentsDir: boolean, paths: string[]) => {
+    setSavingPaths(true);
+    setPathMessage(null);
     try {
       await apiFetch('/api/settings', {
         method: 'POST',
@@ -429,10 +433,15 @@ function SkillSearchPathsSection({
       });
       await onChanged();
       window.dispatchEvent(new Event('mindos:skills-changed'));
+      setPathMessage({ type: 'success', text: m?.skillPathSaved ?? 'Skill paths saved' });
       return true;
     } catch (err) {
-      console.error('Failed to save skill paths:', err);
+      const message = err instanceof Error ? err.message : 'Failed to save skill paths';
+      console.error('Failed to save skill paths:', message);
+      setPathMessage({ type: 'error', text: message });
       return false;
+    } finally {
+      setSavingPaths(false);
     }
   };
 
@@ -476,6 +485,7 @@ function SkillSearchPathsSection({
           type="checkbox"
           checked={enableAgentsDir}
           onChange={handleToggleAgentsDir}
+          disabled={savingPaths}
           className="rounded border-border accent-[var(--amber)]"
         />
         <FolderOpen size={12} className="text-muted-foreground" />
@@ -494,7 +504,8 @@ function SkillSearchPathsSection({
             </code>
             <button
               onClick={() => handleRemovePath(i)}
-              className="p-1 rounded text-muted-foreground hover:text-destructive transition-colors"
+              disabled={savingPaths}
+              className="p-1 rounded text-muted-foreground hover:text-destructive disabled:opacity-30 transition-colors"
               title={m?.skillPathRemove ?? 'Remove'}
             >
               <Trash2 size={11} />
@@ -508,16 +519,25 @@ function SkillSearchPathsSection({
             onChange={e => setNewPath(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && handleAddPath()}
             placeholder={m?.skillPathPlaceholder ?? 'Enter directory path...'}
+            disabled={savingPaths}
             className="flex-1 text-xs px-2 py-1.5 rounded-md border border-border bg-background text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
           <button
             onClick={handleAddPath}
-            disabled={!newPath.trim()}
+            disabled={!newPath.trim() || savingPaths}
             className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
           >
-            <Plus size={14} />
+            {savingPaths ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
           </button>
         </div>
+        {pathMessage && (
+          <p
+            className={`text-2xs ${pathMessage.type === 'error' ? 'text-error' : 'text-success'}`}
+            role="status"
+          >
+            {pathMessage.text}
+          </p>
+        )}
       </div>
     </div>
   );

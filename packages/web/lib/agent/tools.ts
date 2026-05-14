@@ -214,6 +214,7 @@ export const WRITE_TOOLS = new Set([
 /** Tool names sufficient for the "organize uploaded files" task. */
 export const ORGANIZE_TOOL_NAMES = new Set([
   'list_files', 'read_file', 'search',
+  'load_skill',
   'create_file', 'batch_create_files', 'write_file',
   'append_to_file', 'insert_after_heading', 'update_section',
 ]);
@@ -235,6 +236,7 @@ export const CHAT_TOOL_NAMES = new Set([
   'read_file',
   'read_file_chunk',
   'search',
+  'load_skill',
   'get_recent',
   'get_backlinks',
 ]);

@@ -415,7 +415,7 @@ export default function ProviderModelCapsule({
             type="button"
             onClick={() => requestModelRefresh(hoveredProvider)}
             disabled={modelsLoading}
-            className="p-1 text-muted-foreground/50 hover:text-foreground transition-colors disabled:opacity-30"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/50 transition-colors duration-75 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 touch-manipulation"
             title="Refresh"
           >
             <RefreshCw size={10} className={modelsLoading ? 'animate-spin' : ''} />

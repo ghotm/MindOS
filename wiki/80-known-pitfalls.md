@@ -1893,6 +1893,8 @@ mindos onboard
      </button>
      ```
 
+  4. **Icon button 只靠 `p-1/p-1.5` 撑开**：在 header、breadcrumb、Chat action bar 这种密集区域，`p-1` 会让实际命中框接近 icon 本身；用户快速划过时会感觉只有图标或下半部分能点。Tooltip 如果还有较长 hover delay，会进一步放大“没有反馈”的错觉。
+
 - **设计规则：**
   - **规则 1：可视包装元素 = 点击目标元素**
     - 如果 `<Link>` 或 `<button>` 有 padding、border、bg-color、rounded 样式，它们应该直接应用到该元素上，NOT 内部嵌套的 span
@@ -1901,6 +1903,8 @@ mindos onboard
   - **规则 2：确保点击 feedback 覆盖整个可视区域**
     - `hover:` 和 `focus-visible:` 样式应该作用在可点击元素上，使用户看到整个区域都是可交互的
     - 对于 pill/badge/chip 组件，避免在容器内放置独立按钮；如必须，确保按钮有明显的 visual boundaries（如 `p-1 rounded hover:bg-X`）
+    - 高频 icon button 用固定命中框（如 `inline-flex h-7 w-7` 或 `h-8 w-8`），不要只依赖 padding；inactive segmented button 也必须有 `hover:bg-*`，不能只改文字色
+    - Tooltip 的显示延迟应保持短（约 100-150ms），并在 pointer leave / unmount 时清理 timer，避免快速扫过工具栏时出现滞后 tooltip
   
   - **规则 3：检查清单**
     ```
@@ -1909,17 +1913,21 @@ mindos onboard
     2. onClick/href 在哪个元素上？
     3. 两者是同一个元素吗？如果不是，为什么？
     4. hover/focus-visible 样式是否覆盖整个可视区域？
+    5. icon-only 按钮是否至少有明确的 h/w 命中框？
+    6. tooltip 是否会在快速移动时滞后或残留？
     ```
 
 - **已修复的案例：**
   - `HomeContent.tsx` FeatureChip（P1）：Link 现在直接应用样式，不再嵌套 span
   - `Breadcrumb.tsx` 导航链接（P2）：添加了 box 样式 `px-2 py-0.5 rounded-md`
   - `FileChip.tsx` 删除按钮（P2）：增加 `p-1 rounded hover:bg-muted` 使其视觉清晰
+  - `Breadcrumb.tsx` / `ViewPageClient.tsx` / Chat action buttons（2026-05-13）：icon button 统一为 `h-7/w-7` 或 `h-8/w-8` 命中框，Markdown 模式切换补齐 hover 背景，`ActionTooltip` 默认延迟降到 140ms
 
 - **预防策略：**
   - Code review：检查所有 `<Link>` 和 `<button>` 是否直接应用了 visual styles（px/py/bg/border/rounded）
   - 设计系统文档：记录标准按钮/链接模式
   - Visual QA：进行 "click everywhere" 测试，确保看到的区域都能点击
+  - 回归测试：`packages/web/__tests__/components/icon-button-hit-area.test.ts` 覆盖 header、breadcrumb、Chat action 与 tooltip delay 的基础约束
 
 ### 静默吞掉错误 — `.catch(() => {})` 导致用户无反馈
 

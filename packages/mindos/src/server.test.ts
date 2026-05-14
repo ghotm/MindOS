@@ -1196,6 +1196,56 @@ describe('MindOS product server contract', () => {
     ]);
   });
 
+  it('lists and reads custom skill paths when the path points directly at a skill directory', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-direct-custom-skill-'));
+    const home = join(root, 'home');
+    const directSkillRoot = join(home, 'custom-skills', 'direct-skill');
+    mkdirSync(directSkillRoot, { recursive: true });
+    writeFileSync(join(directSkillRoot, 'SKILL.md'), '---\nname: direct-skill\ndescription: Direct custom skill\n---\n\nDirect body');
+
+    const skillRoots = getSkillRootsFromRuntime({
+      mindRoot: join(root, 'mind'),
+      runtimeRoot: join(root, 'runtime'),
+      homeDir: home,
+      settings: { skillPaths: { custom: ['~/custom-skills/direct-skill'] } },
+    });
+
+    expect(skillRoots.find((skillRoot) => skillRoot.origin === 'custom')?.path).toBe(directSkillRoot);
+
+    const listed = handleSkillsGet({
+      disabledSkills: [],
+      skillRoots,
+    });
+    expect(listed.body.skills).toEqual([
+      expect.objectContaining({
+        name: 'direct-skill',
+        description: 'Direct custom skill',
+        origin: 'custom',
+        path: join(directSkillRoot, 'SKILL.md'),
+      }),
+    ]);
+
+    expect(handleSkillsPost({ action: 'read', name: 'direct-skill' }, {
+      mindRoot: join(root, 'mind'),
+      skillRoots,
+      readSettings: () => ({}),
+      writeSettings: () => undefined,
+    })).toMatchObject({
+      status: 200,
+      body: { content: expect.stringContaining('Direct body') },
+    });
+
+    expect(handleSkillsPost({ action: 'read-native', name: 'direct-skill', sourcePath: directSkillRoot }, {
+      mindRoot: join(root, 'mind'),
+      skillRoots,
+      readSettings: () => ({}),
+      writeSettings: () => undefined,
+    })).toMatchObject({
+      status: 200,
+      body: { content: expect.stringContaining('Direct body'), description: 'Direct custom skill' },
+    });
+  });
+
   it('handles skill writes and reads from the product runtime', () => {
     const root = mkdtempSync(join(tmpdir(), 'mindos-skill-post-'));
     const mindRoot = join(root, 'mind');
@@ -3552,6 +3602,21 @@ describe('MindOS product server contract', () => {
     });
 
     expect(roots.filter((root) => root.origin === 'custom').map((root) => root.path)).toEqual(['/extra-skills']);
+  });
+
+  it('expands home-relative runtime custom skill paths', () => {
+    const roots = getSkillRootsFromRuntime({
+      mindRoot: '/mind',
+      runtimeRoot: '/runtime',
+      homeDir: '/home/ada',
+      settings: {
+        skillPaths: {
+          custom: ['~/direct-skill'],
+        },
+      },
+    });
+
+    expect(roots.filter((root) => root.origin === 'custom').map((root) => root.path)).toEqual(['/home/ada/direct-skill']);
   });
 
   it('tests AI provider keys with product-owned validation and error classification', async () => {

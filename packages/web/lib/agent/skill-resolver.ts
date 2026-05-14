@@ -88,10 +88,22 @@ export function resolveSkillFile(
   const dirs = skillDirCandidates(skillName, projectRoot, mindRoot, settings);
   const locations = dirs.map(d => path.join(d, 'SKILL.md'));
 
-  for (const absPath of locations) {
-    const result = readAbsoluteFile(absPath);
-    if (result.ok) {
-      return { path: absPath, result };
+  for (let i = 0; i < locations.length; i += 1) {
+    const nestedPath = locations[i];
+    const nestedResult = readAbsoluteFile(nestedPath);
+    if (nestedResult.ok) {
+      return { path: nestedPath, result: nestedResult };
+    }
+
+    const directBase = path.dirname(dirs[i]);
+    const directPath = path.join(directBase, 'SKILL.md');
+    const directResult = readAbsoluteFile(directPath);
+    if (directResult.ok) {
+      const frontmatterName = directResult.content.match(/^---\s*\n[\s\S]*?^name:\s*([^\n]+)$/m)?.[1]?.trim().replace(/^['"]|['"]$/g, '');
+      const directName = frontmatterName || path.basename(directBase);
+      if (directName === skillName) {
+        return { path: directPath, result: directResult };
+      }
     }
   }
 

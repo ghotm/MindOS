@@ -34,10 +34,10 @@ export function SaveMessageButton({ text }: { text: string }) {
         ref={btnRef}
         type="button"
         onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-        className={`p-1 rounded-md border transition-colors ${
+        className={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors duration-75 touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
           open
             ? 'border-[var(--amber)]/40 bg-[var(--amber)]/10 text-[var(--amber)]'
-            : 'border-border/60 bg-card text-muted-foreground hover:text-[var(--amber)] shadow-sm'
+            : 'border-border/60 bg-card text-muted-foreground hover:bg-[var(--amber)]/10 hover:text-[var(--amber)] shadow-sm'
         }`}
         title={t.ask?.saveToKB ?? 'Save to knowledge base'}
       >

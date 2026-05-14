@@ -16,6 +16,10 @@ import { getSkillSearchPaths } from '@/lib/agent/skill-paths';
 
 type WebServerSettings = {
   disabledSkills?: string[];
+  skillPaths?: {
+    enableAgentsDir?: boolean;
+    custom?: string[];
+  };
   ai?: {
     providers?: unknown[];
   };

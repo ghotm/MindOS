@@ -2,6 +2,15 @@ import path from 'path';
 import os from 'os';
 import type { ServerSettings } from '@/lib/settings';
 
+export function expandSkillSearchPath(input: string, home = os.homedir()): string {
+  const trimmed = input.trim();
+  if (trimmed === '~') return home;
+  if (trimmed.startsWith('~/') || trimmed.startsWith('~\\')) {
+    return path.join(home, trimmed.slice(2));
+  }
+  return trimmed;
+}
+
 /**
  * Build the ordered list of skill search directories based on settings.
  * Single source of truth — all call sites should use this instead of hardcoding paths.
@@ -34,7 +43,7 @@ export function getSkillSearchPaths(
 
   // User-defined custom paths
   for (const p of settings?.skillPaths?.custom ?? []) {
-    const trimmed = p.trim();
+    const trimmed = expandSkillSearchPath(p, home);
     if (trimmed) paths.push(trimmed);
   }
 

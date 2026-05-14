@@ -41,12 +41,8 @@ export default memo(function AskHeader({
   const [isPending, startTransition] = useTransition();
   const iconSize = 14;
   const hasMultipleSessions = sessions && sessions.length >= 2;
-  const headerButtonClass = isPanel
-    ? 'relative z-10 h-9 w-9 rounded-lg pointer-events-auto touch-manipulation'
-    : 'relative z-10 p-2 rounded-lg pointer-events-auto touch-manipulation';
-  const titleTriggerClass = isPanel
-    ? 'relative z-10 min-h-9 rounded-lg px-2 pointer-events-auto touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
-    : 'relative z-10 rounded-lg pointer-events-auto touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
+  const headerButtonClass = 'relative z-10 inline-flex h-9 w-9 items-center justify-center rounded-lg pointer-events-auto touch-manipulation transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
+  const titleTriggerClass = 'relative z-10 inline-flex min-h-9 items-center rounded-lg px-2 pointer-events-auto touch-manipulation transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
   const activeSession = sessions?.find(s => s.id === activeSessionId);
   const activeTitle = activeSession ? sessionTitle(activeSession) : null;
 
@@ -174,7 +170,7 @@ export default memo(function AskHeader({
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); onTogglePinSession(s.id); }}
-                  className={`p-1.5 rounded-md transition-colors ${s.pinned ? 'text-[var(--amber)] hover:text-muted-foreground hover:bg-muted/60' : 'text-muted-foreground/40 hover:text-[var(--amber)] hover:bg-[var(--amber)]/5'}`}
+                  className={`inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${s.pinned ? 'text-[var(--amber)] hover:text-muted-foreground hover:bg-muted/60' : 'text-muted-foreground/40 hover:text-[var(--amber)] hover:bg-[var(--amber)]/5'}`}
                   aria-label={s.pinned ? 'Unpin' : 'Pin'}
                 >
                   {s.pinned ? <PinOff size={10} /> : <Pin size={10} />}
@@ -184,7 +180,7 @@ export default memo(function AskHeader({
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); handleStartRename(s.id, title); }}
-                  className="p-1.5 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-muted/60"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/40 transition-colors duration-75 hover:text-foreground hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   aria-label={`Rename: ${displayTitle}`}
                 >
                   <Pencil size={10} />
@@ -194,7 +190,7 @@ export default memo(function AskHeader({
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}
-                  className="p-1.5 rounded-md text-muted-foreground/40 hover:text-error hover:bg-error/5"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/40 transition-colors duration-75 hover:text-error hover:bg-error/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   aria-label={`Delete: ${displayTitle}`}
                 >
                   <Trash2 size={10} />
@@ -235,7 +231,7 @@ export default memo(function AskHeader({
                   }
                 });
               }}
-              className={`flex items-center gap-1 min-w-0 text-sm font-medium text-[var(--amber)] hover:text-[var(--amber)]/80 hover:bg-muted/40 transition-colors ${titleTriggerClass}`}
+              className={`min-w-0 gap-1 text-sm font-medium text-[var(--amber)] hover:text-[var(--amber)]/80 hover:bg-muted/40 ${titleTriggerClass}`}
               aria-expanded={switcherOpen}
               aria-haspopup="listbox"
             >
@@ -256,32 +252,32 @@ export default memo(function AskHeader({
       )}
       {hideTitle && <div />}
       <div data-ask-header-actions className="relative z-10 flex items-center gap-1 shrink-0 pointer-events-auto">
-        <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onToggleHistory()); }} aria-pressed={showHistory} className={`${headerButtonClass} inline-flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${showHistory ? 'bg-[var(--amber)]/10 text-[var(--amber)]' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}`} title={t.hints.sessionHistory}>
+        <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onToggleHistory()); }} aria-pressed={showHistory} className={`${headerButtonClass} ${showHistory ? 'bg-[var(--amber)]/10 text-[var(--amber)]' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}`} title={t.hints.sessionHistory}>
           <History size={iconSize} />
         </button>
         {messages && messages.length > 0 && (
           <SaveSessionButton messages={messages} disabled={isLoading} />
         )}
-        <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onReset()); }} disabled={isLoading} className={`${headerButtonClass} inline-flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:pointer-events-none disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`} title={t.hints.newSession}>
+        <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onReset()); }} disabled={isLoading} className={`${headerButtonClass} hover:bg-muted text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-40`} title={t.hints.newSession}>
           <SquarePen size={iconSize} />
         </button>
         {onMaximize && (
-          <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onMaximize()); }} className={`${headerButtonClass} inline-flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`} title={maximized ? t.hints.restorePanel : t.hints.maximizePanel}>
+          <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onMaximize()); }} className={`${headerButtonClass} hover:bg-muted text-muted-foreground hover:text-foreground`} title={maximized ? t.hints.restorePanel : t.hints.maximizePanel}>
             {maximized ? <Minimize2 size={iconSize} /> : <Maximize2 size={iconSize} />}
           </button>
         )}
         {onDockToPanel && (
-          <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onDockToPanel()); }} className={`${headerButtonClass} inline-flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`} title={t.hints.dockToSide ?? 'Dock to side panel'}>
+          <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onDockToPanel()); }} className={`${headerButtonClass} hover:bg-muted text-muted-foreground hover:text-foreground`} title={t.hints.dockToSide ?? 'Dock to side panel'}>
             <PanelRight size={iconSize} />
           </button>
         )}
         {onModeSwitch && (
-          <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onModeSwitch()); }} className={`${headerButtonClass} inline-flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`} title={askMode === 'popup' ? t.hints.dockToSide : t.hints.openAsPopup}>
+          <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onModeSwitch()); }} className={`${headerButtonClass} hover:bg-muted text-muted-foreground hover:text-foreground`} title={askMode === 'popup' ? t.hints.dockToSide : t.hints.openAsPopup}>
             {askMode === 'popup' ? <PanelRight size={iconSize} /> : <AppWindow size={iconSize} />}
           </button>
         )}
         {onClose && (
-          <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onClose()); }} className={`${headerButtonClass} inline-flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`} title={t.hints.closePanel} aria-label="Close">
+          <button type="button" onClick={(e) => { e.stopPropagation(); startTransition(() => onClose()); }} className={`${headerButtonClass} hover:bg-muted text-muted-foreground hover:text-foreground`} title={t.hints.closePanel} aria-label="Close">
             <X size={iconSize} />
           </button>
         )}

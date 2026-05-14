@@ -34,7 +34,7 @@ function CopyMessageButton({ text, label }: { text: string; label?: string }) {
     <button
       type="button"
       onClick={handleCopy}
-      className="p-1 rounded-md bg-card border border-border/60 shadow-sm text-muted-foreground hover:text-foreground transition-colors"
+      className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-card border border-border/60 shadow-sm text-muted-foreground transition-colors duration-75 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
       title={label ?? 'Copy'}
     >
       {copied ? <Check size={11} className="text-success" /> : <Copy size={11} />}
@@ -306,7 +306,7 @@ const MessageRow = memo(function MessageRow({
                 <StepCounter parts={message.parts} />
               )}
               {!isStreamingLast && cleanedAssistantContent && (
-                <div className="absolute -bottom-1 right-1 z-10 flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+                <div className="absolute -bottom-3 right-1 z-10 flex items-center gap-1 opacity-100 transition-opacity duration-75 md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">
                   <SaveMessageButton text={message.content} />
                   <CopyMessageButton text={cleanedAssistantContent} label={labels.copyMessage} />
                 </div>
@@ -522,7 +522,7 @@ export default memo(function MessageList({
             userScrolledAwayRef.current = false;
             scrollToBottom();
           }}
-          className="sticky bottom-2 left-1/2 -translate-x-1/2 z-10 p-2 rounded-full border border-border/60 bg-card shadow-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all hover:shadow-lg"
+          className="sticky bottom-2 left-1/2 z-10 inline-flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-border/60 bg-card shadow-md text-muted-foreground transition-all duration-75 hover:text-foreground hover:bg-muted hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
           title="Scroll to bottom"
         >
           <ArrowDown size={14} />

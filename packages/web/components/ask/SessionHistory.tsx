@@ -134,7 +134,7 @@ export default function SessionHistory({ sessions, activeSessionId, onLoad, onDe
               <button
                 type="button"
                 onClick={() => onTogglePin(s.id)}
-                className={`p-1.5 rounded-lg transition-opacity opacity-0 group-hover:opacity-100 ${s.pinned ? 'text-[var(--amber)] hover:text-muted-foreground' : 'text-muted-foreground hover:text-[var(--amber)]'}`}
+                className={`inline-flex h-7 w-7 items-center justify-center rounded-lg opacity-0 transition-colors duration-75 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation ${s.pinned ? 'text-[var(--amber)] hover:bg-muted/60 hover:text-muted-foreground' : 'text-muted-foreground hover:bg-[var(--amber)]/10 hover:text-[var(--amber)]'}`}
                 title={s.pinned ? 'Unpin' : 'Pin'}
               >
                 {s.pinned ? <PinOff size={11} /> : <Pin size={11} />}
@@ -142,7 +142,7 @@ export default function SessionHistory({ sessions, activeSessionId, onLoad, onDe
               <button
                 type="button"
                 onClick={() => startRename(s)}
-                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted opacity-0 group-hover:opacity-100 transition-opacity"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-colors duration-75 hover:text-foreground hover:bg-muted group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
                 title={labels.rename}
               >
                 <Pencil size={11} />
@@ -150,7 +150,7 @@ export default function SessionHistory({ sessions, activeSessionId, onLoad, onDe
               <button
                 type="button"
                 onClick={() => onDelete(s.id)}
-                className="p-1.5 rounded-lg text-muted-foreground hover:text-error hover:bg-error/5 opacity-0 group-hover:opacity-100 transition-opacity"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-colors duration-75 hover:text-error hover:bg-error/5 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
                 title="Delete session"
               >
                 <Trash2 size={11} />

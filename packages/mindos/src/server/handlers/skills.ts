@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { resolveExistingSafe } from '../../foundation/security/index.js';
 import { json, type MindosServerResponse } from '../response.js';
 
@@ -93,8 +93,8 @@ export function handleSkillsPost(
   const { action, name } = payload;
   const settings = services.readSettings();
 
-  if (name && !isValidSkillName(name)) {
-    return json({ error: 'Invalid skill name. Use lowercase letters, numbers, and hyphens only.' }, { status: 400 });
+  if (name && !isSafeSkillName(name)) {
+    return json({ error: 'Invalid skill name' }, { status: 400 });
   }
 
   switch (action) {
@@ -104,6 +104,9 @@ export function handleSkillsPost(
 
     case 'create':
       if (!name) return json({ error: 'name required' }, { status: 400 });
+      if (!isWritableUserSkillName(name)) {
+        return json({ error: 'Invalid skill name. Use lowercase letters, numbers, and hyphens only.' }, { status: 400 });
+      }
       {
         const userSkillsDir = resolveUserSkillsDirForWrite(services.mindRoot);
         if ('response' in userSkillsDir) return userSkillsDir.response;
@@ -118,6 +121,9 @@ export function handleSkillsPost(
 
     case 'update':
       if (!name) return json({ error: 'name required' }, { status: 400 });
+      if (!isWritableUserSkillName(name)) {
+        return json({ error: 'Invalid skill name. Use lowercase letters, numbers, and hyphens only.' }, { status: 400 });
+      }
       {
         const userSkillsDir = resolveUserSkillsDirForWrite(services.mindRoot);
         if ('response' in userSkillsDir) return userSkillsDir.response;
@@ -126,6 +132,9 @@ export function handleSkillsPost(
 
     case 'delete':
       if (!name) return json({ error: 'name required' }, { status: 400 });
+      if (!isWritableUserSkillName(name)) {
+        return json({ error: 'Invalid skill name. Use lowercase letters, numbers, and hyphens only.' }, { status: 400 });
+      }
       {
         const userSkillsDir = resolveUserSkillsDirForWrite(services.mindRoot);
         if ('response' in userSkillsDir) return userSkillsDir.response;
@@ -166,6 +175,8 @@ function readSkillsFromRoot(root: MindosSkillRoot, disabled: Set<string>): Mindo
   if (!existsSync(root.path)) return [];
   if (root.origin === 'mindos-user' && lstatSync(root.path).isSymbolicLink()) return [];
   const skills: MindosSkillInfo[] = [];
+  const directSkill = readDirectSkillFromRoot(root, disabled);
+  if (directSkill) skills.push(directSkill);
 
   for (const entry of readdirSync(root.path, { withFileTypes: true })) {
     if (!isSkillDirectoryEntry(root, entry)) continue;
@@ -186,6 +197,23 @@ function readSkillsFromRoot(root: MindosSkillRoot, disabled: Set<string>): Mindo
   }
 
   return skills;
+}
+
+function readDirectSkillFromRoot(root: MindosSkillRoot, disabled: Set<string>): MindosSkillInfo | null {
+  const skillFile = join(root.path, 'SKILL.md');
+  if (!existsSync(skillFile) || !statSync(skillFile).isFile()) return null;
+  const content = readFileSync(skillFile, 'utf-8');
+  const parsed = parseSkillMd(content);
+  const name = parsed.name || basename(root.path);
+  return {
+    name,
+    description: parsed.description || name,
+    path: skillFile,
+    source: root.source,
+    enabled: !disabled.has(name),
+    editable: root.editable,
+    origin: root.origin,
+  };
 }
 
 function isSkillDirectoryEntry(root: MindosSkillRoot, entry: import('node:fs').Dirent): boolean {
@@ -225,7 +253,16 @@ function normalizeSkillsPostPayload(body: unknown): SkillsPostPayload {
   return body && typeof body === 'object' ? body as SkillsPostPayload : {};
 }
 
-function isValidSkillName(name: string): boolean {
+function isSafeSkillName(name: string): boolean {
+  return name.trim().length > 0
+    && name !== '.'
+    && name !== '..'
+    && !name.includes('/')
+    && !name.includes('\\')
+    && !name.includes('\0');
+}
+
+function isWritableUserSkillName(name: string): boolean {
   return /^[a-z0-9][a-z0-9-]*$/.test(name);
 }
 
@@ -309,6 +346,13 @@ function readSkillByName(
     if (!existsSync(skillFile)) continue;
     return json({ content: readFileSync(skillFile, 'utf-8') });
   }
+  for (const root of skillRoots) {
+    const directSkillFile = join(root.path, 'SKILL.md');
+    if (!existsSync(directSkillFile)) continue;
+    const content = readFileSync(directSkillFile, 'utf-8');
+    const parsed = parseSkillMd(content);
+    if ((parsed.name || basename(root.path)) === name) return json({ content });
+  }
   return json({ error: 'Skill not found' }, { status: 404 });
 }
 
@@ -327,7 +371,14 @@ function readNativeSkill(
     return json({ error: 'Invalid path' }, { status: 400 });
   }
   if (!existsSync(nativeSkillFile)) {
-    return json({ error: 'Skill not found' }, { status: 404 });
+    const directSkillFile = resolve(nativeBase, 'SKILL.md');
+    if (!existsSync(directSkillFile)) return json({ error: 'Skill not found' }, { status: 404 });
+    const directContent = readFileSync(directSkillFile, 'utf-8');
+    const parsed = parseSkillMd(directContent);
+    if ((parsed.name || basename(nativeBase)) !== name) {
+      return json({ error: 'Skill not found' }, { status: 404 });
+    }
+    return json({ content: directContent, description: parsed.description });
   }
   const content = readFileSync(nativeSkillFile, 'utf-8');
   return json({ content, description: parseSkillMd(content).description });

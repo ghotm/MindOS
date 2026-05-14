@@ -72,7 +72,7 @@ export function SaveInsightTrigger({ text }: { text: string }) {
       <button
         type="button"
         disabled
-        className="p-1 rounded-md bg-card border border-success/40 shadow-sm text-success transition-all"
+        className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-card border border-success/40 shadow-sm text-success transition-all duration-75"
         title="Saved"
       >
         <Check size={11} />
@@ -84,7 +84,7 @@ export function SaveInsightTrigger({ text }: { text: string }) {
     <button
       type="button"
       onClick={ctx.open}
-      className="p-1 rounded-md bg-card border border-border/60 shadow-sm text-muted-foreground hover:text-[var(--amber)] hover:border-[var(--amber)]/30 transition-all"
+      className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-card border border-border/60 shadow-sm text-muted-foreground transition-all duration-75 hover:bg-[var(--amber)]/10 hover:text-[var(--amber)] hover:border-[var(--amber)]/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
       title={(labels as Record<string, unknown>).saveToKB as string ?? 'Save to knowledge base'}
     >
       <FolderInput size={11} />
