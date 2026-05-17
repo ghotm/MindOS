@@ -1,0 +1,94 @@
+# =============================================================================
+# MindOS Docker Compose 部署配置
+#
+# 工作流：
+#   1. 首次 / 源码变更时，取消注释 builder 服务，手动构建缓存：
+#      docker compose build builder
+#      （构建完成后注释回去）
+#
+#   2. 日常启动（秒级，BuildKit 自动复用 builder 缓存）：
+#      docker compose up -d --build
+#
+# 服务端口：
+#   - Web UI:  http://<服务器IP>:3456
+#   - MCP:     http://<服务器IP>:8781/mcp
+# =============================================================================
+
+services:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Builder 服务 —— 仅在首次或源码变更时取消注释
+  # 取消注释 → docker compose build builder → 注释回去
+  # ═══════════════════════════════════════════════════════════════════════════
+  builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    image: mindos-builder:${MINDOS_VERSION:-latest}
+
+  # ── MindOS 运行时服务 ──
+  mindos:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mindos
+    restart: unless-stopped
+
+    ports:
+      # Web UI（Next.js）
+      - "${MINDOS_WEB_PORT:-3456}:3456"
+      # MCP HTTP Server（Agent 协议接入）
+      - "${MINDOS_MCP_PORT:-8781}:8781"
+
+    environment:
+      # ── 服务配置 ──
+      - MINDOS_WEB_PORT=3456
+      - MINDOS_MCP_PORT=8781
+      - MINDOS_WEB_HOST=0.0.0.0
+      - MCP_HOST=0.0.0.0
+      - MCP_TRANSPORT=http
+      - MINDOS_NEXT_STANDALONE=1
+      - NODE_ENV=production
+      - MIND_ROOT=/data/mind
+
+      # ── AI 配置通过 config.json 管理，见 config.example.json ──
+
+      # ── 可选：安全认证 ──
+      - AUTH_TOKEN=${AUTH_TOKEN:-}
+
+      # ── 日志配置 ──
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - PRETTY_LOGS=${PRETTY_LOGS:-true}
+      - MINDOS_DEBUG=${MINDOS_DEBUG:-0}
+
+    volumes:
+      # 知识库数据持久化
+      - ./data:/data/mind
+      # 配置文件映射（取消注释后使用）：
+      #   1. cp config.example.json config.json
+      #   2. 编辑 config.json 填写你的 AI 配置
+      #   3. 取消下面这行注释
+      # - ./config.json:/root/.mindos/config.json:ro
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+
+    # 日志限制（防止占满磁盘）
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3456/api/health').then(r=>r.json()).then(d=>{if(!d.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

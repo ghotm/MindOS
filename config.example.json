@@ -1,0 +1,84 @@
+{
+  "_comment": "MindOS 用户配置文件模板。复制为 config.json 并编辑后 docker compose up -d",
+  "_usage": "cp config.example.json config.json",
+
+  "mindRoot": "/data/mind",
+  "_mindRoot": "知识库根目录，Docker 中推荐 /data/mind",
+
+  "port": 3456,
+  "mcpPort": 8781,
+  "_ports": "Web UI 和 MCP 服务端口",
+
+  "logLevel": "info",
+  "_logLevel": "日志等级：trace | debug | info | warn | error | fatal",
+
+  "authToken": "",
+  "_authToken": "API 认证令牌。设置后 /api/* 和 MCP 需要 Authorization: Bearer <token>",
+
+  "webPassword": "",
+  "_webPassword": "Web 页面访问密码（可选）",
+
+  "startMode": "start",
+  "_startMode": "启动模式：start（正常）| daemon（守护进程）| dev（开发）",
+
+  "ai": {
+    "activeProvider": "default",
+    "_activeProvider": "当前激活的 provider id，必须匹配 providers[].id",
+
+    "providers": [
+      {
+        "id": "default",
+        "name": "OpenAI",
+        "protocol": "openai",
+        "apiKey": "sk-your-api-key",
+        "model": "gpt-4o",
+        "baseUrl": "http://your-llm-server:8000/v1",
+        "_protocol": "支持：openai | anthropic | mistral | deepseek | ollama 等",
+        "_baseUrl": "内网 OpenAI 兼容 API 地址（vLLM / Ollama / LocalAI / OneAPI 等）"
+      }
+    ]
+  },
+
+  "sync": {
+    "enabled": false,
+    "provider": "git",
+    "remote": "origin",
+    "branch": "main",
+    "autoCommitInterval": 30,
+    "autoPullInterval": 300
+  },
+  "_sync": "知识库同步（可选）。enabled=true 启用 Git 自动同步",
+
+  "agent": {},
+
+  "embedding": {
+    "enabled": false,
+    "provider": "local",
+    "baseUrl": "",
+    "apiKey": "",
+    "model": ""
+  },
+  "_embedding": "语义搜索（可选）。enabled=true 启用，需配置 provider",
+
+  "allowNetworkAccess": true,
+  "_allowNetworkAccess": "是否允许局域网其他设备访问",
+
+  "connectionMode": {
+    "cli": true,
+    "mcp": true
+  },
+
+  "skillPaths": {},
+  "disabledSkills": [],
+
+  "guideState": {
+    "active": true,
+    "dismissed": false,
+    "template": "zh",
+    "step1Done": false,
+    "askedAI": false,
+    "nextStepIndex": 0,
+    "walkthroughStep": 0,
+    "walkthroughDismissed": true
+  }
+}

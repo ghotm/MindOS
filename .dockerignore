@@ -1,0 +1,54 @@
+# Git
+.git
+.gitignore
+.github
+
+# Dependencies (installed fresh in build)
+node_modules
+**/node_modules
+
+# Build artifacts (built fresh in build)
+**/.next
+**/dist
+packages/mindos/_standalone
+packages/mindos/static-web
+packages/mindos/packages
+packages/mindos/scripts
+packages/mindos/assets
+packages/mindos/skills
+packages/mindos/templates
+
+# Environment secrets
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+
+# Archives
+*.tgz
+*.tar.gz
+*.zip
+
+# Test coverage
+coverage
+**/coverage
+
+# Temp files
+tmp
+temp
+*.log

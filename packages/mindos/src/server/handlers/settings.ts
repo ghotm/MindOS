@@ -230,7 +230,7 @@ export function handleSettingsPost(
     const next: MindosServerSettings = {
       ai: resolvedAi,
       embedding: body.embedding && typeof body.embedding === 'object' ? resolveEmbedding(body.embedding) : current.embedding,
-      mindRoot: body.mindRoot ?? current.mindRoot,
+      mindRoot: body.mindRoot ?? current.mindRoot ?? process.env.MIND_ROOT,
       agent: body.agent ?? current.agent,
       skillPaths: resolveSkillPathsPatch(current.skillPaths, body.skillPaths),
       webPassword: body.webPassword ?? current.webPassword,

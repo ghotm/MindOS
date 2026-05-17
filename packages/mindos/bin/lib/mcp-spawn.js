@@ -34,6 +34,10 @@ export function spawnMcp(verbose = false) {
     MCP_PORT: mcpPort,
     MCP_HOST: process.env.MCP_HOST || '0.0.0.0',
     MINDOS_URL: process.env.MINDOS_URL || `http://127.0.0.1:${webPort}`,
+    // Docker 容器内 stdin 连的是 /dev/null（非真实父进程管道），
+    // MCP 的 stdin EOF 监听器会误判为父进程退出。
+    // 设置 INVOCATION_ID 让 MCP 跳过这个守护检测（类似 systemd/launchd 场景）。
+    INVOCATION_ID: '1',
     ...(configAuthToken ? { AUTH_TOKEN: configAuthToken } : {}),
     ...(verbose ? { MCP_VERBOSE: '1' } : {}),
   };

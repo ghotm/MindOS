@@ -5,7 +5,7 @@
  * The binary embeds runtime.tar.gz and extracts it to a versioned cache before
  * dispatching CLI commands or JS child entrypoints through the same executable.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -48,6 +48,9 @@ export function buildBunBinary(options) {
   rmSync(buildDir, { recursive: true, force: true });
   mkdirSync(buildDir, { recursive: true });
   mkdirSync(dirname(outFile), { recursive: true });
+
+  // 确保 runtime 包含 node_modules（从 monorepo 根目录复制）
+  ensureRuntimeNodeModules(runtimeRoot);
 
   createRuntimeArchive(runtimeRoot, archivePath, {
     excludeStandalone: existsSync(resolve(runtimeRoot, STATIC_WEB_INDEX)),
@@ -92,6 +95,54 @@ function createRuntimeArchive(runtimeRoot, archivePath, options = {}) {
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`runtime.tar.gz creation failed with exit code ${result.status}`);
+}
+
+function ensureRuntimeNodeModules(runtimeRoot) {
+  const runtimeNodeModules = resolve(runtimeRoot, 'node_modules');
+  
+  // 如果 runtimeRoot/node_modules 已存在且非空，跳过
+  if (existsSync(runtimeNodeModules)) {
+    try {
+      const entries = readdirSync(runtimeNodeModules);
+      if (entries.length > 0) {
+        console.log(`[build-bun-binary] node_modules already exists in ${runtimeRoot}, skipping copy`);
+        return;
+      }
+    } catch {}
+  }
+
+  // 查找 monorepo 根目录的 node_modules
+  let current = runtimeRoot;
+  let monorepoNodeModules = null;
+  
+  for (let i = 0; i < 5; i++) {
+    const parent = dirname(current);
+    if (parent === current) break; // 到达文件系统根目录
+    
+    const candidateNodeModules = resolve(parent, 'node_modules');
+    const candidateWorkspace = resolve(parent, 'pnpm-workspace.yaml');
+    
+    if (existsSync(candidateWorkspace) && existsSync(candidateNodeModules)) {
+      monorepoNodeModules = candidateNodeModules;
+      break;
+    }
+    current = parent;
+  }
+
+  if (!monorepoNodeModules) {
+    console.warn(`[build-bun-binary] Warning: Could not find monorepo node_modules, runtime may fail to resolve dependencies`);
+    return;
+  }
+
+  console.log(`[build-bun-binary] Copying node_modules from ${monorepoNodeModules} to ${runtimeNodeModules}`);
+  
+  // 使用 cp -r 复制（保留 symlink）
+  const result = spawnSync('cp', ['-r', monorepoNodeModules, runtimeNodeModules], {
+    stdio: 'inherit',
+  });
+  
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`Failed to copy node_modules: exit code ${result.status}`);
 }
 
 function createEntrySource({ productName, version, platform }) {
