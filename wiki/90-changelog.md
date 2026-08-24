@@ -1,6 +1,165 @@
-<!-- Last verified: 2026-05-10 | Current version: v1.0.5 -->
+<!-- Last verified: 2026-06-12 | Current version: v1.1.8 -->
 
 # 变更日志 (CHANGELOG)
+
+## Unreleased
+
+### Runtime / Agents
+
+- **Pi thinking effort 与运行时升级**：Pi 依赖升级到 `0.81.1` 并迁移到 `ModelRuntime` / `Models` API；MindOS runtime 现在按具体模型暴露并执行 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，Chat composer 会按 provider/model 记忆选择并在模型能力变化时安全夹取。
+- **Runtime 诊断面板可视化**：Agents / Agent 页新增 Runtime Diagnostics，直接展示 catalog、readiness、命令解析、能力矩阵与诊断缺口，方便排查 Codex、Claude Code、MindOS 与 ACP runtime 的兼容状态。
+- **Artifacts / Preview 工作流可视化**：Agents / Agent 页新增 Artifacts / Preview 面板，统一展示 runtime artifact readiness、指针式 artifact 预览和 Agent 文件变更入口，方便从 ledger 跳到文件或变更审阅。
+- **Agent runtime 基础能力收口**：新增 runtime catalog 与 readiness/capability matrix，统一展示本机 Codex、Claude Code、ACP 等 runtime 的安装、可用性和能力状态。
+- **ACP 命令入口更完整**：ACP runtime 暴露的 `available_commands` 会进入 Ask SendBox 与命令面板，支持从 UI 直接触发 agent 提供的命令能力。
+- **ACP 会话继承 MCP 上下文**：ACP session 现在会继承 MindOS MCP session 信息，减少跨 runtime 对话时上下文丢失和工具态不一致。
+- **Artifact ledger 改为指针式记录**：runtime artifact 只记录 archive pointer 与 run 索引，不代存完整历史，为后续预览、文件变更面板和跨 runtime artifact 工作流打基础。
+- **Extension manifest v0 解析**：新增 AionUI 风格 manifest/parser 基础，后续可把 `contributes` 转成真实扩展入口与安装前检查。
+- **Runtime extension 预检与安装**：新增 product-owned `agent-runtimes/extensions` API，支持只读 preflight、显式确认安装、ACP adapter 安全写入与 catalog/surfaces 展示；manifest 中的 lifecycle、skill、assistant、MCP 等贡献仍只登记不执行、不复制。
+- **ACP adapter output contract**：ACP adapter metadata 与 AionUI-style extension manifest 可声明 `outputKinds` / `outputCapabilities`，runtime catalog、adapter projection、artifact/readiness projection 会据此识别 diff、artifact、checkpoint、branch、PR 等可审阅输出；未声明的通用 ACP adapter 仍保持 text-only 并显示兼容缺口。
+- **Runtime control plane backend primitives**：新增 `agent-runtimes/control-plane` API 与 `<mindRoot>/.mindos/runtime-control-plane.json`，提供 schedule registry、approval queue、wake/failure audit、team mailbox 和 task-board 的安全后端基座；当前只保存安全摘要和指针，不执行 cron、不自动批准权限、不做 UI。
+
+### UI
+
+- **标签栏微调**：相邻标签之间加入细分隔线（贴近激活标签一侧自动隐藏，由其自身边框分界）；新建（＋）与溢出（⌄N）按钮从整行垂直居中改为对齐标签中线，不再悬浮在标签上方。
+
+### Skill 管理
+
+- **GUI skill 操作真实传导到下游 Agent**：Settings 与 Agents 页的 per-agent 开关现在通过统一矩阵读写真实 skill 链接，支持 link / unlink / disable-native / enable-native，不再只更新 UI 状态或旧记账字段。
+- **统一 skill × agent 事实源**：新增 `GET /api/skills/matrix`，以各 agent skill 目录中的链接/本体/停放状态作为唯一事实源；Settings、Agents by-skill、Agents by-agent 与 Agent 详情页消费同一数据模型。
+- **跨平台链接与安全卸载**：创建链接时按 symlink → Windows junction → 标记副本 fallback；卸载只删除托管链接或 `.mindos-managed` 副本，拒删用户手放的真实目录。
+- **Agent 自有技能可停用且可恢复**：agent 自有 skill 支持移入 `.mindos-disabled` 暂存并从矩阵恢复，避免“停用即消失”或误删 agent 原生文件。
+- **Skill 矩阵读接口去副作用**：`GET /api/skills/matrix` 不再迁移或清空旧 `installedSkillAgents[]`，也不会在只读页面访问时改写下游 agent skill 目录；用户改过的 legacy copy 不再写 `.mindos-managed`，后续 unlink 会按用户自有目录拒删。
+- **MCP 安装去副作用**：`/api/mcp/install` 不再隐式拷贝 skill 或写入旧 `installedSkillAgents` 记账，安装成功后的 skill 绑定统一走矩阵接口。
+- **stdio MCP packaged runtime 修复**：打包运行时缺少协议构建脚本时不再强制 rebuild；构建提示改走 stderr，避免污染 JSON-RPC stdout。
+
+## v1.1.8 (2026-06-12)
+
+### 修复
+
+- **`npx mindos start` 干净安装崩溃**：二进制平台包的嵌入 runtime 归档此前整体排除了 `_standalone`，丢失文档抽取运行时，导致 start 误入源码构建路径并崩溃（影响 1.1.7 全部二进制平台包）。现归档保留按依赖闭包裁剪后的抽取运行时，构建期断言防回归；打包 runtime 即使缺抽取运行时也只降级 PDF/DOCX 导入、不再尝试源码构建。
+- **二进制安装 DOCX 导入一直失效**：Bun 编译二进制不解析外部 node_modules 的裸包名 require，mammoth 加载失败被报成「无法解析此 Word 文档」（影响全部历史二进制版本）。现打包时把 `extract-docx.cjs` 预打包成自包含单文件，DOCX/DOC 导入在二进制安装下恢复可用。
+- **旧版 Mac 桌面壳标签栏错位 / 加号点不动**：桌面壳 ≤ v0.3.24 注入的 28px 拖拽带与新版 46px 标签栏行叠加，吞掉 tab strip 点击并把面板头画在标签上。Web 端检测到旧壳（无 `macTitlebarRow` 能力）时退回旧布局，新壳与浏览器不受影响。
+- **点击 rail logo 误入回响页**：恢复 `/` 首页内容（不再跳转 echo）。
+
+### UI
+
+- **Rail 顺序调整**：回响（Echo）入口移到搜索下方（收集箱、Mind、搜索、回响、Agents）。
+
+## v1.1.7 (2026-06-12)
+
+### 性能（本次主线：perf-hardening）
+
+- **首屏体积大幅瘦身**：highlight.js 与 react-markdown 移出首屏 bundle 按需加载；i18n 词典按模块拆分，中文资源只在中文环境下发，非中文用户不再下载整套双语文案。
+- **启动更快**：CLI 子命令改为懒加载，`mindos --version/--help` 与冷启动不再加载全部命令实现；Desktop shim 准备工作延后到真正需要时执行。
+- **大文件树不再卡顿**：FileTree 对大目录启用虚拟化渲染，面板拖拽时的重排开销显著降低。
+- **对话流式渲染隔离**：Ask 页流式 token 更新被隔离在消息区，不再触发整页 re-render，长回复期间输入与侧栏保持流畅。
+- **空闲时不再盲目轮询**：前端刷新改为事件驱动 + 严格的空闲轮询预算，后台标签页 / 无操作时几乎不发请求。
+- **服务端热路径缓存**：目录树缓存、链接索引、monitoring 版本缓存；搜索索引改为写时失效 + 热路径缓存；变更/审计/会话日志改为可追加 JSONL，避免大 JSON 重写。
+- **入口跳转更快**：`/` 等入口重定向由代理直接回 307，省掉一次完整页面渲染。
+
+### Web / Desktop UI
+
+- **标题栏行与窗口拖拽区重构**：mac 标题栏带改为 tab-row 几何布局（Phase 1/2），新增工作区 tab strip 与 `/chat/[sessionId]` 路由；根治 fixed titlebar 行遮挡下方按钮点击的问题。
+- **并发对话**：聊天会话支持后台流式运行与历史指示，切走再切回不丢进度。
+
+### 稳定性 / 安全
+
+- **修复 git hook 环境下的高危行为**：hook 导出的 `GIT_DIR` 等变量可能让 MindOS 内部 spawn 的 git 操作错指向真实仓库（实际事故），现已在产品与测试两层全量剥离这些变量并加回归测试。
+- **发布脚本加固**：standalone 验证支持服务端 307 跳转；修复 supertest 临时端口被本机其他进程劫持导致的偶发测试失败。
+
+## v1.1.6 (2026-06-12)
+
+### Agents / 本地助手
+
+- **本地助手库**：assistants 从本地 registry 加载，助手库整理与 agents / inbox 工作流细化。
+- **助手写入收口**：assistant 的文件写入统一经由 product server 路由，权限与审计口径一致。
+
+### Web / Desktop
+
+- **Rail 点击不再闪烁**：导航采用乐观 pending 状态，消除点击瞬间的闪烁。
+- **Desktop 安装加固**：Windows / macOS / Linux 安装与升级行为加固（含 DESKTOP_HOME 拆分与 Rosetta smoke 验证）。
+- **Standalone runtime 减重**：发布产物剔除嵌套 dev packages。
+- **AI 设置页打磨**：设置 UI 细节优化；超大源码文件按模块拆分（工程健康）。
+
+## v1.1.5 (2026-06-11)
+
+### Runtime / Local Agents
+
+- **Claude Code bridge 状态可见**：Claude Code runtime 现在区分 SDK bridge 与 CLI fallback，Ask Panel 会展示当前桥接方式，方便判断用户本机到底走的是 SDK 还是本地 CLI。
+- **Codex 错误展示收敛**：Codex app-server / optional dependency / Node stack 失败会被压缩成用户可理解的短错误，不再把长堆栈直接塞进 runtime 下拉和对话流。
+- **Agent runtime API 兼容增强**：`/api/agent-runtimes` 与 Product Server runtime health 增加 bridge metadata，并保留旧 dist/runtime 的兼容推断路径。
+
+### Desktop / Runtime 发布
+
+- **Desktop installer 加固**：Windows NSIS installer 增加旧进程/旧安装目录清理逻辑，Electron builder 明确引用安装脚本，减少升级残留导致的启动失败。
+- **Desktop IPC 与导航安全增强**：主进程增加 trusted IPC / navigation guard，限制 renderer 与外部链接入口，降低 packaged app 中误触不可信地址的风险。
+- **Node runtime 准备更稳**：Desktop runtime 准备流程补强 Node 下载、校验、私有 runtime 解析和 PATH 处理，发布 smoke 会输出更明确的诊断。
+- **Runtime latest 发布顺序修复**：`runtime-latest` 先上传版本 tarball，再发布 `latest.json`，最后清理旧 tarball，避免客户端拿到指向缺失 asset 的 manifest。
+- **公共仓同步增强**：dev → public sync 会同步版本 tag，并在公共仓触发 runtime/npm workflows；发布验证需分别检查 public runtime artifact 与 npm registry。
+
+### Inbox / Web Clip
+
+- **网页剪藏更健壮**：Inbox clip 对 HTML/PDF、HTTP 错误、解析失败和 Unicode 内容增加覆盖，失败时返回更稳定的错误语义。
+
+### Settings
+
+- **Embedding / Search 设置拆分**：Embedding Search card 抽出更清晰的状态和测试覆盖，降低设置页后续迭代时的回归风险。
+
+### Git Sync / Settings
+
+- **Paused 状态优先级修复**：暂停 auto-sync 后仍会显示冲突、错误、未知 upstream 状态和本地待上传改动，不再用单纯 Paused 卡片盖住真正需要处理的问题。
+- **初始化进度语义修复**：首次配置 Git Sync 时隐藏进度不再伪装成取消；后端初始化仍在运行时，Settings 会显示后台进行中并阻止第二次 Connect。
+- **恢复与保护增强**：`ssh://git@host/org/repo.git` 远程地址在 Settings、Product API、CLI 中都可用；`.gitignore` 保存会补回 `*.sync-conflict` / `INSTRUCTION.md`；冲突预览失败时仍可选择 Keep local。
+- **状态入口细节修复**：`unpushed: "?"` 不再显示“已备份”，手动 Sync 后进入 unknown 也不再弹成功；窄屏 Sync Popover 会限制在 viewport 内。
+- **`.gitignore` 同步边界修复**：保存排除规则后，已经被 Git tracking 但现在命中 ignore 的文件会从后续同步中移除，同时保留本机文件；`.gitignore` 自身会继续被 tracking，避免宽规则误删同步规则。
+- **冲突解决上传更可信**：Settings 里 Keep local / Keep remote 只提交当前冲突文件，不会顺手上传无关 staged/dirty 文件；如果已有旧的未推送 commit，MindOS 会先本地解决并提示用户显式 Sync now，而不是偷偷推整条分支。
+
+## v1.0.19 (2026-06-09)
+
+### Git Sync / Settings
+
+- **Reset / 重新配置语义修复**：`sync reset` 不再被残留 Git `origin` 误判为 paused/configured，Settings 会回到真正的重新配置入口；`sync off` 仍保留 paused 仓库元数据。
+- **Reconfigure 失败回滚**：重新配置 remote 时，如果连接验证、远端 branch 校验或首轮同步失败，会恢复旧 `origin`（首次配置失败则移除临时 origin），避免用户看到“配置失败”后旧同步也被改坏。
+- **同步状态可信度修复**：`unpushed` 现在同时统计未 push commits 和 dirty worktree files；冲突里选择 Keep remote、保存 `.gitignore` 等本地改动不会再假显示为已备份。
+- **手动同步与 daemon 稳定性**：manual sync 遇到非冲突 pull 失败会保留并抛出错误，不再被后续 push 成功清掉；daemon 并发 start 去重，活 pid 持有的 sync lock 不会因为时间久被当成 stale 清理。
+- **Sync init/auth 加固**：初始化时会补齐 repo-local Git identity，避免用户没配置全局 `user.name/user.email` 就无法自动提交；HTTPS remote 会先剥离 username/password，再通过 credential helper 存 token，helper 无法持久化时明确失败，不再把 token 写回 `.git/config`。
+- **首次同步语义修复**：远端已有内容时，`sync init` 会先 pull，再提交/推送本地待同步文件，避免显示初始化成功但本地笔记其实没有上传。
+- **后台 daemon 生命周期修复**：Settings/API 里的 init/on/off/reset/interval 更新会通知同进程 sync daemon；daemon 也会轮询配置，关闭同步后自动停掉 watcher/timer，停止时清理已排队的自动提交，interval 改动不再等重启才生效。
+- **SSH 与状态文案修复**：SSH 预检不再靠默认 key 文件名误杀自定义 `~/.ssh/config`、硬件密钥或平台 agent；底栏/Popover 的中文相对时间和关闭提示改为完整 i18n。
+
+## v1.0.18 (2026-06-09)
+
+### Git Sync / Settings
+
+- **Sync 设置状态机收口**：Settings、底栏、ActivityBar、Popover 和移动端 dot 统一识别 paused、stale、unknown、conflicts、locked 等状态；已配置但暂停的仓库不再像未配置一样消失，刷新失败时也不会继续显示“已备份”。
+- **手动同步入口统一**：所有 Sync Now 入口共享同一个 in-flight 状态；同步后会刷新最终状态，若进入冲突、错误或 stale 状态，不再弹出误导性的成功提示。
+- **冲突与 `.gitignore` 体验修复**：冲突 diff 在移动端上下排列，缺少远程备份时禁用 Keep remote 并解释原因；`.gitignore` 编辑器每次打开都会重新加载，加载失败时提供 Retry，避免基于旧内容继续保存。
+- **CLI/API 状态一致**：CLI `mindos sync` 会保留 paused 仓库的 remote/branch 元数据并提示 `mindos sync on`；Product API 对 sync on/off 与 interval 更新也走同一把 sync 锁，`.gitignore` 读取只在文件不存在时返回空内容，symlink/越界访问返回明确错误。
+
+## v1.0.17 (2026-06-09)
+
+### 设置
+
+- **AI Provider 可重新选择和编辑**：设置面板的 provider 选择统一到 `p_*` provider entry，保留未配置 provider 的可选入口；旧配置中的 `ai.activeProvider` / `ai.provider` 会归一成可编辑 provider entry，避免用户选中某个 provider 后配置区找不到对应项。
+- **Provider legacy 清理**：移除旧的 provider modal/card 路径，保留 inline provider 编辑；空名称 autosave、协议切换、已有 provider 激活、环境变量恢复都增加了回归覆盖。
+- **设置保存更稳**：设置面板关闭、快速切换、重新打开时会忽略过期 GET 响应，并串行 flush 最新设置，避免旧请求覆盖新选择。
+
+### Git Sync
+
+- **跨进程 Git Sync 锁**：所有 Git 写入、手动 Sync Now、初始化、daemon pull/commit、`.gitignore` 保存、冲突解决和 reset 都共用 `~/.mindos/sync-locks/<mindRootHash>.lock`，避免多个 daemon / CLI / API 同时操作同一个知识库 repo。
+- **锁错误语义统一**：锁冲突返回稳定 `SYNC_LOCKED`，Product API 映射为 HTTP 423；后台 daemon 抢不到锁只跳过本轮，不再污染 UI 的 `lastError`。
+- **安全细节补强**：sync init token 改为通过 `MINDOS_SYNC_TOKEN` 传给 CLI，不再出现在 argv；sync status 会脱敏 HTTPS remote 中的用户名/密码；初始化分支名会用 Git 校验并按用户指定分支创建/切换。
+- **冲突处理更可控**：冲突状态优先于 lastError；冲突预览/解决支持明确 `file + strategy`；解决冲突前先走 diff/preview，避免误点直接覆盖。
+
+### Runtime / Product Server
+
+- **Product Server settings 兼容旧 provider payload**：`/api/settings` GET/POST 会把旧 providers dict 和 protocol activeProvider 归一化，确保静态 runtime、npm runtime 和 Web UI 的 provider 状态一致。
+- **本地 runtime 相关清理**：补齐 auth、tree-version、frontmatter、SSE stream、agent runtime、ACP session/subprocess 等 Product Server/runtime 侧回归覆盖，减少静态 runtime 与 Web dev path 的漂移。
+
+### 质量
+
+- **设置测试覆盖扩大**：新增/更新 provider selection、settings save lifecycle、sync UX、MCP settings、knowledge token copy、update badge、auth/tree-version/frontmatter 等测试。
+- **已知坑文档更新**：记录 AI Provider legacy migration 和 Git Sync 跨进程锁规则，后续改设置或 sync 时必须按这些 contract 自查。
 
 ## v0.6.82+ (未发布)
 
@@ -20,6 +179,8 @@
 
 ### 修复
 
+- **Inbox Agent 使用 Settings 默认模型**：修复 Settings 已配置 active provider/API key 时，Inbox Agent 仍误提示需要配置 API key 的问题；AI 可用性检查现在复用 Settings 新 provider 结构，支持 env fallback。
+- **Inbox 切回 Wiki/其它页面不再卡住侧栏**：修复从 `/capture` 离开后左侧仍停留在 Inbox panel 的 route 状态竞态，切回 Wiki/Agents/Explore/Echo 时会恢复对应侧栏。
 - **v1 发布自举修复**：`prepack` 不再删除 `packages/web/node_modules`，重复执行 `npm pack` 不会因为缺少 `next` 失败；Web 脚本解析、Skill 内置冲突检测、community plugin fixture 下载和 `mindos update` fallback build 路径已统一到 `packages/web`。
 
 **跨模块 Bug 审计 (2026-04-13)**

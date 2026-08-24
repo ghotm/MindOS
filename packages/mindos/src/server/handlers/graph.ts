@@ -1,23 +1,68 @@
 import { createHash } from 'node:crypto';
-import { extname, posix } from 'node:path';
+import { posix } from 'node:path';
 import { queryValue, type MindosRequestQuery } from '../context.js';
-import { collectAllFilesFromMindRoot, readTextFileFromMindRoot } from '../runtime.js';
+import {
+  getLinkSnapshot,
+  normalizeTargetPath,
+  type LinkAggregateKind,
+  type LinkEdgeAggregate,
+  type LinkScanServices,
+  type LinkTargetSubpath,
+} from '../link-index.js';
 import { json, publicCacheHeaders, type MindosServerResponse } from '../response.js';
+
+export type GraphScope = 'global' | 'local';
+export type GraphDirection = 'both' | 'incoming' | 'outgoing';
+export type GraphNodeType = 'note' | 'missing';
+export type GraphEdgeKind = LinkAggregateKind;
 
 export interface GraphNode {
   id: string;
+  path: string;
   label: string;
   folder: string;
+  type: GraphNodeType;
+  tags: string[];
+  wordCount: number;
+  inDegree: number;
+  outDegree: number;
+  degree: number;
+  isMissing: boolean;
+  isAmbiguous: boolean;
+  isCurrent?: boolean;
 }
 
 export interface GraphEdge {
+  id: string;
   source: string;
   target: string;
+  kind: GraphEdgeKind;
+  count: number;
+  snippets: string[];
+  unresolved: boolean;
+  ambiguous: boolean;
+  candidates: string[];
+  subpaths: LinkTargetSubpath[];
 }
 
 export interface GraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  stats: GraphStats;
+}
+
+export interface GraphStats {
+  scope: GraphScope;
+  depth: number | null;
+  direction: GraphDirection;
+  nodeCount: number;
+  edgeCount: number;
+  totalNodeCount: number;
+  totalEdgeCount: number;
+  orphanCount: number;
+  unresolvedCount: number;
+  ambiguousCount: number;
+  treeVersion: number | null;
 }
 
 export interface BacklinkItem {
@@ -25,20 +70,25 @@ export interface BacklinkItem {
   snippets: string[];
 }
 
-export type GraphHandlerServices = {
-  mindRoot?: string;
-  collectAllFiles?: () => string[];
-  readTextFile?: (path: string) => string;
-};
+export type GraphHandlerServices = LinkScanServices;
 
-type LinkHit = {
-  source: string;
-  target: string;
-  snippet: string;
-};
+export function handleGraph(services: GraphHandlerServices): MindosServerResponse<GraphData>;
+export function handleGraph(
+  query: MindosRequestQuery | undefined,
+  services: GraphHandlerServices,
+): MindosServerResponse<GraphData | { error: string }>;
+export function handleGraph(
+  queryOrServices: MindosRequestQuery | GraphHandlerServices | undefined,
+  maybeServices?: GraphHandlerServices,
+): MindosServerResponse<GraphData | { error: string }> {
+  const query = maybeServices ? (queryOrServices as MindosRequestQuery | undefined) : undefined;
+  const services = maybeServices ?? (queryOrServices as GraphHandlerServices);
+  const options = parseGraphOptions(query);
+  if (options.scope === 'local' && !options.path) {
+    return json({ error: 'path required for local graph' }, { status: 400 });
+  }
 
-export function handleGraph(services: GraphHandlerServices): MindosServerResponse<GraphData> {
-  const graph = buildGraphData(services);
+  const graph = buildGraphData(services, options);
   return json(graph, { headers: publicCacheHeaders(300, generateETag(graph)) });
 }
 
@@ -51,173 +101,234 @@ export function handleBacklinks(
     return json({ error: 'path required' }, { status: 400 });
   }
 
-  const snippets = new Map<string, string[]>();
-  for (const hit of collectLinkHits(services)) {
-    if (hit.target !== target) continue;
-    const list = snippets.get(hit.source) ?? [];
-    list.push(hit.snippet);
-    snippets.set(hit.source, list);
-  }
+  const snippets = getLinkSnapshot(services).backlinksByTarget.get(target) ?? new Map<string, Set<string>>();
 
   const backlinks = [...snippets.entries()]
     .map(([filePath, lines]) => ({
       filePath,
-      snippets: [...new Set(lines)],
+      snippets: [...lines],
     }))
     .sort((a, b) => a.filePath.localeCompare(b.filePath));
 
   return json(backlinks, { headers: publicCacheHeaders(300, generateETag(backlinks)) });
 }
 
-function buildGraphData(services: GraphHandlerServices): GraphData {
-  const files = collectMarkdownFiles(services);
-  const nodes = files.map((filePath) => ({
-    id: filePath,
-    label: posix.basename(filePath, '.md'),
-    folder: posix.dirname(filePath),
-  }));
+type ParsedGraphOptions = {
+  scope: GraphScope;
+  path?: string;
+  depth: number;
+  direction: GraphDirection;
+  includeUnresolved: boolean;
+  includeOrphans: boolean;
+};
 
-  const edgeKeys = new Set<string>();
-  const edges: GraphEdge[] = [];
-  for (const hit of collectLinkHits(services, files)) {
-    if (hit.source === hit.target) continue;
-    const key = `${hit.source}\0${hit.target}`;
-    if (edgeKeys.has(key)) continue;
-    edgeKeys.add(key);
-    edges.push({ source: hit.source, target: hit.target });
+function buildGraphData(services: GraphHandlerServices, options: ParsedGraphOptions): GraphData {
+  const snapshot = getLinkSnapshot(services);
+  const fileSet = new Set(snapshot.files);
+  const allEdges = snapshot.edgeAggregates
+    .filter((edge) => isGraphEdgeVisible(edge, options.includeUnresolved))
+    .map(toGraphEdge)
+    .sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target) || a.kind.localeCompare(b.kind));
+
+  const allNodeIds = options.includeUnresolved ? new Set(snapshot.nodeIds) : new Set(snapshot.files);
+  for (const edge of allEdges) {
+    allNodeIds.add(edge.source);
+    allNodeIds.add(edge.target);
   }
 
-  edges.sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target));
-  return { nodes, edges };
-}
+  const scopedNodeIds = options.scope === 'local' && options.path
+    ? buildLocalNodeIds(options.path, options.depth, options.direction, options.includeUnresolved, snapshot)
+    : allNodeIds;
+  if (options.scope === 'local' && options.path) scopedNodeIds.add(options.path);
 
-function collectLinkHits(services: GraphHandlerServices, markdownFiles = collectMarkdownFiles(services)): LinkHit[] {
-  const fileSet = new Set(markdownFiles);
-  const basenameMap = buildBasenameMap(markdownFiles);
-  const hits: LinkHit[] = [];
+  let scopedEdges = allEdges.filter((edge) => scopedNodeIds.has(edge.source) && scopedNodeIds.has(edge.target));
+  let nodes = [...scopedNodeIds]
+    .map((nodeId) => buildGraphNode(nodeId, snapshot.fileMetadata.get(nodeId), fileSet, scopedEdges, options.path))
+    .sort((a, b) => a.id.localeCompare(b.id));
 
-  for (const source of markdownFiles) {
-    let content = '';
-    try {
-      content = readText(services, source);
-    } catch {
-      continue;
+  if (!options.includeOrphans) {
+    const connected = new Set<string>();
+    for (const edge of scopedEdges) {
+      connected.add(edge.source);
+      connected.add(edge.target);
     }
-    hits.push(...extractLinkHits(content, source, fileSet, basenameMap));
+    if (options.path) connected.add(options.path);
+    nodes = nodes.filter((node) => connected.has(node.id));
+    const remaining = new Set(nodes.map((node) => node.id));
+    scopedEdges = scopedEdges.filter((edge) => remaining.has(edge.source) && remaining.has(edge.target));
   }
 
-  return hits;
-}
+  const stats = buildStats({
+    options,
+    nodes,
+    edges: scopedEdges,
+    totalNodeCount: allNodeIds.size,
+    totalEdgeCount: allEdges.length,
+    treeVersion: readTreeVersion(services),
+  });
 
-function collectMarkdownFiles(services: GraphHandlerServices): string[] {
-  const files = services.collectAllFiles
-    ? services.collectAllFiles()
-    : services.mindRoot
-      ? collectAllFilesFromMindRoot(services.mindRoot)
-      : [];
-  return files
-    .filter((filePath) => extname(filePath).toLowerCase() === '.md')
-    .map(normalizeTargetPath)
-    .filter((filePath): filePath is string => !!filePath)
-    .sort((a, b) => a.localeCompare(b));
-}
-
-function readText(services: GraphHandlerServices, filePath: string): string {
-  if (services.readTextFile) return services.readTextFile(filePath);
-  if (services.mindRoot) return readTextFileFromMindRoot(services.mindRoot, filePath);
-  throw new Error('readTextFile service required');
-}
-
-function buildBasenameMap(files: string[]): Map<string, string[]> {
-  const map = new Map<string, string[]>();
-  for (const filePath of files) {
-    const key = posix.basename(filePath).toLowerCase();
-    const values = map.get(key) ?? [];
-    values.push(filePath);
-    map.set(key, values);
-  }
-  return map;
-}
-
-function extractLinkHits(
-  content: string,
-  source: string,
-  fileSet: Set<string>,
-  basenameMap: Map<string, string[]>,
-): LinkHit[] {
-  const hits: LinkHit[] = [];
-  const sourceDir = posix.dirname(source);
-  const lines = content.split(/\r?\n/);
-
-  for (const line of lines) {
-    const snippet = line.trim();
-    if (!snippet) continue;
-
-    const wikiRe = /\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g;
-    let match: RegExpExecArray | null;
-    while ((match = wikiRe.exec(line)) !== null) {
-      const target = resolveLinkTarget(match[1], sourceDir, fileSet, basenameMap, false);
-      if (target) hits.push({ source, target, snippet });
-    }
-
-    const markdownRe = /\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)/g;
-    while ((match = markdownRe.exec(line)) !== null) {
-      const target = resolveLinkTarget(match[1], sourceDir, fileSet, basenameMap, true);
-      if (target) hits.push({ source, target, snippet });
-    }
-  }
-
-  return hits;
-}
-
-function resolveLinkTarget(
-  rawTarget: string | undefined,
-  sourceDir: string,
-  fileSet: Set<string>,
-  basenameMap: Map<string, string[]>,
-  relativeToSource: boolean,
-): string | undefined {
-  const target = normalizeTargetPath(rawTarget);
-  if (!target || /^(https?:|mailto:|tel:)/i.test(target)) return undefined;
-
-  const candidates = new Set<string>();
-  candidates.add(target);
-  candidates.add(target.endsWith('.md') ? target : `${target}.md`);
-
-  if (relativeToSource) {
-    candidates.add(posix.normalize(posix.join(sourceDir, target)));
-    candidates.add(posix.normalize(posix.join(sourceDir, target.endsWith('.md') ? target : `${target}.md`)));
-  }
-
-  for (const candidate of candidates) {
-    if (fileSet.has(candidate)) return candidate;
-  }
-
-  const basename = posix.basename(target.endsWith('.md') ? target : `${target}.md`).toLowerCase();
-  const basenameMatches = basenameMap.get(basename);
-  if (basenameMatches?.length === 1) return basenameMatches[0];
-
-  return undefined;
-}
-
-function normalizeTargetPath(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  let normalized = value.trim();
-  if (!normalized) return undefined;
-
-  try {
-    normalized = decodeURIComponent(normalized);
-  } catch {
-    // Keep the original value if it is not a valid URI component.
-  }
-
-  normalized = normalized.split('#')[0]?.trim() ?? '';
-  normalized = normalized.replace(/\\/g, '/').replace(/^\/+/, '');
-  normalized = posix.normalize(normalized);
-  if (!normalized || normalized === '.' || normalized.startsWith('../') || normalized === '..') return undefined;
-  return normalized;
+  return { nodes, edges: scopedEdges, stats };
 }
 
 function generateETag(value: unknown): string {
   return `"${createHash('sha1').update(JSON.stringify(value)).digest('hex')}"`;
+}
+
+function parseGraphOptions(query: MindosRequestQuery | undefined): ParsedGraphOptions {
+  const scope = parseScope(queryValue(query, 'scope'));
+  return {
+    scope,
+    path: normalizeTargetPath(queryValue(query, 'path')),
+    depth: clampInteger(queryValue(query, 'depth'), scope === 'local' ? 1 : 0, 0, 4),
+    direction: parseDirection(queryValue(query, 'direction')),
+    includeUnresolved: queryValue(query, 'includeUnresolved') !== 'false',
+    includeOrphans: queryValue(query, 'includeOrphans') !== 'false',
+  };
+}
+
+function parseScope(value: string | undefined): GraphScope {
+  return value === 'local' ? 'local' : 'global';
+}
+
+function parseDirection(value: string | undefined): GraphDirection {
+  if (value === 'incoming' || value === 'outgoing') return value;
+  return 'both';
+}
+
+function clampInteger(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function isGraphEdgeVisible(edge: LinkEdgeAggregate, includeUnresolved: boolean): boolean {
+  if (edge.source === edge.target) return false;
+  if (!includeUnresolved && (edge.unresolved || edge.ambiguous)) return false;
+  return true;
+}
+
+function toGraphEdge(edge: LinkEdgeAggregate): GraphEdge {
+  return {
+    id: `${edge.source}\0${edge.target}`,
+    source: edge.source,
+    target: edge.target,
+    kind: edge.kind,
+    count: edge.count,
+    snippets: edge.snippets.slice(0, 3),
+    unresolved: edge.unresolved,
+    ambiguous: edge.ambiguous,
+    candidates: edge.candidates,
+    subpaths: edge.subpaths,
+  };
+}
+
+function buildLocalNodeIds(
+  rootPath: string,
+  depth: number,
+  direction: GraphDirection,
+  includeUnresolved: boolean,
+  snapshot: ReturnType<typeof getLinkSnapshot>,
+): Set<string> {
+  const visited = new Set<string>([rootPath]);
+  const queue: Array<{ id: string; depth: number }> = [{ id: rootPath, depth: 0 }];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || current.depth >= depth) continue;
+    for (const neighbor of getAdjacentNodeIds(current.id, direction, includeUnresolved, snapshot)) {
+      if (visited.has(neighbor)) continue;
+      visited.add(neighbor);
+      queue.push({ id: neighbor, depth: current.depth + 1 });
+    }
+  }
+  return visited;
+}
+
+function getAdjacentNodeIds(
+  nodeId: string,
+  direction: GraphDirection,
+  includeUnresolved: boolean,
+  snapshot: ReturnType<typeof getLinkSnapshot>,
+): string[] {
+  const ids = new Set<string>();
+
+  if (direction === 'both' || direction === 'outgoing') {
+    for (const edge of snapshot.outgoingEdgesBySource.get(nodeId) ?? []) {
+      if (!isGraphEdgeVisible(edge, includeUnresolved)) continue;
+      ids.add(edge.target);
+    }
+  }
+
+  if (direction === 'both' || direction === 'incoming') {
+    for (const edge of snapshot.incomingEdgesByTarget.get(nodeId) ?? []) {
+      if (!isGraphEdgeVisible(edge, includeUnresolved)) continue;
+      ids.add(edge.source);
+    }
+  }
+
+  return [...ids].sort((a, b) => a.localeCompare(b));
+}
+
+function buildGraphNode(
+  id: string,
+  metadata: { title: string; tags: string[]; wordCount: number } | undefined,
+  fileSet: Set<string>,
+  edges: GraphEdge[],
+  currentPath: string | undefined,
+): GraphNode {
+  let inDegree = 0;
+  let outDegree = 0;
+  for (const edge of edges) {
+    if (edge.source === id) outDegree += 1;
+    if (edge.target === id) inDegree += 1;
+  }
+
+  const isMissing = !fileSet.has(id);
+  const isAmbiguous = edges.some((edge) => edge.target === id && edge.ambiguous);
+  return {
+    id,
+    path: id,
+    label: metadata?.title || posix.basename(id, '.md'),
+    folder: posix.dirname(id),
+    type: isMissing ? 'missing' : 'note',
+    tags: metadata?.tags ?? [],
+    wordCount: metadata?.wordCount ?? 0,
+    inDegree,
+    outDegree,
+    degree: inDegree + outDegree,
+    isMissing,
+    isAmbiguous,
+    isCurrent: id === currentPath,
+  };
+}
+
+function buildStats(input: {
+  options: ParsedGraphOptions;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  totalNodeCount: number;
+  totalEdgeCount: number;
+  treeVersion: number | null;
+}): GraphStats {
+  return {
+    scope: input.options.scope,
+    depth: input.options.scope === 'local' ? input.options.depth : null,
+    direction: input.options.direction,
+    nodeCount: input.nodes.length,
+    edgeCount: input.edges.length,
+    totalNodeCount: input.totalNodeCount,
+    totalEdgeCount: input.totalEdgeCount,
+    orphanCount: input.nodes.filter((node) => node.degree === 0).length,
+    unresolvedCount: input.nodes.filter((node) => node.isMissing).length,
+    ambiguousCount: input.edges.filter((edge) => edge.ambiguous).length,
+    treeVersion: input.treeVersion,
+  };
+}
+
+function readTreeVersion(services: GraphHandlerServices): number | null {
+  if (!services.getTreeVersion) return null;
+  try {
+    return services.getTreeVersion();
+  } catch {
+    return null;
+  }
 }

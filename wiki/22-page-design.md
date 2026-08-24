@@ -41,7 +41,13 @@
 
 桌面端左侧由 **48px Rail（Activity Bar）** 与 **可切换 Panel（默认宽约 280px，可拖拽调宽）** 组成。上文 ASCII 中的「Sidebar」在实现上对应 **Rail + 当前 Panel 内容** 占用的总宽度（约 48px + 280px 量级）。
 
-**Rail 中部按钮顺序（上 → 下）**：空间（文件树）→ **回响 Echo** → 搜索（⌘K）→ 插件 → 智能体 → 探索。底部为帮助、同步、设置等（不切换主 Panel）。
+实现宽度统一由 `packages/web/lib/config/panel-sizes.ts` 管理：`ACTIVITY_BAR` 定义 Rail，`LEFT_PANEL` / `DEFAULT_LEFT_PANEL_WIDTH` 定义可拖拽 Panel，`SETTINGS_SIDEBAR` 定义 Settings modal 内部导航，`MOBILE_SIDEBAR` 定义移动抽屉。页面组件不应重新硬编码这些 sidebar/chrome 宽度。
+
+页面内容容器统一走 `packages/web/components/shared/ContentPageShell.tsx` 的命名 shell：`WorkbenchPageShell` 用于 Inbox / Agents / Explore 等工作台页面，`ReadingPageShell` 用于 Wiki / 阅读入口，`NarrowPageShell` 用于固定窄宽页面，`LoadingPageShell` 用于 skeleton。非 ViewPage 但需要和 TOC 阅读页视觉对齐时，只能 opt-in `.toc-reserved-content`，不要复制 `xl:mr-[220px]`。
+
+**Rail 中部按钮顺序（上 → 下）**：收集箱 → 空间（文件树）→ **回响 Echo** → 智能体 → 流程（labs 开启时）→ 探索。底部为同步、设置等系统动作（不切换主 Panel）。
+
+**搜索入口**：桌面端搜索不在 Rail 中占位；Titlebar Tab 行在第一枚 workspace tab 前提供一个小号 icon-only Search 入口（`⌘K` 同路径），触发现有 `SearchPanel`。移动端继续使用 Header 右侧 Search 图标打开 `SearchModal`。
 
 **Panel 子视图**：`FileTree`、`EchoPanel`、`SearchPanel`、`PluginsPanel`、`AgentsPanel`、`DiscoverPanel`。回响主内容在 **`/echo/[segment]`**（侧栏五行链入）；不向首页、Guide、探索导流。规格见 `wiki/specs/spec-echo-panel.md`、`wiki/specs/spec-echo-content-pages.md`、`wiki/specs/spec-activity-bar-layout.md`、`wiki/specs/spec-discover-panel.md`。
 
@@ -87,7 +93,7 @@ Drawer (triggered by ☰):
 
 ## 页面清单
 
-> **2026-04-10 更新**：共 15 个页面路由（含 3 个动态路由）
+> **2026-06-25 更新**：页面路由以当前 App Router 为准；新增/移除路由时同步维护本表。
 
 | 路由 | 页面 | 组件入口 | 说明 |
 |------|------|---------|------|
@@ -95,18 +101,37 @@ Drawer (triggered by ☰):
 | `/explore` | 探索 | `app/explore/page.tsx` | 使用案例与分类；Discover 侧栏可入 |
 | `/view/[...path]` | 查看/编辑 | `ViewPageClient` | Markdown/CSV/JSON 查看+编辑 |
 | `/setup` | 初始化向导 | `Setup` | 8 步 Wizard |
-| `/login` | 登录 | `LoginPage` | Web 密码认证 |
+| `/login` | 登录 / 重新认证 | `LoginPage` | Web 密码认证；会话过期后保留返回路径 |
 | `/help` | 帮助 | `app/help/page.tsx` | Activity Bar 底部 `?` 入口 |
 | `/echo` | 回响入口 | `app/echo/page.tsx` | Echo 主页，导航到各 segment |
 | `/echo/[segment]` | 回响内容页 | `app/echo/[segment]/page.tsx` | 与你有关 / 未完待续 / 每日回响 / 历史的你 / 心向生长；见 `spec-echo-content-pages.md` |
-| `/agents` | 智能体总览 | `app/agents/page.tsx` | Overview / MCP / Skills / Network 四 Tab |
+| `/agents` | 智能体总览 | `app/agents/page.tsx` | 总览 / Assistant / Agent / Skills & MCP / 频道五组 IA；旧 MCP / Skills / Network / Sessions / Activity query 仍作为兼容入口 |
 | `/agents/[agentKey]` | 智能体详情 | `app/agents/[agentKey]/page.tsx` | Skill 管理 + MCP 状态 + Runtime 诊断 |
+| `/studio` | Studio / 工作台总览 | `app/studio/page.tsx` | 工作台总览；汇总 Project、Apps、Automation 三个工作面 |
+| `/studio/projects` | Studio 项目 | `app/studio/projects/page.tsx` | 项目工作台；承载 Project、Session、上下文与复盘 |
+| `/studio/apps` | Studio 应用 | `app/studio/apps/page.tsx` | 场景应用入口；关系记忆、学习练习等 context 工作面 |
+| `/studio/automation` | Studio 自动化 | `app/studio/automation/page.tsx` | 本地自动化计划/编辑器，后端执行待接入 |
+| `/studio/[projectId]` | Studio 项目详情 | `app/studio/[projectId]/page.tsx` | 单个 Project 的上下文、对话、复盘与运行记录 |
 | `/trash` | 回收站 | `app/trash/page.tsx` | 已删除文件恢复/永久删除 |
 | `/wiki` | Wiki 入口 | `app/wiki/page.tsx` | 项目 Wiki 浏览 |
 | `/capture` | Inbox | `app/capture/page.tsx` | 默认只展示捕获框；Queue / History 通过页内 segment 延后展开，避免队列和 AI 面板挤占捕获动作 |
 | `/capture/history` / `/inbox/history` | Inbox 历史 | `app/capture/history/page.tsx` / `app/inbox/history/page.tsx` | 已处理记录与撤销记录 |
 | `/changelog` | 更新日志 | `app/changelog/page.tsx` | 版本变更日志浏览 + 搜索 |
 | `/changes` | 变更记录 (重定向) | `app/changes/page.tsx` | → 重定向到 `/changelog` |
+
+---
+
+### Agents 页面 IA
+
+`/agents` 的顶部导航与 Agents Panel Hub 统一为五组：`总览`、`Assistant`、`Agent`、`Skills & MCP`、`频道`。
+
+- `Assistant` 表示 MindOS 内部的角色档案、默认 Prompt、产品入口与任务路由策略。
+- `Agent` 表示实际执行端点，例如 MindOS Agent、Codex、Claude Code、Remote Agent。
+- `Skills & MCP` 聚合 MindOS Skills、MCP 连接状态与 MCP 暴露工具；旧的 `tab=mcp`、`tab=skills` 继续解析为兼容入口。
+- `频道` 表示 Telegram、Slack、飞书、Discord 等消息入口；旧的 `tab=channels` 保留。
+- `tab=a2a` 归入 `Agent` 的远程执行端语义；`tab=sessions`、`tab=activity`、`tab=runs` 保留为运行日志辅助入口，但不占顶层主导航。
+
+总览页首屏的「系统模型」只保留一句模型说明和健康状态，不再重复放流程卡。下方保留 Assistant、Agent、Skills & MCP、频道四张状态卡；再往下左侧展示最近运行，右侧展示下一步。运行日志从顶层导航降级为总览内模块与侧栏底部辅助入口。
 
 ---
 
@@ -298,7 +323,7 @@ ViewPageClient ─────┤
   ├─→ 点击 📎 → 本地文件上传 → 显示在 Uploaded Files
   │
   ├─→ 提交消息
-  │     ├─ POST /api/ask (streaming)
+  │     ├─ POST /api/agent/sessions/:sessionId/turns (streaming)
   │     ├─ 状态流：connecting → thinking → streaming
   │     ├─ 实时更新最后一条 assistant 消息
   │     └─ 完成 / 错误 / 中止
@@ -442,7 +467,13 @@ Step 8: Review   →  总览确认 → 完成
 
 ## 7. 登录页 (Login)
 
-极简布局，居中表单。
+极简布局，居中表单。页面同时承载首次登录和会话过期后的重新认证：
+
+- `redirect` 只接受同源相对路径，并保留 query string。
+- `reason=expired` 或浏览器曾成功登录过时，文案使用“重新输入密码 / 会话已锁定”语境。
+- “忘记密码”不做云端找回；说明这是本地 `webPassword`，只能在运行 MindOS 的机器上通过 `mindos auth reset-web-password` 重置。
+- 重置 `webPassword` 不应踢掉已有浏览器会话；session JWT 使用独立的 `webSessionSecret` 签名，密码只用于新登录校验。
+- 兼容旧 cookie：老配置首次补 `webSessionSecret` 时使用当前 `webPassword` 作为 legacy secret，避免升级或重置时让既有会话失效。
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -450,8 +481,10 @@ Step 8: Review   →  总览确认 → 完成
 │           MindOS Logo                        │
 │                                              │
 │      ┌────────────────────────┐              │
-│      │ Password [••••••]      │              │
-│      │ [Login]                │              │
+│      │ Session locked          │              │
+│      │ Password [••••••] [show]│              │
+│      │ [Continue]              │              │
+│      │ Forgot password?        │              │
 │      └────────────────────────┘              │
 │                                              │
 └──────────────────────────────────────────────┘
@@ -465,7 +498,7 @@ Step 8: Review   →  总览确认 → 完成
 
 | 属性 | 值 |
 |------|-----|
-| 宽度 | 280px (fixed) |
+| 宽度 | 默认约 280px，可拖拽；来源见 `packages/web/lib/config/panel-sizes.ts` |
 | 背景 | `bg-card` |
 | 边框 | `border-r border-border` |
 | z-index | 30 |
@@ -561,7 +594,7 @@ MindOS 通过 Renderer Registry 支持可插拔的内容渲染器。
 |------|---------|---------|-----|----------|---------------|
 | <768px | 隐藏，Drawer 模式 | 显示 Header | 隐藏 | 底部 sheet 92vh | 水平滚动 |
 | ≥768px | 固定左侧 280px | 不显示 | 隐藏 | 居中 modal 75vh | 左侧竖排 |
-| ≥1280px | 固定左侧 280px | 不显示 | 固定右侧 220px | 居中 modal 75vh | 左侧竖排 |
+| ≥1280px | 固定左侧 280px | 不显示 | 固定右侧，宽度由 `--toc-width`/TOC 状态驱动 | 居中 modal 75vh | 左侧竖排 |
 
 ---
 

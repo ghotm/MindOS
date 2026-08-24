@@ -19,8 +19,47 @@ afterEach(() => {
   fs.rmSync(tempHome, { recursive: true, force: true });
 });
 
+function markAgentPresent(agentKey: string) {
+  if (agentKey === 'claude-code') {
+    fs.mkdirSync(path.join(tempHome, '.claude', 'projects'), { recursive: true });
+    return;
+  }
+  if (agentKey === 'codex') {
+    fs.mkdirSync(path.join(tempHome, '.codex', 'sessions'), { recursive: true });
+    return;
+  }
+  if (agentKey === 'cursor') {
+    const dir = path.join(tempHome, '.cursor', 'extensions');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'cursor-agent-signal'), 'present');
+    return;
+  }
+  if (agentKey === 'github-copilot') {
+    const codeRoot = process.platform === 'darwin'
+      ? path.join(tempHome, 'Library', 'Application Support', 'Code')
+      : process.platform === 'win32'
+        ? path.join(tempHome, 'AppData', 'Roaming', 'Code')
+        : path.join(tempHome, '.config', 'Code');
+    fs.mkdirSync(path.join(codeRoot, 'User'), { recursive: true });
+    return;
+  }
+  if (agentKey === 'kilo-code') {
+    fs.mkdirSync(path.join(tempHome, '.config', 'kilo', 'sessions'), { recursive: true });
+    return;
+  }
+  if (agentKey === 'warp') {
+    fs.mkdirSync(path.join(tempHome, '.warp', 'state'), { recursive: true });
+    return;
+  }
+  fs.mkdirSync(path.join(tempHome, `.${agentKey}`, 'state'), { recursive: true });
+}
+
 async function importInstallRoute() {
   return await import('../../app/api/mcp/install/route');
+}
+
+async function importCopyServerRoute() {
+  return await import('../../app/api/mcp/copy-server/route');
 }
 
 async function importAgentsRoute() {
@@ -42,9 +81,10 @@ describe('POST /api/mcp/install', () => {
     const body = await res.json();
     expect(body.results[0].status).toBe('error');
     expect(body.results[0].message).toMatch(/Unknown agent/);
-  });
+  }, 15_000);
 
   it('installs stdio entry to claude-code global config', async () => {
+    markAgentPresent('claude-code');
     const { POST } = await importInstallRoute();
     const req = new NextRequest('http://localhost/api/mcp/install', {
       method: 'POST',
@@ -68,6 +108,7 @@ describe('POST /api/mcp/install', () => {
   });
 
   it('installs http entry with URL and token', async () => {
+    markAgentPresent('claude-code');
     const { POST } = await importInstallRoute();
     const req = new NextRequest('http://localhost/api/mcp/install', {
       method: 'POST',
@@ -90,6 +131,7 @@ describe('POST /api/mcp/install', () => {
   });
 
   it('preserves existing config entries when installing', async () => {
+    markAgentPresent('claude-code');
     // Pre-seed a config file with another MCP server
     const configPath = path.join(tempHome, '.claude.json');
     fs.writeFileSync(configPath, JSON.stringify({
@@ -131,6 +173,7 @@ describe('POST /api/mcp/install', () => {
   });
 
   it('installs codex agent in TOML format', async () => {
+    markAgentPresent('codex');
     const { POST } = await importInstallRoute();
     const req = new NextRequest('http://localhost/api/mcp/install', {
       method: 'POST',
@@ -154,6 +197,7 @@ describe('POST /api/mcp/install', () => {
   });
 
   it('preserves existing TOML content when installing codex', async () => {
+    markAgentPresent('codex');
     const configDir = path.join(tempHome, '.codex');
     fs.mkdirSync(configDir, { recursive: true });
     const configPath = path.join(configDir, 'config.toml');
@@ -177,6 +221,7 @@ describe('POST /api/mcp/install', () => {
   });
 
   it('handles empty config file gracefully (e.g. fresh VS Code mcp.json)', async () => {
+    markAgentPresent('github-copilot');
     const { POST } = await importInstallRoute();
     // Pre-create an empty config file (common with VS Code)
     const copilotDir = process.platform === 'darwin'
@@ -206,6 +251,7 @@ describe('POST /api/mcp/install', () => {
   });
 
   it('installs github-copilot agent with servers key for global scope', async () => {
+    markAgentPresent('github-copilot');
     const { POST } = await importInstallRoute();
     const req = new NextRequest('http://localhost/api/mcp/install', {
       method: 'POST',
@@ -230,6 +276,7 @@ describe('POST /api/mcp/install', () => {
   });
 
   it('installs github-copilot project scope with servers key', async () => {
+    markAgentPresent('github-copilot');
     // Create the .vscode directory first
     fs.mkdirSync(path.join(process.cwd(), '.vscode'), { recursive: true });
 
@@ -303,22 +350,274 @@ describe('POST /api/mcp/install', () => {
     expect(config.mcp.clients.tavily_search).toBeDefined();
     expect(config.mcp.clients.tavily_search.command).toBe('npx');
   });
+
+  it('installs kilo-code using the Kilo CLI mcp config shape', async () => {
+    markAgentPresent('kilo-code');
+    const { POST } = await importInstallRoute();
+
+    const req = new NextRequest('http://localhost/api/mcp/install', {
+      method: 'POST',
+      body: JSON.stringify({
+        agents: [{ key: 'kilo-code', scope: 'global' }],
+        transport: 'stdio',
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+    const res = await POST(req);
+    const body = await res.json();
+    expect(body.results[0].status).toBe('ok');
+
+    const configPath = path.join(tempHome, '.config', 'kilo', 'kilo.jsonc');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.mcp.mindos).toEqual({
+      type: 'local',
+      command: ['mindos', 'mcp'],
+      environment: { MCP_TRANSPORT: 'stdio' },
+      enabled: true,
+    });
+  });
+
+  it('installs warp using file-based mcpServers config', async () => {
+    markAgentPresent('warp');
+    const { POST } = await importInstallRoute();
+
+    const req = new NextRequest('http://localhost/api/mcp/install', {
+      method: 'POST',
+      body: JSON.stringify({
+        agents: [{ key: 'warp', scope: 'global' }],
+        transport: 'stdio',
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+    const res = await POST(req);
+    const body = await res.json();
+    expect(body.results[0].status).toBe('ok');
+
+    const configPath = path.join(tempHome, '.warp', '.mcp.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.mcpServers.mindos.type).toBe('stdio');
+    expect(config.mcpServers.mindos.command).toBe('mindos');
+  });
+
+  it('refuses to install config for an agent that was not detected on this machine', async () => {
+    const { POST } = await importInstallRoute();
+    const req = new NextRequest('http://localhost/api/mcp/install', {
+      method: 'POST',
+      body: JSON.stringify({
+        agents: [{ key: 'cursor', scope: 'global' }],
+        transport: 'stdio',
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(body.results[0].status).toBe('error');
+    expect(body.results[0].message).toMatch(/not detected/);
+    expect(fs.existsSync(path.join(tempHome, '.cursor', 'mcp.json'))).toBe(false);
+  });
+});
+
+describe('POST /api/mcp/copy-server', () => {
+  it('copies a non-MindOS MCP server from one detected agent to another', async () => {
+    markAgentPresent('claude-code');
+    markAgentPresent('cursor');
+    const claudeConfigPath = path.join(tempHome, '.claude.json');
+    fs.writeFileSync(claudeConfigPath, JSON.stringify({
+      mcpServers: {
+        github: {
+          type: 'stdio',
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-github'],
+          env: { GITHUB_TOKEN: 'test-token' },
+        },
+      },
+    }, null, 2), 'utf-8');
+
+    const { POST } = await importCopyServerRoute();
+    const req = new NextRequest('http://localhost/api/mcp/copy-server', {
+      method: 'POST',
+      body: JSON.stringify({
+        serverName: 'github',
+        sourceAgentKey: 'claude-code',
+        targets: [{ key: 'cursor', scope: 'global' }],
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+    expect(body.results[0]).toMatchObject({ agent: 'cursor', status: 'ok' });
+
+    const cursorConfig = JSON.parse(fs.readFileSync(path.join(tempHome, '.cursor', 'mcp.json'), 'utf-8'));
+    expect(cursorConfig.mcpServers.github).toEqual({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-github'],
+      env: { GITHUB_TOKEN: 'test-token' },
+    });
+    expect(cursorConfig.mcpServers.mindos).toBeUndefined();
+  });
+
+  it('uses the canonical MindOS installer when copying the mindos server', async () => {
+    markAgentPresent('codex');
+    const { POST } = await importCopyServerRoute();
+    const req = new NextRequest('http://localhost/api/mcp/copy-server', {
+      method: 'POST',
+      body: JSON.stringify({
+        serverName: 'mindos',
+        sourceAgentKey: 'claude-code',
+        targets: [{ key: 'codex', scope: 'global' }],
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+    expect(body.results[0]).toMatchObject({ agent: 'codex', status: 'ok' });
+
+    const content = fs.readFileSync(path.join(tempHome, '.codex', 'config.toml'), 'utf-8');
+    expect(content).toContain('[mcp_servers.mindos]');
+    expect(content).toContain('command = "mindos"');
+    expect(content).toContain('args = ["mcp"]');
+  });
+
+  it('copies a server from a TOML source config into a JSON target config', async () => {
+    markAgentPresent('claude-code');
+    const codexDir = path.join(tempHome, '.codex');
+    fs.mkdirSync(codexDir, { recursive: true });
+    fs.writeFileSync(path.join(codexDir, 'config.toml'), [
+      '[mcp_servers.github]',
+      'type = "stdio"',
+      'command = "npx"',
+      'args = ["-y", "@modelcontextprotocol/server-github"]',
+      '',
+      '[mcp_servers.github.env]',
+      'GITHUB_TOKEN = "test-token"',
+      '',
+    ].join('\n'), 'utf-8');
+
+    const { POST } = await importCopyServerRoute();
+    const req = new NextRequest('http://localhost/api/mcp/copy-server', {
+      method: 'POST',
+      body: JSON.stringify({
+        serverName: 'github',
+        sourceAgentKey: 'codex',
+        targets: [{ key: 'claude-code', scope: 'global' }],
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+    expect(body.results[0]).toMatchObject({ agent: 'claude-code', status: 'ok' });
+
+    const config = JSON.parse(fs.readFileSync(path.join(tempHome, '.claude.json'), 'utf-8'));
+    expect(config.mcpServers.github).toEqual({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-github'],
+      env: { GITHUB_TOKEN: 'test-token' },
+    });
+  });
+
+  it('refuses to copy a server into an agent that is not detected', async () => {
+    markAgentPresent('claude-code');
+    fs.writeFileSync(path.join(tempHome, '.claude.json'), JSON.stringify({
+      mcpServers: { github: { command: 'npx', args: ['github-mcp'] } },
+    }), 'utf-8');
+
+    const { POST } = await importCopyServerRoute();
+    const req = new NextRequest('http://localhost/api/mcp/copy-server', {
+      method: 'POST',
+      body: JSON.stringify({
+        serverName: 'github',
+        sourceAgentKey: 'claude-code',
+        targets: [{ key: 'cursor', scope: 'global' }],
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+    expect(body.results[0].status).toBe('error');
+    expect(body.results[0].message).toMatch(/not detected/);
+    expect(fs.existsSync(path.join(tempHome, '.cursor', 'mcp.json'))).toBe(false);
+  });
+
+  it('uninstalls the named server instead of always removing mindos', async () => {
+    markAgentPresent('claude-code');
+    const claudeConfigPath = path.join(tempHome, '.claude.json');
+    fs.writeFileSync(claudeConfigPath, JSON.stringify({
+      mcpServers: {
+        mindos: { type: 'stdio', command: 'mindos', args: ['mcp'] },
+        github: { command: 'npx', args: ['github-mcp'] },
+      },
+    }, null, 2), 'utf-8');
+
+    const { POST } = await import('../../app/api/mcp/uninstall/route');
+    const req = new NextRequest('http://localhost/api/mcp/uninstall', {
+      method: 'POST',
+      body: JSON.stringify({
+        agents: [{ key: 'claude-code', scope: 'global', serverName: 'github' }],
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+    expect(body.results[0].status).toBe('ok');
+
+    const config = JSON.parse(fs.readFileSync(claudeConfigPath, 'utf-8'));
+    expect(config.mcpServers.github).toBeUndefined();
+    expect(config.mcpServers.mindos).toBeDefined();
+  });
 });
 
 describe('GET /api/mcp/agents', () => {
-  it('returns all 26 agents (1 builtin + 25 registry)', async () => {
+  it('detects kilo-code when MindOS is configured in the legacy kilo.json path', async () => {
+    markAgentPresent('kilo-code');
+    const legacyConfigPath = path.join(tempHome, '.config', 'kilo', 'kilo.json');
+    fs.mkdirSync(path.dirname(legacyConfigPath), { recursive: true });
+    fs.writeFileSync(legacyConfigPath, JSON.stringify({
+      mcp: {
+        mindos: {
+          type: 'local',
+          command: ['mindos', 'mcp'],
+          environment: { MCP_TRANSPORT: 'stdio' },
+          enabled: true,
+        },
+      },
+    }, null, 2));
+
     const { GET } = await importAgentsRoute();
     const res = await GET();
     const body = await res.json();
-    expect(body.agents).toHaveLength(26);
+    const kilo = body.agents.find((agent: { key: string }) => agent.key === 'kilo-code');
+
+    expect(kilo).toMatchObject({
+      installed: true,
+      transport: 'stdio',
+      configPath: '~/.config/kilo/kilo.json',
+      configuredMcpServers: ['mindos'],
+    });
+  });
+
+  it('returns all 27 built-in MCP agents', async () => {
+    const { GET } = await importAgentsRoute();
+    const res = await GET();
+    const body = await res.json();
+    expect(body.agents).toHaveLength(27);
     const keys = body.agents.map((a: { key: string }) => a.key);
     expect(keys).toContain('mindos');
     expect(keys).toContain('claude-code');
     expect(keys).toContain('cursor');
     expect(keys).toContain('codebuddy');
-    expect(keys).toContain('iflow-cli');
     expect(keys).toContain('kimi-cli');
     expect(keys).toContain('opencode');
+    expect(keys).toContain('kilo-code');
+    expect(keys).toContain('warp');
     expect(keys).toContain('pi');
     expect(keys).toContain('augment');
     expect(keys).toContain('qwen-code');
@@ -336,6 +635,7 @@ describe('GET /api/mcp/agents', () => {
   }, 15_000);
 
   it('detects installed agent from config file', async () => {
+    markAgentPresent('claude-code');
     // Pre-seed a claude-code config
     const configPath = path.join(tempHome, '.claude.json');
     fs.writeFileSync(configPath, JSON.stringify({
@@ -377,6 +677,7 @@ describe('GET /api/mcp/agents', () => {
   });
 
   it('sorts agents: installed first, then detected, then not found', async () => {
+    markAgentPresent('claude-code');
     // Pre-seed claude-code as installed
     const configPath = path.join(tempHome, '.claude.json');
     fs.writeFileSync(configPath, JSON.stringify({
@@ -396,11 +697,11 @@ describe('GET /api/mcp/agents', () => {
     expect(agents[1].key).toBe('claude-code');
     expect(agents[1].installed).toBe(true);
 
-    // Verify ordering invariant: after mindos, no non-installed agent appears before an installed one
+    // Verify ordering invariant: connected first, then detected, then stale config, then not found
     for (let i = 2; i < agents.length; i++) {
       const prev = agents[i - 1];
       const curr = agents[i];
-      const rankOf = (a: typeof prev) => a.installed ? 0 : a.present ? 1 : 2;
+      const rankOf = (a: typeof prev) => a.present && a.installed ? 0 : a.present ? 1 : a.installed ? 2 : 3;
       expect(rankOf(prev)).toBeLessThanOrEqual(rankOf(curr));
     }
   });

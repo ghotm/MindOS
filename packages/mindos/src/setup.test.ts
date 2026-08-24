@@ -26,7 +26,7 @@ describe('MindOS setup domain operations', () => {
     expect(buildMindosSetupState(services)).toMatchObject({
       status: 200,
       body: {
-        mindRoot: '/home/tester/MindOS/mind',
+        mindRoot: '~/MindOS/mind',
         homeDir: '/home/tester',
         platform: 'linux',
         port: 3456,
@@ -35,6 +35,46 @@ describe('MindOS setup domain operations', () => {
         providerConfigs: [{ id: 'p_openai', apiKeyMask: 'sk-tes***' }],
       },
     });
+  });
+
+  it('resolves platform-aware default Mind roots under Documents when available', () => {
+    const baseSettings: MindosSetupSettings = {
+      ai: { activeProvider: '', providers: [] },
+      mindRoot: '',
+    };
+
+    const mac = {
+      ...makeServices(baseSettings),
+      homeDir: () => '/Users/tester',
+      platform: () => 'darwin',
+      pathSep: () => '/',
+      existsSync: () => false,
+    };
+    expect(buildMindosSetupState(mac).body.mindRoot).toBe('~/Documents/MindOS/mind');
+
+    const windows = {
+      ...makeServices(baseSettings),
+      homeDir: () => 'C:\\Users\\Tester',
+      platform: () => 'win32',
+      pathSep: () => '\\',
+      existsSync: () => false,
+    };
+    expect(buildMindosSetupState(windows).body.mindRoot).toBe('~\\Documents\\MindOS\\mind');
+
+    const linuxDesktop = {
+      ...makeServices(baseSettings),
+      platform: () => 'linux',
+      env: () => ({ XDG_DOCUMENTS_DIR: '$HOME/Docs' }),
+      existsSync: (target: string) => target === '/home/tester/Docs',
+    };
+    expect(buildMindosSetupState(linuxDesktop).body.mindRoot).toBe('~/Docs/MindOS/mind');
+
+    const linuxHeadless = {
+      ...makeServices(baseSettings),
+      platform: () => 'linux',
+      existsSync: () => false,
+    };
+    expect(buildMindosSetupState(linuxHeadless).body.mindRoot).toBe('~/MindOS/mind');
   });
 
   it('applies setup config with validation, template handling, provider merge, and restart detection', () => {
@@ -103,6 +143,148 @@ describe('MindOS setup domain operations', () => {
         providers: [{ id: 'p_openai', apiKey: 'sk-existing', model: 'gpt-5.5' }],
       },
     });
+  });
+
+  it('arms the walkthrough in guide state during first-time setup without requiring a welcome URL', () => {
+    const { services, state } = makeMutableServices({
+      ai: { activeProvider: '', providers: [] },
+      mindRoot: '',
+      setupPending: true,
+    });
+
+    expect(applyMindosSetupConfig({
+      mindRoot: '~/mind',
+      template: 'en',
+    }, services)).toMatchObject({
+      status: 200,
+      body: { ok: true, needsRestart: true },
+    });
+
+    expect(state.settings.guideState).toMatchObject({
+      active: true,
+      dismissed: false,
+      template: 'en',
+      walkthroughStep: 0,
+      walkthroughDismissed: false,
+    });
+  });
+
+  it('validates and applies selected initial Mind Spaces after the base template', () => {
+    const { services, templates, initialSpaces } = makeMutableServices({
+      ai: { activeProvider: '', providers: [] },
+      mindRoot: '',
+      setupPending: true,
+    });
+
+    const response = applyMindosSetupConfig({
+      mindRoot: '~/mind',
+      template: 'zh',
+      initialSpaces: ['product', 'social', 'product'],
+      initialSpaceLocale: 'zh',
+    }, services);
+
+    expect(response).toMatchObject({
+      status: 200,
+      body: {
+        ok: true,
+        installedInitialSpaces: [
+          { id: 'product', locale: 'zh', copied: ['产品/README.md'], skipped: [] },
+          { id: 'social', locale: 'zh', copied: ['社交/README.md'], skipped: [] },
+        ],
+      },
+    });
+    expect(templates).toEqual([{ template: 'zh', root: '/home/tester/mind' }]);
+    expect(initialSpaces).toEqual([{ ids: ['product', 'social'], root: '/home/tester/mind', locale: 'zh' }]);
+  });
+
+  it('accepts legacy Space Kit fields during transition', () => {
+    const { services, templates, initialSpaces } = makeMutableServices({
+      ai: { activeProvider: '', providers: [] },
+      mindRoot: '',
+      setupPending: true,
+    });
+
+    const response = applyMindosSetupConfig({
+      mindRoot: '~/mind',
+      template: 'en',
+      spaceKits: ['life', 'learning', 'life'],
+      spaceKitLocale: 'zh',
+    }, services);
+
+    expect(response).toMatchObject({
+      status: 200,
+      body: {
+        ok: true,
+        installedInitialSpaces: [
+          { id: 'life', locale: 'zh', copied: ['life/README.md'], skipped: [] },
+          { id: 'learning', locale: 'zh', copied: ['learning/README.md'], skipped: [] },
+        ],
+      },
+    });
+    expect(templates).toEqual([{ template: 'en', root: '/home/tester/mind' }]);
+    expect(initialSpaces).toEqual([{ ids: ['life', 'learning'], root: '/home/tester/mind', locale: 'zh' }]);
+  });
+
+  it('rejects invalid initial Mind Spaces before copying templates or spaces', () => {
+    const { services, templates, initialSpaces } = makeMutableServices({
+      ai: { activeProvider: '', providers: [] },
+      mindRoot: '',
+      setupPending: true,
+    });
+
+    expect(applyMindosSetupConfig({
+      mindRoot: '~/mind',
+      template: 'en',
+      initialSpaces: ['product', '../bad'],
+    }, services)).toMatchObject({
+      status: 400,
+      body: { error: 'Invalid initial space: ../bad' },
+    });
+    expect(templates).toEqual([]);
+    expect(initialSpaces).toEqual([]);
+  });
+
+  it('keeps Web sessions stable when setup writes the Web UI password', () => {
+    const withExisting = makeMutableServices({
+      ai: { activeProvider: '', providers: [] },
+      mindRoot: '/home/tester/mind',
+      authToken: 'token',
+      webPassword: 'old-password',
+      webSessionSecret: 'stable-session-secret',
+    });
+
+    expect(applyMindosSetupConfig({
+      mindRoot: '~/mind',
+      webPassword: 'new-password',
+    }, withExisting.services)).toMatchObject({ status: 200 });
+    expect(withExisting.state.settings.webPassword).toBe('new-password');
+    expect(withExisting.state.settings.webSessionSecret).toBe('stable-session-secret');
+
+    const legacyWithoutSecret = makeMutableServices({
+      ai: { activeProvider: '', providers: [] },
+      mindRoot: '/home/tester/mind',
+      authToken: 'token',
+      webPassword: 'old-password',
+    });
+
+    expect(applyMindosSetupConfig({
+      mindRoot: '~/mind',
+      webPassword: 'new-password',
+    }, legacyWithoutSecret.services)).toMatchObject({ status: 200 });
+    expect(legacyWithoutSecret.state.settings.webSessionSecret).toBe('old-password');
+
+    const withoutExisting = makeMutableServices({
+      ai: { activeProvider: '', providers: [] },
+      mindRoot: '/home/tester/mind',
+      authToken: 'token',
+      webPassword: '',
+    });
+
+    expect(applyMindosSetupConfig({
+      mindRoot: '~/mind',
+      webPassword: 'new-password',
+    }, withoutExisting.services)).toMatchObject({ status: 200 });
+    expect(withoutExisting.state.settings.webSessionSecret).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
   it('patches guide state through a known-field whitelist', () => {
@@ -180,6 +362,7 @@ function makeMutableServices(initial: MindosSetupSettings) {
   const state = { settings: initial };
   const createdDirs: string[] = [];
   const templates: Array<{ template: string; root: string }> = [];
+  const initialSpaces: Array<{ ids: string[]; root: string; locale: string }> = [];
   const services: MindosSetupServices = {
     ...makeServices(state.settings),
     readSettings: () => state.settings,
@@ -191,6 +374,18 @@ function makeMutableServices(initial: MindosSetupSettings) {
       createdDirs.push(root);
       return { ok: true };
     },
+    applyInitialSpaces: (ids, root, locale) => {
+      initialSpaces.push({ ids, root, locale });
+      return {
+        ok: true,
+        installed: ids.map(id => ({
+          id,
+          locale,
+          copied: [`${id === 'product' ? '产品' : id === 'social' ? '社交' : id}/README.md`],
+          skipped: [],
+        })),
+      };
+    },
   };
-  return { services, state, createdDirs, templates };
+  return { services, state, createdDirs, templates, initialSpaces };
 }

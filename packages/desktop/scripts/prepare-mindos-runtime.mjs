@@ -14,8 +14,15 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, read
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { gunzipSync } from 'zlib';
-import { copyAppForBundledRuntime, materializeStandaloneAssets } from './prepare-mindos-bundle.mjs';
+import { createHash } from 'crypto';
+import {
+  RUNTIME_DEPENDENCY_SEEDS,
+  copyAppForBundledRuntime,
+  materializeStandaloneAssets,
+  pruneClaudeAgentSdkNativePackages,
+} from './prepare-mindos-bundle.mjs';
 import { writeRuntimeManifest } from '../../../scripts/runtime-manifest.mjs';
+import { isBundledNodeCurrent, writeNodeBundleMarker } from './node-bundle-marker.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const desktopRoot = path.join(__dirname, '..');
@@ -30,6 +37,15 @@ function fail(msg) {
   process.exit(1);
 }
 
+function formatSpawnFailure(result) {
+  const details = [
+    `status=${result.status ?? 'null'}`,
+    `signal=${result.signal ?? 'null'}`,
+  ];
+  if (result.error) details.push(`error=${result.error.message}`);
+  return ` (${details.join(', ')})`;
+}
+
 const appDir = path.join(source, 'packages', 'web');
 const appNext = path.join(appDir, '.next');
 const mindosDir = path.join(source, 'packages', 'mindos');
@@ -39,6 +55,15 @@ const rootPkg = path.join(source, 'package.json');
 const productPkg = path.join(source, 'packages', 'mindos', 'package.json');
 const targetNodePlatform = process.env.MINDOS_BUNDLE_NODE_PLATFORM || process.platform;
 const targetNodeArch = process.env.MINDOS_BUNDLE_NODE_ARCH || process.arch;
+const NODE_ZIP_EXTRACT_TIMEOUT_MS = 300000;
+const NODE_DOWNLOAD_SHA256 = {
+  'node-v22.16.0-darwin-arm64.tar.gz': '1d7f34ec4c03e12d8b33481e5c4560432d7dc31a0ef3ff5a4d9a8ada7cf6ecc9',
+  'node-v22.16.0-darwin-x64.tar.gz': '838d400f7e66c804e5d11e2ecb61d6e9e878611146baff69d6a2def3cc23f4ac',
+  'node-v22.16.0-linux-arm64.tar.gz': '1725602e9fb150eb8b8220a899085190e1c04d1a5f3862b01c3dc1dfce0157f9',
+  'node-v22.16.0-linux-x64.tar.gz': 'fb870226119d47378fa9c92c4535389c72dae14fcc7b47e6fdcc82c43de5a547',
+  'node-v22.16.0-win-arm64.zip': '31e885dcd06355f67b4be8cca86464270d83d0f5b8d4e3d4369c16ed22a5f4fa',
+  'node-v22.16.0-win-x64.zip': '21c2d9735c80b8f86dab19305aa6a9f6f59bbc808f68de3eef09d5832e3bfbbd',
+};
 
 if (!existsSync(rootPkg)) fail(`Not a MindOS repo root (no package.json): ${source}`);
 if (!existsSync(productPkg)) fail(`Missing packages/mindos/package.json under ${source}`);
@@ -49,6 +74,7 @@ try {
   materializeStandaloneAssets(appDir, {
     targetPlatform: targetNodePlatform,
     targetArch: targetNodeArch,
+    runtimeDependencySeeds: RUNTIME_DEPENDENCY_SEEDS,
     bundleLocalEmbeddingRuntime: process.env.MINDOS_BUNDLE_LOCAL_EMBEDDING_RUNTIME === '1',
   });
 } catch (e) {
@@ -127,7 +153,7 @@ const templatesFrom = path.join(source, 'templates');
 if (existsSync(templatesFrom) && statSync(templatesFrom).isDirectory()) {
   cpSync(templatesFrom, path.join(dest, 'templates'), { recursive: true });
 } else {
-  console.warn('[prepare-mindos-runtime] No templates/ in source — setup init will not find starter templates');
+  console.warn('[prepare-mindos-runtime] No templates/ in source — setup init will not find built-in templates');
 }
 
 const binFrom = path.join(source, 'packages', 'mindos', 'bin');
@@ -177,13 +203,15 @@ if (!process.env.MINDOS_SKIP_BUNDLE_NODE) {
   const nodeDest = path.join(dest, 'node');
   const tmpDir = path.join(desktopRoot, '.node-bundle-tmp');
 
-  // Check if already present (idempotent)
+  // Check if already present AND matching the requested target — a bare
+  // existsSync would happily reuse a wrong-platform/arch node dir
   const expectedBin = plat === 'win32'
     ? path.join(nodeDest, 'node.exe')
     : path.join(nodeDest, 'bin', 'node');
+  const bundleTarget = { platform: plat, arch: nodeArch, nodeVersion: NODE_VERSION };
 
-  if (existsSync(expectedBin)) {
-    console.log(`[prepare-mindos-runtime] Node.js already bundled at ${nodeDest}`);
+  if (isBundledNodeCurrent(nodeDest, expectedBin, bundleTarget)) {
+    console.log(`[prepare-mindos-runtime] Node.js already bundled at ${nodeDest} (${plat}-${nodeArch})`);
   } else {
     console.log(`[prepare-mindos-runtime] Downloading Node.js ${NODE_VERSION} (${plat}-${nodeArch})...`);
 
@@ -195,12 +223,23 @@ if (!process.env.MINDOS_SKIP_BUNDLE_NODE) {
 
     const tmpFile = path.join(tmpDir, `node.${nodeFormat}`);
 
-    // Download using curl — try official first, fall back to China mirror (npmmirror.com)
+    // Download using curl — try official first, fall back to China mirror (npmmirror.com).
+    // Both sources must match the pinned checksum from Node's official SHASUMS256.txt.
+    let downloaded = false;
     const curlResult = spawnSync('curl', ['-fsSL', '--connect-timeout', '15', '-o', tmpFile, nodeUrl], {
       stdio: 'inherit',
       timeout: 120000,
     });
-    if (curlResult.status !== 0) {
+    if (curlResult.status === 0) {
+      try {
+        verifyNodeArchiveSha256(tmpFile, nodeFile);
+        downloaded = true;
+      } catch (e) {
+        console.warn(`[prepare-mindos-runtime] Official Node.js checksum failed: ${e.message}`);
+        rmSync(tmpFile, { force: true });
+      }
+    }
+    if (!downloaded) {
       console.log(`[prepare-mindos-runtime] Official download failed, trying mirror: ${nodeMirrorUrl}`);
       const mirrorResult = spawnSync('curl', ['-fsSL', '-o', tmpFile, nodeMirrorUrl], {
         stdio: 'inherit',
@@ -209,6 +248,7 @@ if (!process.env.MINDOS_SKIP_BUNDLE_NODE) {
       if (mirrorResult.status !== 0) {
         fail(`Failed to download Node.js from both ${nodeUrl} and ${nodeMirrorUrl}`);
       }
+      verifyNodeArchiveSha256(tmpFile, nodeFile);
     }
 
     // Extract
@@ -223,8 +263,10 @@ if (!process.env.MINDOS_SKIP_BUNDLE_NODE) {
       const zipResult = spawnSync('powershell.exe', [
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
         `Expand-Archive -LiteralPath '${psTmpFile}' -DestinationPath '${psExtractDir}' -Force`,
-      ], { stdio: 'inherit', timeout: 60000 });
-      if (zipResult.status !== 0) fail('Failed to extract Node.js zip');
+      ], { stdio: 'inherit', timeout: NODE_ZIP_EXTRACT_TIMEOUT_MS });
+      if (zipResult.status !== 0) {
+        fail(`Failed to extract Node.js zip after ${NODE_ZIP_EXTRACT_TIMEOUT_MS}ms${formatSpawnFailure(zipResult)}`);
+      }
       // Move contents up (strip top-level folder)
       const entries = readdirSync(extractDir);
       const nodeFolder = entries.find(e => e.startsWith('node-'));
@@ -239,6 +281,7 @@ if (!process.env.MINDOS_SKIP_BUNDLE_NODE) {
     if (!existsSync(expectedBin)) {
       fail(`Node.js extraction succeeded but binary not found at ${expectedBin}`);
     }
+    writeNodeBundleMarker(nodeDest, bundleTarget);
 
     // Cleanup tmp
     rmSync(tmpDir, { recursive: true, force: true });
@@ -259,6 +302,15 @@ if (!process.env.MINDOS_SKIP_BUNDLE_NODE) {
   }
 } else {
   console.log('[prepare-mindos-runtime] MINDOS_SKIP_BUNDLE_NODE=1 — skipping Node.js bundle');
+}
+
+function verifyNodeArchiveSha256(filePath, fileName) {
+  const expected = NODE_DOWNLOAD_SHA256[fileName];
+  if (!expected) fail(`No pinned SHA-256 checksum for Node.js archive ${fileName}`);
+  const actual = createHash('sha256').update(readFileSync(filePath)).digest('hex');
+  if (actual !== expected) {
+    fail(`Node.js archive checksum mismatch for ${fileName}: expected ${expected}, got ${actual}`);
+  }
 }
 
 function extractTarGzSafe(tarPath, destDir, stripComponents = 0) {
@@ -397,9 +449,9 @@ function isZeroBlock(buffer) {
 
 // ── Remove symlinks ──
 // macOS codesign rejects bundles containing symlinks with invalid destinations.
-// Standalone node_modules may contain symlinks from fixTurbopackHashedExternals
-// or leftover from npm's hoisting. Remove them all — they're not needed at runtime
-// since webpack already bundles everything, and standalone traces all required files.
+// Standalone node_modules may contain symlinks left over from npm/pnpm hoisting.
+// (Turbopack hashed externals are materialized as real directory copies by
+// fixTurbopackHashedExternals, so nothing required at runtime is a symlink.)
 // Keep the bundled Node.js directory intact: official npm/npx launchers are
 // symlinks on POSIX platforms, and extractTarGzSafe already validates that tar
 // symlink targets stay inside the Node extraction root.
@@ -432,6 +484,10 @@ function removeSymlinks(dir) {
 const symlinkCount = removeSymlinks(dest) || 0;
 if (symlinkCount > 0) {
   console.log(`[prepare-mindos-runtime] Removed ${symlinkCount} symlinks from runtime bundle`);
+}
+const removedClaudeNativePackages = pruneClaudeAgentSdkNativePackages(dest);
+if (removedClaudeNativePackages > 0) {
+  console.log(`[prepare-mindos-runtime] Removed ${removedClaudeNativePackages} Claude Agent SDK native package(s) from runtime bundle`);
 }
 
 const productManifest = JSON.parse(readFileSync(productPkg, 'utf-8'));

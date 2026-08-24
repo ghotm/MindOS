@@ -33,6 +33,7 @@ import {
   writeBuildStamp,
   hasPrebuiltStandalone,
   hasPrebuiltStaticWeb,
+  hasDocumentExtractionRuntime,
 } from '../lib/build.js';
 import { assertPortFree } from '../lib/port.js';
 import { savePids, clearPids } from '../lib/pid.js';
@@ -41,6 +42,7 @@ import { printStartupInfo } from '../lib/startup.js';
 import { spawnMcp } from '../lib/mcp-spawn.js';
 import { EXIT } from '../lib/command.js';
 import { execInheritedFile } from '../lib/shell.js';
+import { startSyncDaemonBestEffort } from '../lib/sync-daemon.js';
 
 /** Local Next.js binary (avoids a mismatched global `next`). */
 const NEXT_CLI = resolve(WEB_APP_DIR, 'node_modules', 'next', 'dist', 'bin', 'next');
@@ -78,9 +80,28 @@ function runtimeJsExecutor() {
   return process.env.MINDOS_BINARY_EXECUTOR || process.execPath;
 }
 
+function hasWebSources() {
+  return existsSync(resolve(WEB_APP_DIR, 'package.json'));
+}
+
+let warnedDegradedExtraction = false;
+
 function useProductServer() {
   if (process.env.MINDOS_NEXT_STANDALONE === '1' && hasPrebuiltStandalone()) return false;
-  return process.env.MINDOS_PRODUCT_SERVER === '1' || hasPrebuiltStaticWeb();
+  if (process.env.MINDOS_PRODUCT_SERVER === '1') return true;
+  if (!hasPrebuiltStaticWeb()) return false;
+  if (hasDocumentExtractionRuntime()) return true;
+  // A packaged runtime ships no packages/web sources, so the source-build
+  // path can only crash (gen-renderer-index.js ENOENT, shipped in 1.1.7).
+  // Serve the product server with degraded PDF/DOCX extraction instead.
+  if (!hasWebSources()) {
+    if (!warnedDegradedExtraction) {
+      warnedDegradedExtraction = true;
+      console.warn(yellow('Document extraction runtime missing from this package; PDF/DOCX import is degraded.'));
+    }
+    return true;
+  }
+  return false;
 }
 
 export function resolveWebHost(config = {}, env = process.env) {
@@ -160,7 +181,7 @@ export const meta = {
   summary: 'Start MindOS services',
   usage: 'mindos start',
   flags: {
-    '--daemon': 'Run as background daemon',
+    '--daemon': 'Run as background daemon (macOS/Linux only)',
     '--verbose': 'Show detailed output',
     '--port <port>': 'Override web port',
   },
@@ -334,7 +355,7 @@ export const run = async (args, flags) => {
 
   const mindRoot = process.env.MIND_ROOT;
   if (mindRoot) {
-    startSyncDaemon(mindRoot).catch(() => {});
+    startSyncDaemonBestEffort(startSyncDaemon, mindRoot);
   }
 
   await printStartupInfo(webPort, mcpPort);
@@ -346,6 +367,15 @@ export const run = async (args, flags) => {
       port: Number(webPort),
       runtimeRoot: PACKAGE_ROOT,
       staticRoot: STATIC_WEB_ROOT,
+      syncDaemon: {
+        start: (root) => { startSyncDaemonBestEffort(startSyncDaemon, root); },
+        stop: () => { try { stopSyncDaemon(); } catch {} },
+        reconfigure: (root) => { startSyncDaemonBestEffort(startSyncDaemon, root, 'reconfigure'); },
+        restart: (root) => {
+          try { stopSyncDaemon(); } catch {}
+          startSyncDaemonBestEffort(startSyncDaemon, root, 'restart');
+        },
+      },
     });
     await productServer.listen();
     console.log(`${green('✔ Product Server')} ${dim(productServer.url)}`);
@@ -366,6 +396,7 @@ export const run = async (args, flags) => {
           NODE_ENV: 'production',
           HOSTNAME: webHost,
           PORT: webPort,
+          MINDOS_PROJECT_ROOT: PACKAGE_ROOT,
           NODE_PATH: [standaloneNodePath, process.env.NODE_PATH].filter(Boolean).join(pathSep),
         },
       });

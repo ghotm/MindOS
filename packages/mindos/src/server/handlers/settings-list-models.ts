@@ -14,7 +14,7 @@ export type SettingsListModelsServices = {
   findProvider?(providers: unknown[], id: string): { id?: string; protocol: string; apiKey?: string; baseUrl?: string } | undefined;
   effectiveAiConfig?(provider: string): { provider: string; apiKey?: string; baseUrl?: string };
   supportsListModels?(provider: string): boolean;
-  getRegistryModels?(provider: string): string[];
+  getRegistryModels?(provider: string): string[] | Promise<string[]>;
   getProviderApiType?(provider: string): string;
   getDefaultBaseUrl?(provider: string): string;
   buildEndpointCandidates?(baseUrl: string, path: string, apiType: string): string[];
@@ -54,10 +54,11 @@ export async function handleSettingsListModelsPost(
       const providers = Array.isArray(settings.ai?.providers) ? settings.ai.providers : [];
       const entry = services.findProvider?.(providers, provider);
       if (!entry) return json({ ok: false, error: 'Provider not found' }, { status: 404 });
+      const cfg = services.effectiveAiConfig?.(provider) ?? services.effectiveAiConfig?.(entry.protocol);
       return await listModels({
         provider: entry.protocol,
-        apiKey: apiKey || entry.apiKey || '',
-        baseUrl: baseUrl || entry.baseUrl || '',
+        apiKey: apiKey || entry.apiKey || cfg?.apiKey || '',
+        baseUrl: baseUrl || entry.baseUrl || cfg?.baseUrl || '',
         services,
       });
     }
@@ -67,7 +68,7 @@ export async function handleSettingsListModelsPost(
     }
 
     if (services.supportsListModels?.(provider) === false) {
-      return json({ ok: true, models: getRegistryModels(provider, services) });
+      return json({ ok: true, models: await getRegistryModels(provider, services) });
     }
 
     const cfg = services.effectiveAiConfig?.(provider) ?? { provider, apiKey: '', baseUrl: '' };
@@ -175,8 +176,8 @@ async function fetchCompatModels(
   throw new Error(`Failed to list models: ${lastError}; tried ${attempted.length} endpoint candidate(s)`);
 }
 
-function getRegistryModels(provider: string, services: SettingsListModelsServices): string[] {
-  return (services.getRegistryModels?.(provider) ?? []).filter(Boolean).sort();
+async function getRegistryModels(provider: string, services: SettingsListModelsServices): Promise<string[]> {
+  return (await services.getRegistryModels?.(provider) ?? []).filter(Boolean).sort();
 }
 
 async function defaultFetch(input: string, init: { headers: Record<string, string>; signal: AbortSignal }) {

@@ -1,39 +1,64 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Download, RefreshCw, CheckCircle2, AlertCircle, Loader2, ExternalLink, Circle, Monitor } from 'lucide-react';
+import { Download, RefreshCw, CheckCircle2, AlertCircle, Loader2, ExternalLink, Monitor } from 'lucide-react';
 import { apiFetch, ApiError } from '@/lib/api';
 import { useLocale } from '@/lib/stores/locale-store';
+import { SettingCard } from './Primitives';
 
 import {
-  getDesktopBridge, DesktopCoreCard, DesktopShellCard,
-  StageIcon, formatSize,
+  getDesktopBridge, ProductVersionCard, ShellUpdateBanner, ShellVersionRow, useShellUpdate,
+  StageIcon,
   type UpdateInfo, type UpdateState, type StageInfo, type UpdateStatus,
   CHANGELOG_URL, POLL_INTERVAL, POLL_TIMEOUT, UPDATE_STATE_KEY, STAGE_LABELS,
 } from './DesktopUpdateCards';
 
 /** Router: Desktop uses electron-updater IPC; browser/CLI uses npm API */
 export function UpdateTab() {
-  const [isDesktop, setIsDesktop] = useState(false);
+  const [surface, setSurface] = useState<'unknown' | 'desktop' | 'browser'>('unknown');
   const [isLocal, setIsLocal] = useState(true);
   useEffect(() => {
     const bridge = getDesktopBridge();
-    setIsDesktop(!!bridge);
+    setSurface(bridge ? 'desktop' : 'browser');
     if (bridge?.getAppInfo) {
       bridge.getAppInfo().then((info) => {
         if (info && 'mode' in info) setIsLocal((info as { mode?: string }).mode !== 'remote');
       }).catch(() => {});
     }
   }, []);
-  if (isDesktop) {
-    return (
-      <div className="space-y-6">
-        {isLocal && <DesktopCoreCard />}
-        <DesktopShellCard />
-      </div>
-    );
+  if (surface === 'unknown') {
+    return null;
+  }
+  if (surface === 'desktop') {
+    return <DesktopUpdatePanel isLocal={isLocal} />;
   }
   return <BrowserUpdateTab />;
+}
+
+/**
+ * One unified surface: the MindOS (Core) product version is the headline, the
+ * shell is demoted to a secondary row, and the only "loud" element is the
+ * banner that appears when the shell, the rare app-restart update, has one or
+ * needs user-visible recovery.
+ */
+function DesktopUpdatePanel({ isLocal }: { isLocal: boolean }) {
+  const { t } = useLocale();
+  const u = t.settings.update;
+  const shell = useShellUpdate();
+  const shellNeedsAttention = shell.available || shell.phase === 'ready' || shell.phase === 'error';
+
+  return (
+    <div className="space-y-4">
+      {shellNeedsAttention && <ShellUpdateBanner shell={shell} />}
+      {isLocal && <ProductVersionCard />}
+      <ShellVersionRow shell={shell} />
+      {isLocal && (
+        <p className="text-[11px] text-muted-foreground/60">
+          {u?.coreAutoHint ?? 'Core updates complete in the background - no app restart needed.'}
+        </p>
+      )}
+    </div>
+  );
 }
 
 /** Browser / CLI update: uses npm registry check + POST /api/update */
@@ -49,6 +74,7 @@ function BrowserUpdateTab() {
   const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const originalVersion = useRef<string>('');
+  const updateInFlightRef = useRef(false);
 
   const checkUpdate = useCallback(async () => {
     setState('checking');
@@ -83,6 +109,7 @@ function BrowserUpdateTab() {
   /** Mark update complete: clear badge, set state, schedule reload. */
   const completeUpdate = useCallback((data: UpdateInfo) => {
     cleanup();
+    updateInFlightRef.current = false;
     setInfo(data);
     setState('updated');
     localStorage.removeItem('mindos_update_latest');
@@ -94,6 +121,7 @@ function BrowserUpdateTab() {
 
   /** Start polling for update progress */
   const startPolling = useCallback(() => {
+    cleanup();
     pollRef.current = setInterval(async () => {
       try {
         const status = await apiFetch<UpdateStatus>('/api/update-status', { timeout: 5000 });
@@ -105,6 +133,7 @@ function BrowserUpdateTab() {
 
         if (status.stage === 'failed') {
           cleanup();
+          updateInFlightRef.current = false;
           localStorage.removeItem(UPDATE_STATE_KEY);
           setUpdateError(status.error || 'Update failed');
           setState('error');
@@ -137,6 +166,7 @@ function BrowserUpdateTab() {
 
     timeoutRef.current = setTimeout(() => {
       cleanup();
+      updateInFlightRef.current = false;
       localStorage.removeItem(UPDATE_STATE_KEY);
       setState('timeout');
     }, POLL_TIMEOUT);
@@ -171,6 +201,8 @@ function BrowserUpdateTab() {
   useEffect(() => cleanup, [cleanup]);
 
   const handleUpdate = useCallback(async () => {
+    if (updateInFlightRef.current || state === 'updating' || state === 'updated') return;
+    updateInFlightRef.current = true;
     setState('updating');
     setErrorMsg('');
     setUpdateError(null);
@@ -195,6 +227,7 @@ function BrowserUpdateTab() {
     } catch (err) {
       if (err instanceof ApiError) {
         localStorage.removeItem(UPDATE_STATE_KEY);
+        updateInFlightRef.current = false;
         setUpdateError(err.message || 'Update failed');
         setState('error');
         return;
@@ -203,7 +236,7 @@ function BrowserUpdateTab() {
     }
 
     startPolling();
-  }, [startPolling, info]);
+  }, [startPolling, info, state]);
 
   const handleRetry = useCallback(() => {
     setUpdateError(null);
@@ -217,13 +250,12 @@ function BrowserUpdateTab() {
   return (
     <div className="space-y-6">
       {/* Version Card */}
-      <div className="rounded-xl border border-border bg-card p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <span className="text-sm font-medium text-foreground">MindOS</span>
-          {info && (
-            <span className="text-xs font-mono text-muted-foreground">v{info.current}</span>
-          )}
-        </div>
+      <SettingCard
+        icon={<Monitor size={15} />}
+        title="MindOS"
+        actions={info ? <span className="text-xs font-mono text-muted-foreground">v{info.current}</span> : null}
+        bodyClassName="space-y-3"
+      >
 
         {state === 'checking' && (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -333,6 +365,7 @@ function BrowserUpdateTab() {
           {info?.hasUpdate && state !== 'updating' && state !== 'updated' && (
             <button
               onClick={handleUpdate}
+              disabled={updateInFlightRef.current}
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg font-medium text-[var(--amber-foreground)] bg-[var(--amber)] transition-colors"
             >
               <Download size={14} />
@@ -356,7 +389,7 @@ function BrowserUpdateTab() {
             {u?.hint ?? 'Updates are installed via npm. Equivalent to running'} <code className="font-mono bg-muted px-1 py-0.5 rounded">mindos update</code> {u?.inTerminal ?? 'in your terminal.'}
           </p>
         </div>
-      </div>
+      </SettingCard>
     </div>
   );
 }

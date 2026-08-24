@@ -10,6 +10,22 @@
 /** How an ACP agent is spawned */
 export type AcpTransportType = 'stdio' | 'npx' | 'uvx' | 'binary';
 
+/** ACP adapter connection surface declared by an adapter manifest. */
+export type AcpAdapterConnectionType = 'stdio' | 'cli' | 'http' | 'sse';
+
+/** Durable output kinds an ACP adapter can declare for MindOS artifact/readiness projections. */
+export type AcpAdapterOutputKind = 'text' | 'diff' | 'checkpoint' | 'artifact' | 'branch' | 'pr';
+
+/** Non-secret output contract metadata declared by an ACP adapter manifest or user config. */
+export interface AcpAdapterOutputCapabilities {
+  kinds: AcpAdapterOutputKind[];
+  fileChanges?: boolean;
+  artifacts?: boolean;
+  checkpoints?: boolean;
+  branches?: boolean;
+  pullRequests?: boolean;
+}
+
 /* ── ContentBlock (ACP prompt format) ─────────────────────────────────── */
 
 export type AcpContentBlock =
@@ -45,6 +61,12 @@ export interface AcpConfigOption {
   options: AcpConfigOptionEntry[];
 }
 
+export interface AcpAvailableCommand {
+  id: string;
+  name: string;
+  description?: string;
+}
+
 /* ── Auth ──────────────────────────────────────────────────────────────── */
 
 export interface AcpAuthMethod {
@@ -55,12 +77,37 @@ export interface AcpAuthMethod {
 
 /* ── Capabilities ─────────────────────────────────────────────────────── */
 
+export interface AcpPromptCapabilities {
+  audio?: boolean;
+  embeddedContext?: boolean;
+  image?: boolean;
+}
+
+export interface AcpMcpCapabilities {
+  stdio?: boolean;
+  http?: boolean;
+  sse?: boolean;
+  acp?: boolean;
+}
+
+export interface AcpSessionCapabilities {
+  list?: boolean;
+  delete?: boolean;
+  resume?: boolean;
+  fork?: boolean;
+  close?: boolean;
+}
+
+export function isAcpCapabilitySupported(value: unknown): boolean {
+  return value === true || (!!value && typeof value === 'object' && !Array.isArray(value));
+}
+
 /** What the agent declares it supports (from initialize response). */
 export interface AcpAgentCapabilities {
   loadSession?: boolean;
-  mcpCapabilities?: { http?: boolean; sse?: boolean };
-  promptCapabilities?: { audio?: boolean; embeddedContext?: boolean; image?: boolean };
-  sessionCapabilities?: { list?: boolean };
+  mcpCapabilities?: AcpMcpCapabilities;
+  promptCapabilities?: AcpPromptCapabilities;
+  sessionCapabilities?: AcpSessionCapabilities;
 }
 
 /** What MindOS declares as a client (sent in initialize request). */
@@ -88,16 +135,43 @@ export interface AcpSession {
   modes?: AcpMode[];
   /** Config options from session/new or session/load response */
   configOptions?: AcpConfigOption[];
+  /** Current mode observed from session/new, session/load, or session/update */
+  currentModeId?: string;
+  /** Slash-style commands observed from session/update */
+  availableCommands?: AcpAvailableCommand[];
+  /** Tool calls observed during prompt turns */
+  toolCalls?: AcpToolCallFull[];
+  /** Last session title/timestamp update observed from the agent */
+  sessionInfo?: { title?: string; updatedAt?: string };
+  /** Optional transcript/history fields when an ACP adapter exposes them. */
+  title?: string;
+  preview?: string;
+  messages?: unknown[];
+  turns?: unknown[];
+  messageCount?: number;
+  turnCount?: number;
+  /** Permission requests observed through the ACP client bridge */
+  permissionEvents?: AcpPermissionEvent[];
   /** Auth methods from initialize response */
   authMethods?: AcpAuthMethod[];
+  /** MCP servers inherited into this ACP session; secrets are intentionally not retained. */
+  mcpServers?: AcpSessionMcpServerSummary[];
 }
 
 /** Lightweight session info returned by session/list. */
 export interface AcpSessionInfo {
   sessionId: string;
   title?: string;
+  preview?: string;
   cwd?: string;
+  createdAt?: string;
   updatedAt?: string;
+  status?: string;
+  messages?: unknown[];
+  turns?: unknown[];
+  messageCount?: number;
+  turnCount?: number;
+  [key: string]: unknown;
 }
 
 /* ── Prompt ────────────────────────────────────────────────────────────── */
@@ -171,6 +245,8 @@ export type AcpUpdateType =
   | 'current_mode_update'
   | 'config_option_update'
   | 'session_info_update'
+  | 'permission_request'
+  | 'permission_resolved'
   // Legacy compat (mapped internally)
   | 'text'
   | 'tool_result'
@@ -196,6 +272,8 @@ export interface AcpSessionUpdate {
   configOptions?: AcpConfigOption[];
   /** Session info update */
   sessionInfo?: { title?: string; updatedAt?: string };
+  /** Permission request/resolution surfaced by the ACP client bridge */
+  permission?: AcpPermissionEvent;
   /** Error message */
   error?: string;
 }
@@ -203,6 +281,82 @@ export interface AcpSessionUpdate {
 /* ── Permission ───────────────────────────────────────────────────────── */
 
 export type AcpPermissionOutcome = 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
+
+export type AcpPermissionEventStatus = 'pending' | 'resolved';
+
+export interface AcpPermissionOption {
+  id: string;
+  label: string;
+  kind: AcpPermissionOutcome;
+}
+
+export interface AcpPermissionEvent {
+  requestId: string;
+  sessionId: string;
+  toolCallId: string;
+  toolName: string;
+  status: AcpPermissionEventStatus;
+  options: AcpPermissionOption[];
+  selectedOptionId?: string;
+  outcome?: AcpPermissionOutcome | 'cancelled';
+  requestedAt: string;
+  resolvedAt?: string;
+}
+
+export type AcpSessionSnapshotFactSource =
+  | 'declared'
+  | 'observed'
+  | 'inferred'
+  | 'unavailable';
+
+export interface AcpSessionControlSnapshot {
+  status: 'available' | 'unavailable';
+  source: AcpSessionSnapshotFactSource;
+  configId?: string;
+  currentValue?: string;
+  options: AcpConfigOptionEntry[];
+}
+
+export interface AcpSessionToolSummary {
+  total: number;
+  pending: number;
+  inProgress: number;
+  completed: number;
+  failed: number;
+}
+
+export interface AcpSessionSnapshot {
+  schemaVersion: 1;
+  sessionId: string;
+  agentId: string;
+  agentSessionId?: string;
+  state: AcpSessionState;
+  cwd?: string;
+  createdAt: string;
+  lastActivityAt: string;
+  agentCapabilities?: AcpAgentCapabilities;
+  authMethods: AcpAuthMethod[];
+  modes: AcpMode[];
+  currentModeId?: string;
+  configOptions: AcpConfigOption[];
+  controls: {
+    model: AcpSessionControlSnapshot;
+    mode: AcpSessionControlSnapshot;
+    thoughtLevel: AcpSessionControlSnapshot;
+  };
+  availableCommands: AcpAvailableCommand[];
+  toolCalls: AcpToolCallFull[];
+  toolSummary: AcpSessionToolSummary;
+  permissionEvents: AcpPermissionEvent[];
+  pendingPermissions: AcpPermissionEvent[];
+  sessionInfo?: { title?: string; updatedAt?: string };
+  mcpServers: AcpSessionMcpServerSummary[];
+}
+
+export interface AcpSessionMcpServerSummary {
+  name: string;
+  type: 'stdio' | 'http' | 'sse' | 'acp';
+}
 
 /* ── Registry ─────────────────────────────────────────────────────────── */
 

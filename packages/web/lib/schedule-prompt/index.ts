@@ -7,14 +7,26 @@
 
 import os from 'os';
 import path from 'path';
+import { mkdirSync, statSync, watch, type FSWatcher } from 'node:fs';
+import { createJiti } from 'jiti/static';
+import {
+  resolveBuiltinWebRuntimePackagePath,
+  resolveWebAppDirFromEntry,
+} from '../agent/builtin-extension-runtime';
 
 type ExtensionAPI = {
   registerTool(tool: unknown): void;
   on(event: string, handler: () => Promise<void> | void): void;
 };
 
+type SchedulePromptJobLike = {
+  id: string;
+  enabled: boolean;
+  mindos?: unknown;
+};
+
 type CronStorageLike = {
-  getAllJobs(): Array<{ id: string; enabled: boolean }>;
+  getAllJobs(): SchedulePromptJobLike[];
   removeJob(id: string): void;
   piDir?: string;
   storePath?: string;
@@ -37,13 +49,18 @@ type SchedulePromptModules = {
 async function loadSchedulePromptModules(): Promise<SchedulePromptModules> {
   // pi-schedule-prompt 0.1.2 ships TypeScript source only. Keep these imports
   // dynamic so app typecheck does not typecheck the dependency's internal TS.
-  const storageModuleName = 'pi-schedule-prompt/src/storage.ts';
-  const schedulerModuleName = 'pi-schedule-prompt/src/scheduler.ts';
-  const toolModuleName = 'pi-schedule-prompt/src/tool.ts';
+  const webAppDir = resolveWebAppDirFromEntry(import.meta.url);
+  const storageModulePath = resolveBuiltinWebRuntimePackagePath(webAppDir, 'pi-schedule-prompt', 'src', 'storage.ts');
+  const schedulerModulePath = resolveBuiltinWebRuntimePackagePath(webAppDir, 'pi-schedule-prompt', 'src', 'scheduler.ts');
+  const toolModulePath = resolveBuiltinWebRuntimePackagePath(webAppDir, 'pi-schedule-prompt', 'src', 'tool.ts');
+  const jiti = createJiti(toolModulePath, {
+    moduleCache: false,
+    tryNative: false,
+  });
   const [{ CronStorage }, { CronScheduler }, { createCronTool }] = await Promise.all([
-    import(storageModuleName),
-    import(schedulerModuleName),
-    import(toolModuleName),
+    jiti.import(storageModulePath) as Promise<{ CronStorage: SchedulePromptModules['CronStorage'] }>,
+    jiti.import(schedulerModulePath) as Promise<{ CronScheduler: SchedulePromptModules['CronScheduler'] }>,
+    jiti.import(toolModulePath) as Promise<{ createCronTool: SchedulePromptModules['createCronTool'] }>,
   ]);
   return { CronStorage, CronScheduler, createCronTool };
 }
@@ -58,10 +75,23 @@ function createMindOSStorage(CronStorage: SchedulePromptModules['CronStorage']):
   return storage;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isMindosStudioAutomationJob(job: SchedulePromptJobLike): boolean {
+  const metadata = isRecord(job.mindos) ? job.mindos : null;
+  return metadata?.schemaVersion === 1 && metadata.source === 'mindos-studio-automation';
+}
+
 export default async function mindosSchedulePrompt(pi: ExtensionAPI) {
   const { CronStorage, CronScheduler, createCronTool } = await loadSchedulePromptModules();
   let storage: CronStorageLike;
   let scheduler: CronSchedulerLike;
+  let storeWatcher: FSWatcher | null = null;
+  let storePollTimer: ReturnType<typeof setInterval> | null = null;
+  let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastStoreMtimeMs: number | null = null;
 
   // Register the tool once with getter functions
   const tool = createCronTool(
@@ -72,19 +102,87 @@ export default async function mindosSchedulePrompt(pi: ExtensionAPI) {
 
   // --- Session initialization ---
 
-  const initializeSession = () => {
-    storage = createMindOSStorage(CronStorage);
+  const stopStoreWatcher = () => {
+    if (reloadTimer) {
+      clearTimeout(reloadTimer);
+      reloadTimer = null;
+    }
+    if (storePollTimer) {
+      clearInterval(storePollTimer);
+      storePollTimer = null;
+    }
+    if (storeWatcher) {
+      storeWatcher.close();
+      storeWatcher = null;
+    }
+    lastStoreMtimeMs = null;
+  };
+
+  const reloadSchedulerFromStore = () => {
+    if (!storage || !scheduler) return;
+    scheduler.stop();
     scheduler = new CronScheduler(storage, pi);
     scheduler.start();
   };
 
+  const scheduleStoreReload = () => {
+    if (reloadTimer) clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(() => {
+      reloadTimer = null;
+      reloadSchedulerFromStore();
+    }, 250);
+  };
+
+  const watchScheduleStore = () => {
+    stopStoreWatcher();
+    const storePath = storage.storePath ?? path.join(os.homedir(), '.mindos', 'schedule-prompts.json');
+    const storeDir = path.dirname(storePath);
+    const readStoreMtimeMs = () => {
+      try {
+        return statSync(storePath).mtimeMs;
+      } catch {
+        return null;
+      }
+    };
+    const reloadIfStoreChanged = () => {
+      const nextMtimeMs = readStoreMtimeMs();
+      if (nextMtimeMs === lastStoreMtimeMs) return;
+      lastStoreMtimeMs = nextMtimeMs;
+      scheduleStoreReload();
+    };
+    try {
+      mkdirSync(storeDir, { recursive: true });
+      lastStoreMtimeMs = readStoreMtimeMs();
+      storeWatcher = watch(storeDir, (eventType, filename) => {
+        if (eventType !== 'change' && eventType !== 'rename') return;
+        const changed = filename ? String(filename) : undefined;
+        if (changed && changed !== path.basename(storePath)) return;
+        reloadIfStoreChanged();
+      });
+      storePollTimer = setInterval(reloadIfStoreChanged, 1_000);
+      storeWatcher.on('error', () => {
+        stopStoreWatcher();
+      });
+    } catch {
+      stopStoreWatcher();
+    }
+  };
+
+  const initializeSession = () => {
+    storage = createMindOSStorage(CronStorage);
+    scheduler = new CronScheduler(storage, pi);
+    scheduler.start();
+    watchScheduleStore();
+  };
+
   const cleanupSession = () => {
+    stopStoreWatcher();
     if (scheduler) {
       scheduler.stop();
     }
     if (storage) {
       const jobs = storage.getAllJobs();
-      const disabledJobs = jobs.filter((j) => !j.enabled);
+      const disabledJobs = jobs.filter((j) => !j.enabled && !isMindosStudioAutomationJob(j));
       for (const job of disabledJobs) {
         storage.removeJob(job.id);
       }

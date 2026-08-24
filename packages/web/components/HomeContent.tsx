@@ -1,14 +1,15 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
 import { useLocale } from '@/lib/stores/locale-store';
 import { FolderSync, PenLine, BarChart3, Sparkles, ArrowUpRight } from 'lucide-react';
 import OnboardingView from './OnboardingView';
 import Logo from './Logo';
 import GuideCard from './GuideCard';
-import AskContent from '@/components/ask/AskContent';
-import type { SpaceInfo } from '@/app/page';
+import ChatContent from '@/components/chat/ChatContent';
+import type { SpaceInfo } from '@/lib/space-records';
+import { useSmoothRouterPush } from '@/hooks/useSmoothRouterPush';
+import { encodePath } from '@/lib/utils';
 
 interface RecentFile {
   path: string;
@@ -23,9 +24,10 @@ const TAB_ICONS = [FolderSync, PenLine, BarChart3, Sparkles];
 
 export default function HomeContent({ recent, existingFiles, spaces }: { recent: RecentFile[]; existingFiles?: string[]; spaces?: SpaceInfo[] }) {
   const { t } = useLocale();
-  const router = useRouter();
+  const smoothPush = useSmoothRouterPush();
   const [activeTab, setActiveTab] = useState(0);
   const [maximized, setMaximized] = useState(false);
+  const hasKnowledge = recent.length > 0 || (existingFiles?.length ?? 0) > 0 || (spaces?.length ?? 0) > 0;
 
   const toggleMaximize = useCallback(() => setMaximized(v => !v), []);
 
@@ -36,13 +38,14 @@ export default function HomeContent({ recent, existingFiles, spaces }: { recent:
 
   // Navigate to editor with right-side Ask panel open
   const handleDockToPanel = useCallback(() => {
-    const target = recent.length > 0 ? `/view/${recent[0].path}` : '/';
+    const firstPath = recent[0]?.path ?? existingFiles?.[0];
+    const target = firstPath ? `/view/${encodePath(firstPath)}` : '/';
     // Signal the already-mounted SidebarLayout to open the Ask panel
     window.dispatchEvent(new CustomEvent('mindos:open-ask-panel'));
-    router.push(target);
-  }, [recent, router]);
+    smoothPush(target);
+  }, [existingFiles, recent, smoothPush]);
 
-  if (recent.length === 0) {
+  if (!hasKnowledge) {
     return <OnboardingView />;
   }
 
@@ -52,11 +55,11 @@ export default function HomeContent({ recent, existingFiles, spaces }: { recent:
   const current = categories[activeTab];
 
   /*
-   * Single render tree — AskContent is always mounted in the same position.
+   * Single render tree — ChatContent is always mounted in the same position.
    * Normal vs fullscreen is purely a CSS layout change, so chat state is preserved.
    */
   return (
-    <div className="flex flex-col h-[100dvh]">
+    <div className="flex flex-col h-[calc(100dvh-var(--app-titlebar-h))]">
 
       {/* ── Landing chrome: hidden when maximized ── */}
       {!maximized && (
@@ -64,7 +67,7 @@ export default function HomeContent({ recent, existingFiles, spaces }: { recent:
           {/* Guide Card */}
           <div className="flex-shrink-0 px-4 md:px-6 pt-4 pb-6">
             <div className="max-w-4xl mx-auto">
-              <GuideCard />
+              <GuideCard hasExistingFiles={hasKnowledge} />
             </div>
           </div>
 
@@ -102,7 +105,7 @@ export default function HomeContent({ recent, existingFiles, spaces }: { recent:
             data-walkthrough="ask-button"
             className={maximized ? 'flex-1 min-h-0 flex flex-col overflow-hidden' : 'rounded-xl border border-border/70 shadow-sm overflow-hidden flex flex-col max-h-[50vh]'}
           >
-            <AskContent
+            <ChatContent
               visible={true}
               variant="home"
               maximized={maximized}
@@ -123,7 +126,8 @@ export default function HomeContent({ recent, existingFiles, spaces }: { recent:
               <div className="w-full max-w-4xl">
 
                 {/* Pill Tabs */}
-                <div className="flex items-center justify-center gap-1.5 mb-5" role="tablist">
+                <div className="-mx-1 mb-5 overflow-x-auto px-1 pb-1" role="tablist" aria-label={t.ask.title}>
+                  <div className="flex w-max min-w-full items-center justify-start gap-1.5 sm:justify-center">
                   {categories.map((cat, i) => {
                     const Icon = TAB_ICONS[i % TAB_ICONS.length];
                     const isActive = i === activeTab;
@@ -134,10 +138,11 @@ export default function HomeContent({ recent, existingFiles, spaces }: { recent:
                         role="tab"
                         aria-selected={isActive}
                         onClick={() => setActiveTab(i)}
-                        className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-full transition-all duration-150 ${
+                        data-hit-active={isActive ? 'true' : undefined}
+                        className={`hit-target-box flex items-center gap-1.5 px-4 py-2 text-xs font-medium transition-all duration-150 [--hit-target-radius:9999px] [--hit-target-active-bg:color-mix(in_srgb,var(--amber)_12%,transparent)] [--hit-target-hover-bg:color-mix(in_srgb,var(--muted)_40%,transparent)] ${
                           isActive
-                            ? 'bg-[var(--amber)]/12 text-[var(--amber)]'
-                            : 'text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted/40'
+                            ? 'text-[var(--amber)]'
+                            : 'text-muted-foreground/50 hover:text-muted-foreground'
                         }`}
                       >
                         <Icon size={13} />
@@ -145,6 +150,7 @@ export default function HomeContent({ recent, existingFiles, spaces }: { recent:
                       </button>
                     );
                   })}
+                  </div>
                 </div>
 
                 {/* Prompt Cards — 2x2 grid */}
@@ -154,7 +160,7 @@ export default function HomeContent({ recent, existingFiles, spaces }: { recent:
                       key={`${activeTab}-${i}`}
                       type="button"
                       onClick={() => injectAskInput(item.prompt)}
-                      className="group relative text-left px-4 py-3.5 rounded-xl border border-border/30 hover:border-border/60 transition-all duration-150 hover:shadow-sm"
+                      className="hit-target-box group relative text-left px-4 py-3.5 border border-transparent transition-all duration-150 [--hit-target-border-width:1px] [--hit-target-border:color-mix(in_srgb,var(--border)_30%,transparent)] [--hit-target-hover-border:color-mix(in_srgb,var(--border)_60%,transparent)] [--hit-target-radius:var(--radius-xl)] [--hit-target-hover-shadow:0_1px_2px_0_color-mix(in_srgb,var(--foreground)_8%,transparent)]"
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">

@@ -5,7 +5,42 @@
 
 import { Component } from '../component';
 import type { App } from '../types';
+import type { ObsidianRuntimeHost } from '../runtime';
+import { getActiveObsidianRuntimeHost, inferPluginNoticeLevel } from '../runtime';
 import { toast } from '@/lib/toast';
+import { createObsidianElement, ensureObsidianElement, type ObsidianElement } from './dom';
+
+type RuntimeApp = App & { getRuntimeHost?: () => ObsidianRuntimeHost };
+
+type SuggestModalLike = Modal & {
+  inputEl?: HTMLElement;
+  getSuggestions?: (query: string) => unknown[] | Promise<unknown[]>;
+  renderSuggestion?: (value: unknown, el: HTMLElement) => void;
+  onChooseSuggestion?: (value: unknown) => unknown;
+};
+
+type TextModalLike = Modal & {
+  inputEl?: HTMLElement;
+  okButton?: HTMLElement;
+  onOK?: (event: MouseEvent | KeyboardEvent) => boolean | void | Promise<boolean | void>;
+};
+
+function getRuntimeHost(app: App): ObsidianRuntimeHost | null {
+  return (app as RuntimeApp).getRuntimeHost?.() ?? null;
+}
+
+function hasPluginMethodOverride(instance: object, methodName: string): boolean {
+  if (Object.prototype.hasOwnProperty.call(instance, methodName)) return true;
+  let prototype = Object.getPrototypeOf(instance);
+  while (prototype && prototype !== Modal.prototype) {
+    if (Object.prototype.hasOwnProperty.call(prototype, methodName)) {
+      const constructorName = typeof prototype.constructor?.name === 'string' ? prototype.constructor.name : '';
+      return constructorName !== 'SuggestModal' && constructorName !== 'FuzzySuggestModal';
+    }
+    prototype = Object.getPrototypeOf(prototype);
+  }
+  return false;
+}
 
 /**
  * Notice - Displays toast notifications using MindOS's toast system.
@@ -15,35 +50,28 @@ export class Notice {
   timeout?: number;
 
   constructor(message: string, timeout?: number) {
-    this.message = message;
+    const normalizedMessage = String(message);
+    this.message = normalizedMessage;
     this.timeout = timeout;
+    const level = inferPluginNoticeLevel(normalizedMessage);
+
+    getActiveObsidianRuntimeHost()?.recordNotice({
+      message: normalizedMessage,
+      timeout,
+      level,
+    });
 
     // Integrate with MindOS toast system
     if (typeof window !== 'undefined') {
-      // Determine toast type based on message content
-      const lowerMessage = message.toLowerCase();
-      if (lowerMessage.includes('error') || lowerMessage.includes('failed') || lowerMessage.includes('fail')) {
-        toast.error(message, timeout);
-      } else if (lowerMessage.includes('success') || lowerMessage.includes('saved') || lowerMessage.includes('complete')) {
-        toast.success(message, timeout);
+      if (level === 'error') {
+        toast.error(normalizedMessage, timeout);
+      } else if (level === 'success') {
+        toast.success(normalizedMessage, timeout);
       } else {
-        toast(message, timeout !== undefined ? { duration: timeout } : undefined);
+        toast(normalizedMessage, timeout !== undefined ? { duration: timeout } : undefined);
       }
     }
   }
-}
-
-function createElement(tagName: string): HTMLElement {
-  if (typeof document !== 'undefined') {
-    return document.createElement(tagName);
-  }
-
-  return {
-    innerHTML: '',
-    textContent: '',
-    appendChild: () => null,
-    remove: () => {},
-  } as unknown as HTMLElement;
 }
 
 /**
@@ -59,9 +87,10 @@ function createElement(tagName: string): HTMLElement {
  */
 export class Modal extends Component {
   app: App;
-  containerEl: HTMLElement;
-  contentEl: HTMLElement;
-  titleEl: HTMLElement;
+  containerEl: ObsidianElement;
+  modalEl: ObsidianElement;
+  contentEl: ObsidianElement;
+  titleEl: ObsidianElement;
   isOpen = false;
   private modalRoot: HTMLElement | null = null;
   private backdrop: HTMLElement | null = null;
@@ -69,23 +98,42 @@ export class Modal extends Component {
   constructor(app: App) {
     super();
     this.app = app;
-    this.containerEl = createElement('div');
-    this.contentEl = createElement('div');
-    this.titleEl = createElement('div');
+    this.containerEl = createObsidianElement('div');
+    this.modalEl = createObsidianElement('div');
+    this.contentEl = createObsidianElement('div');
+    this.titleEl = createObsidianElement('div');
+    this.containerEl.appendChild(this.modalEl);
+    this.modalEl.appendChild(this.titleEl);
+    this.modalEl.appendChild(this.contentEl);
   }
 
   open(): void {
     this.isOpen = true;
+    this.onOpen();
 
     // Create modal in DOM if in browser environment
     if (typeof document !== 'undefined') {
       this.renderModal();
     }
 
-    this.onOpen();
+    const suggest = this as SuggestModalLike;
+    const textInput = findTextInputElement(this);
+    getRuntimeHost(this.app)?.recordModalOpen({
+      kind: typeof suggest.getSuggestions === 'function' ? 'suggest' : 'modal',
+      titleEl: this.titleEl,
+      contentEl: this.contentEl,
+      placeholder: suggest.inputEl?.getAttribute('placeholder') ?? undefined,
+      getSuggestions: suggest.getSuggestions?.bind(this),
+      renderSuggestion: suggest.renderSuggestion?.bind(this),
+      chooseSuggestion: hasPluginMethodOverride(this, 'onChooseSuggestion') ? suggest.onChooseSuggestion?.bind(this) : undefined,
+      textInputEl: textInput,
+      submitText: textInput ? createTextModalSubmitter(this, textInput) : undefined,
+      close: this.close.bind(this),
+    });
   }
 
   close(): void {
+    if (!this.isOpen) return;
     this.isOpen = false;
 
     // Remove modal from DOM
@@ -119,7 +167,7 @@ export class Modal extends Component {
     if (typeof content === 'string') {
       this.contentEl.textContent = content;
     } else {
-      this.contentEl.innerHTML = '';
+      this.contentEl.empty();
       this.contentEl.appendChild(content);
     }
 
@@ -138,7 +186,7 @@ export class Modal extends Component {
 
   private renderModal(): void {
     // Create backdrop
-    this.backdrop = document.createElement('div');
+    this.backdrop = ensureObsidianElement(document.createElement('div'));
     this.backdrop.style.cssText = `
       position: fixed;
       inset: 0;
@@ -149,7 +197,7 @@ export class Modal extends Component {
     this.backdrop.addEventListener('click', () => this.close());
 
     // Create modal container
-    this.modalRoot = document.createElement('div');
+    this.modalRoot = ensureObsidianElement(document.createElement('div'));
     this.modalRoot.style.cssText = `
       position: fixed;
       top: 50%;
@@ -240,4 +288,81 @@ export class Modal extends Component {
     `;
     document.head.appendChild(style);
   }
+}
+
+function findTextInputElement(modal: Modal): HTMLElement | undefined {
+  const direct = (modal as TextModalLike).inputEl;
+  if (isTextInputElement(direct)) return direct;
+  const fromContent = modal.contentEl.querySelector('input, textarea');
+  if (isTextInputElement(fromContent)) return fromContent;
+  const fromModal = modal.modalEl.querySelector('input, textarea');
+  if (isTextInputElement(fromModal)) return fromModal;
+  return undefined;
+}
+
+function isTextInputElement(element: Element | null | undefined): element is HTMLElement {
+  if (!element) return false;
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === 'textarea') return true;
+  if (tagName !== 'input') return false;
+  const type = (element.getAttribute('type') ?? (element as HTMLInputElement).type ?? 'text').toLowerCase();
+  return !['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'].includes(type);
+}
+
+function findSubmitButton(modal: Modal): HTMLElement | undefined {
+  const direct = (modal as TextModalLike).okButton;
+  if (direct) return direct;
+  const button = modal.modalEl.querySelector('button:not([disabled]), input[type="submit"]:not([disabled])');
+  return (typeof HTMLElement !== 'undefined' && button instanceof HTMLElement) || isStubElement(button)
+    ? button as HTMLElement
+    : undefined;
+}
+
+function isStubElement(element: Element | null | undefined): boolean {
+  return Boolean(element && typeof (element as ObsidianElement).__dispatchObsidianEvent === 'function');
+}
+
+function createTextModalSubmitter(modal: Modal, inputEl: HTMLElement): (value: string) => Promise<void> {
+  return async (value: string) => {
+    (inputEl as HTMLInputElement | HTMLTextAreaElement).value = value;
+    await dispatchObsidianElementEvent(inputEl, 'input');
+
+    const button = findSubmitButton(modal);
+    if (button) {
+      await dispatchObsidianElementEvent(button, 'click');
+      return;
+    }
+
+    await dispatchObsidianElementEvent(inputEl, 'keypress', { key: 'Enter', isComposing: false });
+    const onOK = (modal as TextModalLike).onOK;
+    if (typeof onOK === 'function') {
+      const refused = await Promise.resolve(onOK.call(modal, createTextModalEvent('click') as MouseEvent));
+      if (!refused) modal.close();
+    }
+  };
+}
+
+async function dispatchObsidianElementEvent(element: HTMLElement, type: string, init: Record<string, unknown> = {}): Promise<void> {
+  const dispatcher = (element as ObsidianElement).__dispatchObsidianEvent;
+  if (dispatcher) {
+    await dispatcher(type, init);
+    return;
+  }
+  if (typeof Event !== 'undefined' && typeof element.dispatchEvent === 'function') {
+    const event = type.startsWith('key') && typeof KeyboardEvent !== 'undefined'
+      ? new KeyboardEvent(type, init)
+      : new Event(type, { bubbles: true, cancelable: true });
+    element.dispatchEvent(event);
+  }
+}
+
+function createTextModalEvent(type: string): MouseEvent | KeyboardEvent | Event {
+  if (typeof MouseEvent !== 'undefined') {
+    return new MouseEvent(type);
+  }
+  return {
+    type,
+    preventDefault() {},
+    stopPropagation() {},
+  } as Event;
 }

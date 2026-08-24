@@ -31,14 +31,19 @@ import { randomBytes, createHash } from 'node:crypto';
 import { createConnection } from 'node:net';
 import http from 'node:http';
 import { gunzipSync } from 'node:zlib';
-import { MCP_AGENTS, SKILL_AGENT_REGISTRY, detectAgentPresence } from '../packages/mindos/bin/lib/mcp-agents.js';
-import { resolveNpmInvocation, resolveNpxInvocation } from '../packages/mindos/bin/lib/npm-invocation.js';
+import { MCP_AGENTS, detectAgentPresence } from '../packages/mindos/bin/lib/mcp-agents.js';
+import { resolveNpmInvocation } from '../packages/mindos/bin/lib/npm-invocation.js';
+import { installMindosSkillsForAgents } from '../packages/mindos/bin/lib/skill-install.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 const MINDOS_DIR = resolve(homedir(), '.mindos');
 const CONFIG_PATH = resolve(MINDOS_DIR, 'config.json');
 const LOG_PATH = resolve(MINDOS_DIR, 'mindos.log');
+
+function supportsDaemonService(platform = process.platform) {
+  return platform === 'darwin' || platform === 'linux';
+}
 
 // ── i18n ─────────────────────────────────────────────────────────────────────
 
@@ -113,9 +118,10 @@ const T = {
 
   // start mode
   startModePrompt: { en: 'Start Mode', zh: '启动方式' },
-  startModeOpts:   { en: ['Background service (recommended, auto-start on boot)', 'Foreground (manual start each time)'], zh: ['后台服务（推荐，开机自启）', '前台运行（每次手动启动）'] },
+  startModeOpts:   { en: ['Background service (macOS/Linux, auto-start on boot)', 'Foreground (manual start each time)'], zh: ['后台服务（macOS/Linux，开机自启）', '前台运行（每次手动启动）'] },
   startModeVals:   ['daemon', 'start'],
-  startModeSkip:   { en: '  → Daemon not supported on this platform, using foreground mode', zh: '  → 当前平台不支持后台服务，使用前台模式' },
+  startModeSkip:   { en: '  → Background service is only supported on macOS/Linux. Using foreground mode.', zh: '  → 后台服务仅支持 macOS/Linux。当前使用前台模式。' },
+  startModeFlagSkip: { en: '  → --install-daemon is only supported on macOS/Linux. Using foreground mode.', zh: '  → --install-daemon 仅支持 macOS/Linux。当前使用前台模式。' },
   cfgKept:        { en: '✔ Keeping existing config', zh: '✔ 保留现有配置' },
   cfgKeptNote:    { en: '  Settings from this session were not saved', zh: '  本次填写的设置未保存' },
   cfgSaved:       { en: '✔ Config saved', zh: '✔ 配置已保存' },
@@ -882,101 +888,39 @@ async function runAgentSelect() {
   return selected;
 }
 
-/**
- * Write MCP config into selected agents' config files.
- * Agent selection is handled separately by runAgentSelect().
- */
-function installMcpConfig(selected, mcpPort, authToken) {
-  const entry = { type: 'stdio', command: 'mindos', args: ['mcp'], env: { MCP_TRANSPORT: 'stdio' } };
+/* ── Agent auto-install ────────────────────────────────────────────────────── */
+
+function installMcpConfig(selected) {
+  if (!selected || selected.length === 0) return true;
+  const cliPath = resolve(__dirname, '../packages/mindos/bin/cli.js');
+  let ok = true;
 
   for (const agentKey of selected) {
-    const agent = MCP_AGENTS[agentKey];
-    const cfgPath = agent.global || agent.project;
-    if (!cfgPath) continue;
-    const abs = expandHomePath(cfgPath);
     try {
-      let config = {};
-      if (existsSync(abs)) config = parseJsonc(readFileSync(abs, 'utf-8'));
-      if (!config[agent.key]) config[agent.key] = {};
-      config[agent.key].mindos = entry;
-      const dir = resolve(abs, '..');
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      writeFileSync(abs, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-    } catch { /* logged by caller via agent count */ }
+      execFileSync(process.execPath, [cliPath, 'mcp', 'install', agentKey, '-g', '-y'], {
+        encoding: 'utf-8',
+        env: { ...process.env, NODE_ENV: 'production' },
+        stdio: 'pipe',
+      });
+    } catch {
+      ok = false;
+    }
   }
+
+  return ok;
 }
 
-/* ── Skill auto-install ────────────────────────────────────────────────────── */
-
-const UNIVERSAL_AGENTS = new Set([
-  'cline', 'codex', 'cursor', 'gemini-cli',
-  'github-copilot', 'kimi-cli', 'opencode', 'warp',
-]);
-const SKILL_UNSUPPORTED = new Set([]);
-
 /**
- * Install the appropriate MindOS Skill to selected agents via `npx skills add`.
+ * Install the appropriate MindOS Skill to selected agents from the packaged
+ * local skills directory. This is intentionally offline-first; `mindos mcp
+ * install` uses the same local installer when MCP mode is enabled.
  * @param {string} template - 'en' | 'zh' | 'empty' | 'custom'
  * @param {string[]} selectedAgents - MCP agent keys from the multi-select step
  */
 function runSkillInstallStep(template, selectedAgents) {
   if (!selectedAgents || selectedAgents.length === 0) return true;
-
   const skillName = template === 'zh' ? 'mindos-zh' : 'mindos';
-  const localSource = resolve(ROOT, 'skills');
-  const githubSource = 'GeminiLight/MindOS';
-
-  const additionalAgents = selectedAgents
-    .flatMap((key) => {
-      if (SKILL_UNSUPPORTED.has(key)) return [];
-      if (UNIVERSAL_AGENTS.has(key)) return [];
-      const reg = SKILL_AGENT_REGISTRY[key];
-      if (!reg) return [key];
-      if (reg.mode === 'unsupported') return [];
-      if (reg.mode === 'universal') return [];
-      return [reg.skillAgentName || key];
-    });
-
-  // Direct-copy skill for 'unsupported' agents (e.g., QClaw, WorkBuddy, Lingma)
-  const unsupportedAgents = selectedAgents.filter((key) => {
-    const reg = SKILL_AGENT_REGISTRY[key];
-    return reg?.mode === 'unsupported';
-  });
-  for (const key of unsupportedAgents) {
-    const agent = MCP_AGENTS[key];
-    if (!agent) continue;
-    const skillSourceDir = resolve(ROOT, 'skills', skillName);
-    if (!existsSync(skillSourceDir)) continue;
-    const targetDir = expandHomePath(agent.presenceDirs?.[0] ?? agent.global.replace(/\/[^/]+$/, '/'));
-    const targetSkillDir = resolve(targetDir, 'skills', skillName);
-    try {
-      if (!existsSync(targetSkillDir)) {
-        cpSync(skillSourceDir, targetSkillDir, { recursive: true });
-      }
-    } catch { /* best-effort copy for unsupported agents */ }
-  }
-
-  const agentArgs = additionalAgents.length > 0
-    ? additionalAgents.flatMap(a => ['-a', a])
-    : ['-a', 'universal'];
-
-  const sources = [githubSource, localSource];
-
-  for (const source of sources) {
-    const args = ['skills', 'add', source, '--skill', skillName, ...agentArgs, '-g', '-y'];
-    try {
-      const invocation = resolveNpxInvocation(args);
-      execFileSync(invocation.command, invocation.args, {
-        encoding: 'utf-8',
-        timeout: 30_000,
-        env: { ...process.env, NODE_ENV: 'production' },
-        stdio: 'pipe',
-      });
-      return true;
-    } catch { /* try next source */ }
-  }
-
-  return false;
+  return installMindosSkillsForAgents(selectedAgents, { skillName }).ok;
 }
 
 // ── GUI Setup ─────────────────────────────────────────────────────────────────
@@ -1166,7 +1110,7 @@ async function main() {
       const existingMindRoot = existing.mindRoot  || resolve(homedir(), 'MindOS', 'mind');
       console.log(`\n${c.green(t('cfgKept'))}  ${c.dim(CONFIG_PATH)}`);
       write(c.dim(t('cfgKeptNote') + '\n'));
-      const installDaemon = process.argv.includes('--install-daemon');
+      const installDaemon = process.argv.includes('--install-daemon') && supportsDaemonService();
       finish(existingMindRoot, existingMode, existingMcpPort, existingAuth, installDaemon);
       return;
     }
@@ -1342,9 +1286,12 @@ async function main() {
   stepHeader(6);
 
   let startMode = 'start';
-  const daemonPlatform = process.platform === 'darwin' || process.platform === 'linux';
-  if (daemonPlatform) {
+  const daemonSupported = supportsDaemonService();
+  const daemonRequestedByFlag = process.argv.includes('--install-daemon');
+  if (daemonSupported) {
     startMode = await select('startModePrompt', 'startModeOpts', 'startModeVals');
+  } else if (daemonRequestedByFlag) {
+    write(c.dim(t('startModeFlagSkip') + '\n'));
   } else {
     write(c.dim(t('startModeSkip') + '\n'));
   }
@@ -1417,12 +1364,11 @@ async function main() {
       ? `  正在为 ${agentCount} 个 Agent 配置连接…`
       : `  Configuring connection for ${agentCount} agent${agentCount > 1 ? 's' : ''}…`) + '\n');
 
-    if (modes.mcp) {
-      installMcpConfig(selectedAgents, mcpPort, authToken);
-    }
-    const skillOk = runSkillInstallStep(selectedTemplate, selectedAgents);
+    const installOk = modes.mcp
+      ? installMcpConfig(selectedAgents)
+      : runSkillInstallStep(selectedTemplate, selectedAgents);
 
-    if (skillOk) {
+    if (installOk) {
       write(c.green(uiLang === 'zh'
         ? `  ✔ ${agentCount} 个 Agent 已配置完成\n`
         : `  ✔ ${agentCount} agent${agentCount > 1 ? 's' : ''} configured\n`));
@@ -1451,7 +1397,7 @@ async function main() {
   // ── Register CLI globally if not already in PATH ────────────────────────────
   ensureCliInPath();
 
-  const installDaemon = startMode === 'daemon' || process.argv.includes('--install-daemon');
+  const installDaemon = supportsDaemonService() && (startMode === 'daemon' || process.argv.includes('--install-daemon'));
   finish(mindDir, config.startMode, config.mcpPort, config.authToken, installDaemon, needsRestart, resumeCfg.port ?? 3456);
 }
 
@@ -1469,15 +1415,15 @@ function ensureCliInPath() {
 
   write('\n');
   try {
-    const invocation = resolveNpmInvocation(['link']);
-    execFileSync(invocation.command, invocation.args, { cwd: ROOT, stdio: 'ignore' });
+    const invocation = resolveNpmInvocation(['link', '--global']);
+    execFileSync(invocation.command, invocation.args, { cwd: resolve(ROOT, 'packages', 'mindos'), stdio: 'ignore' });
     write(c.green(uiLang === 'zh'
       ? '  ✔ mindos CLI 已注册到全局路径\n'
       : '  ✔ mindos CLI registered globally\n'));
   } catch {
     write(c.yellow(uiLang === 'zh'
-      ? '  ⚠ 无法自动注册 CLI，请手动运行：npm link\n'
-      : '  ⚠ Could not register CLI automatically. Run manually: npm link\n'));
+      ? '  ⚠ 无法自动注册 CLI，请手动运行：cd packages/mindos && npm link --global\n'
+      : '  ⚠ Could not register CLI automatically. Run manually: cd packages/mindos && npm link --global\n'));
   }
 }
 
@@ -1493,8 +1439,12 @@ function getLocalIP() {
 async function finish(mindDir, startMode = 'start', mcpPort = 8781, authToken = '', installDaemon = false, needsRestart = false, oldPort = 3456) {
   // startMode 'daemon' stored in config is equivalent to installDaemon flag
   if (startMode === 'daemon') {
-    installDaemon = true;
+    installDaemon = supportsDaemonService();
     startMode = 'start';
+  }
+  if (installDaemon && !supportsDaemonService()) {
+    write(c.dim(t('startModeFlagSkip') + '\n'));
+    installDaemon = false;
   }
   if (needsRestart) {
     const isRunning = await isSelfPort(oldPort);

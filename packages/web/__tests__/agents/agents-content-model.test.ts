@@ -3,11 +3,15 @@ import type { AgentInfo, SkillInfo } from '@/components/settings/types';
 import {
   aggregateCrossAgentMcpServers,
   aggregateCrossAgentSkills,
+  buildUnifiedSkillList,
   buildMcpRiskQueue,
+  createMcpReconnectPlan,
   createBulkSkillTogglePlan,
   filterAgentsForMcpWorkspace,
   filterSkillsForAgentDetail,
   filterSkillsForWorkspace,
+  getAgentsNavGroup,
+  parseAgentsTab,
   resolveMatrixAgents,
   summarizeMcpBulkReconnectResults,
   summarizeBulkSkillToggleResults,
@@ -45,6 +49,42 @@ const agents: AgentInfo[] = [
     globalPath: '/tmp/ghost.json',
   },
 ];
+
+describe('parseAgentsTab', () => {
+  it('accepts canonical IA tabs and falls back for unknown tabs', () => {
+    expect(parseAgentsTab('assistant')).toBe('assistant');
+    expect(parseAgentsTab('agent')).toBe('agent');
+    expect(parseAgentsTab('capabilities')).toBe('capabilities');
+    expect(parseAgentsTab('runs')).toBe('runs');
+    expect(parseAgentsTab('unknown')).toBe('overview');
+    expect(parseAgentsTab(undefined)).toBe('overview');
+  });
+
+  it('keeps legacy deep tabs parseable for existing links', () => {
+    expect(parseAgentsTab('presets')).toBe('presets');
+    expect(parseAgentsTab('mcp')).toBe('mcp');
+    expect(parseAgentsTab('skills')).toBe('skills');
+    expect(parseAgentsTab('channels')).toBe('channels');
+    expect(parseAgentsTab('a2a')).toBe('a2a');
+    expect(parseAgentsTab('sessions')).toBe('sessions');
+    expect(parseAgentsTab('activity')).toBe('activity');
+  });
+
+  it('groups legacy tabs under the five visible IA entries and keeps logs auxiliary', () => {
+    expect(getAgentsNavGroup('overview')).toBe('overview');
+    expect(getAgentsNavGroup('assistant')).toBe('assistant');
+    expect(getAgentsNavGroup('presets')).toBe('assistant');
+    expect(getAgentsNavGroup('agent')).toBe('agent');
+    expect(getAgentsNavGroup('a2a')).toBe('agent');
+    expect(getAgentsNavGroup('capabilities')).toBe('capabilities');
+    expect(getAgentsNavGroup('skills')).toBe('capabilities');
+    expect(getAgentsNavGroup('mcp')).toBe('capabilities');
+    expect(getAgentsNavGroup('channels')).toBe('channels');
+    expect(getAgentsNavGroup('runs')).toBe('overview');
+    expect(getAgentsNavGroup('sessions')).toBe('overview');
+    expect(getAgentsNavGroup('activity')).toBe('overview');
+  });
+});
 
 describe('filterSkillsForWorkspace', () => {
   it('filters by query + source + status on normal path', () => {
@@ -139,6 +179,23 @@ describe('MCP workspace model helpers', () => {
     const summary = summarizeMcpBulkReconnectResults([]);
     expect(summary.total).toBe(0);
     expect(summary.failed).toBe(0);
+    expect(summary.skipped).toBe(0);
+  });
+
+  it('plans reconnect only for present agents and reports skipped not-found agents', () => {
+    const plan = createMcpReconnectPlan(agents);
+    expect(plan.targets.map((agent) => agent.key)).toEqual(['cursor']);
+    expect(plan.skipped.map((agent) => agent.key)).toEqual(['ghost']);
+
+    const summary = summarizeMcpBulkReconnectResults([
+      { agentKey: 'cursor', ok: true },
+    ], plan.skipped.length);
+    expect(summary).toMatchObject({
+      total: 2,
+      succeeded: 1,
+      failed: 0,
+      skipped: 1,
+    });
   });
 
   it('builds risk queue from mcp running state and buckets (notFound excluded)', () => {
@@ -193,10 +250,11 @@ describe('aggregateCrossAgentMcpServers', () => {
 describe('aggregateCrossAgentSkills', () => {
   it('aggregates skills across agents (normal path)', () => {
     const result = aggregateCrossAgentSkills([
-      { ...agents[0], installedSkillNames: ['mindos', 'custom-a'] } as AgentInfo,
-      { ...agents[1], installedSkillNames: ['mindos'] } as AgentInfo,
+      { ...agents[0], installedSkillNames: ['mindos', 'custom-a'], installedSkillSourcePath: '/tmp/cursor/skills' } as AgentInfo,
+      { ...agents[1], installedSkillNames: ['mindos'], installedSkillSourcePath: '/tmp/ghost/skills' } as AgentInfo,
     ]);
     expect(result.find((s) => s.skillName === 'mindos')?.agents).toHaveLength(2);
+    expect(result.find((s) => s.skillName === 'mindos')?.sourcePaths).toEqual(['/tmp/cursor/skills', '/tmp/ghost/skills']);
     expect(result.find((s) => s.skillName === 'custom-a')?.agents).toHaveLength(1);
   });
 
@@ -205,5 +263,35 @@ describe('aggregateCrossAgentSkills', () => {
       { ...agents[0], installedSkillNames: [] } as AgentInfo,
     ]);
     expect(result).toHaveLength(0);
+  });
+});
+
+describe('buildUnifiedSkillList', () => {
+  it('derives availability from where the body lives: shared pool → global, custom path → private, managed → linked/unlinked', () => {
+    const result = buildUnifiedSkillList([
+      // Body in the universal shared pool — every universal agent sees it.
+      { name: 'pool-skill', description: 'Shared', path: '/Users/test/.agents/skills/pool-skill/SKILL.md', source: 'builtin', origin: 'agents-global', enabled: true, editable: false },
+      // Body in an agent's own dir registered via a custom path — that agent's private skill.
+      { name: 'codex-own', description: 'Codex private', path: '/Users/test/.codex/skills/codex-own/SKILL.md', source: 'builtin', origin: 'custom', enabled: true, editable: false },
+      // MindOS-managed bodies: linked when at least one downstream agent has it, otherwise MindOS-only.
+      { name: 'taste-skill', description: 'Design taste', path: '/mind/.skills/taste-skill/SKILL.md', source: 'user', origin: 'mindos-user', enabled: true, editable: true },
+      { name: 'drafts-only', description: 'Not linked anywhere', path: '/mind/.skills/drafts-only/SKILL.md', source: 'user', origin: 'mindos-user', enabled: true, editable: true },
+    ], [
+      { skillName: 'pool-skill', agents: ['Cursor', 'Codex'], sourcePaths: ['/Users/test/.agents/skills'] },
+      { skillName: 'codex-own', agents: ['Codex'], sourcePaths: ['/Users/test/.codex/skills'] },
+      { skillName: 'taste-skill', agents: ['Codex'], sourcePaths: ['/Users/test/.codex/skills'] },
+      { skillName: 'native-only', agents: ['Claude Code'], sourcePaths: ['/Users/test/.claude/skills'] },
+    ]);
+
+    expect(result.find((skill) => skill.name === 'pool-skill')).toMatchObject({ kind: 'mindos', availability: 'global' });
+    expect(result.find((skill) => skill.name === 'codex-own')).toMatchObject({ kind: 'mindos', availability: 'native-private' });
+    expect(result.find((skill) => skill.name === 'taste-skill')).toMatchObject({ kind: 'mindos', availability: 'linked', agents: ['Codex'] });
+    expect(result.find((skill) => skill.name === 'drafts-only')).toMatchObject({ kind: 'mindos', availability: 'unlinked', agents: [] });
+    expect(result.find((skill) => skill.name === 'native-only')).toMatchObject({
+      kind: 'native',
+      availability: 'native-private',
+      agents: ['Claude Code'],
+      sourcePath: '/Users/test/.claude/skills',
+    });
   });
 });

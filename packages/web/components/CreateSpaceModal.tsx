@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, type KeyboardEvent, type ReactElement } from 'react';
 import { createPortal } from 'react-dom';
 import { Folder, Loader2, X, Sparkles, AlertTriangle } from 'lucide-react';
 import { useRouter } from 'next/navigation';
@@ -9,11 +9,22 @@ import { encodePath } from '@/lib/utils';
 import { createSpaceAction } from '@/lib/actions';
 import { checkAiAvailable, triggerSpaceAiInit } from '@/lib/space-ai-init';
 import DirPicker from './DirPicker';
+import { notifyFilesChanged } from '@/lib/files-changed';
+import { useSmoothRouterPush } from '@/hooks/useSmoothRouterPush';
 
 /* ── Create Space Modal ── */
 
-export default function CreateSpaceModal({ t, dirPaths }: { t: ReturnType<typeof useLocale>['t']; dirPaths: string[] }) {
+export default function CreateSpaceModal({
+  t,
+  dirPaths,
+  openRequestId,
+}: {
+  t: ReturnType<typeof useLocale>['t'];
+  dirPaths: string[];
+  openRequestId?: number;
+}): ReactElement | null {
   const router = useRouter();
+  const smoothPush = useSmoothRouterPush();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -25,16 +36,23 @@ export default function CreateSpaceModal({ t, dirPaths }: { t: ReturnType<typeof
   const [useAi, setUseAi] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const openDialog = useCallback(() => {
+    setOpen(true);
+    setError('');
+    setNameHint('');
+    setTimeout(() => inputRef.current?.focus(), 80);
+  }, []);
+
   useEffect(() => {
-    const handler = () => {
-      setOpen(true);
-      setError('');
-      setNameHint('');
-      setTimeout(() => inputRef.current?.focus(), 80);
-    };
+    if (!openRequestId) return;
+    openDialog();
+  }, [openDialog, openRequestId]);
+
+  useEffect(() => {
+    const handler = () => openDialog();
     window.addEventListener('mindos:create-space', handler);
     return () => window.removeEventListener('mindos:create-space', handler);
-  }, []);
+  }, [openDialog]);
 
   useEffect(() => {
     if (!open || aiAvailable !== null) return;
@@ -85,8 +103,8 @@ export default function CreateSpaceModal({ t, dirPaths }: { t: ReturnType<typeof
 
       close();
       router.refresh();
-      window.dispatchEvent(new Event('mindos:files-changed'));
-      router.push(`/view/${encodePath(createdPath + '/')}`);
+      notifyFilesChanged([createdPath]);
+      smoothPush(`/view/${encodePath(createdPath + '/')}`);
     } else {
       const msg = result.error ?? '';
       if (msg.includes('already exists')) {
@@ -96,9 +114,9 @@ export default function CreateSpaceModal({ t, dirPaths }: { t: ReturnType<typeof
       }
     }
     setLoading(false);
-  }, [name, description, parent, loading, close, router, t, validateName, useAi, aiAvailable]);
+  }, [name, description, parent, loading, close, router, smoothPush, t, validateName, useAi, aiAvailable]);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Escape') close();
     if (e.key === 'Enter' && !e.shiftKey && e.target instanceof HTMLInputElement) { e.preventDefault(); handleCreate(); }
   }, [close, handleCreate]);
@@ -108,7 +126,7 @@ export default function CreateSpaceModal({ t, dirPaths }: { t: ReturnType<typeof
   const h = t.home;
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center" onKeyDown={handleKeyDown}>
+    <div className="fixed inset-0 z-app-modal flex items-center justify-center" onKeyDown={handleKeyDown}>
       {/* Backdrop */}
       <div className="absolute inset-0 overlay-backdrop" onClick={close} />
       {/* Dialog */}
@@ -116,12 +134,12 @@ export default function CreateSpaceModal({ t, dirPaths }: { t: ReturnType<typeof
         role="dialog"
         aria-modal="true"
         aria-label={h.newSpace}
-        className="relative w-full max-w-md mx-4 rounded-2xl border border-border bg-card shadow-xl"
+        className="relative w-full max-w-md mx-4 rounded-xl border border-border bg-card shadow-xl"
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 pt-5 pb-3">
           <h3 className="text-base font-semibold text-foreground">{h.newSpace}</h3>
-          <button onClick={close} className="p-1 rounded-md text-muted-foreground hover:bg-muted transition-colors">
+          <button onClick={close} className="hit-target-box p-1 text-muted-foreground transition-colors [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-md)]">
             <X size={14} />
           </button>
         </div>
@@ -214,14 +232,14 @@ export default function CreateSpaceModal({ t, dirPaths }: { t: ReturnType<typeof
           <div className="flex items-center justify-end gap-2 pt-1">
             <button
               onClick={close}
-              className="px-4 py-2 rounded-lg text-sm font-medium text-muted-foreground transition-colors hover:bg-muted"
+              className="hit-target-box px-4 py-2 text-sm font-medium text-muted-foreground transition-colors [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-lg)]"
             >
               {h.cancelCreate}
             </button>
             <button
               onClick={handleCreate}
               disabled={!name.trim() || loading || !!nameHint}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-[var(--amber)] text-[var(--amber-foreground)] transition-colors hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="hit-target-box flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-[var(--amber-foreground)] transition-colors hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed [--hit-target-bg:var(--amber)] [--hit-target-hover-bg:var(--amber)] [--hit-target-radius:var(--radius-lg)]"
             >
               {loading && <Loader2 size={14} className="animate-spin" />}
               {h.createSpace}
@@ -231,5 +249,5 @@ export default function CreateSpaceModal({ t, dirPaths }: { t: ReturnType<typeof
       </div>
     </div>,
     document.body,
-  );
+  ) as unknown as ReactElement;
 }

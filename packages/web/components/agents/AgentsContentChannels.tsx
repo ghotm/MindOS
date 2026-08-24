@@ -1,17 +1,18 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { Loader2, CheckCircle2, Circle, RefreshCw, AlertCircle } from 'lucide-react';
+import { Loader2, CheckCircle2, RefreshCw, AlertCircle, MessageSquare } from 'lucide-react';
 import { useLocale } from '@/lib/stores/locale-store';
-import { PLATFORMS, type PlatformStatus } from '@/lib/im/platforms';
+import { countConnectedChannels, resolveChannelListStatus } from '@/lib/im/display';
+import { PLATFORMS } from '@/lib/im/platforms';
 import AgentsContentChannelDetail from './AgentsContentChannelDetail';
-import { getCachedStatuses, setCachedStatuses } from './channel-detail/cache';
+import { AgentSectionHeading } from './AgentsPrimitives';
+import { ChannelIcon } from './ChannelIcon';
+import { ChannelStatusIndicator } from './ChannelStatusIndicator';
+import { useChannelStatuses } from './channel-detail/useChannelStatuses';
 
 export default function AgentsContentChannels() {
-  const { t } = useLocale();
-  const im = t.panels.im;
   const searchParams = useSearchParams();
   const platformId = searchParams.get('platform');
 
@@ -29,34 +30,7 @@ export default function AgentsContentChannels() {
 function ChannelsOverview() {
   const { t } = useLocale();
   const im = t.panels.im;
-
-  const cached = getCachedStatuses();
-  const [statuses, setStatuses] = useState<PlatformStatus[]>(cached.data);
-  const [loading, setLoading] = useState(cached.data.length === 0);
-  const [error, setError] = useState(false);
-
-  const fetchStatuses = useCallback(async (background = false) => {
-    setError(false);
-    if (!background) setLoading(true);
-    try {
-      const res = await fetch('/api/im/status');
-      if (res.ok) {
-        const data = await res.json();
-        const platforms = data.platforms ?? [];
-        setCachedStatuses(platforms);
-        setStatuses(platforms);
-      } else {
-        if (!background) setError(true);
-      }
-    } catch {
-      if (!background) setError(true);
-    }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    if (cached.stale) fetchStatuses(cached.data.length > 0);
-  }, [fetchStatuses, cached.stale, cached.data.length]);
+  const { statuses, loading, error, refresh } = useChannelStatuses();
 
   if (loading) {
     return (
@@ -73,7 +47,7 @@ function ChannelsOverview() {
         <p className="text-sm text-muted-foreground mb-3">{im.fetchError}</p>
         <button
           type="button"
-          onClick={() => { setLoading(true); fetchStatuses(); }}
+          onClick={() => { void refresh(); }}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
         >
           <RefreshCw size={12} /> {im.retry}
@@ -82,9 +56,15 @@ function ChannelsOverview() {
     );
   }
 
-  const connected = statuses.filter(s => s.connected).length;
+  const configured = countConnectedChannels(statuses);
   const total = PLATFORMS.length;
   const getStatus = (id: string) => statuses.find(s => s.platform === id);
+  const statusLabels = {
+    unconfigured: im.statusUnconfigured,
+    configured: im.statusConfigured,
+    running: im.statusRunning,
+    issue: im.statusIssue,
+  };
 
   return (
     <div className="max-w-4xl">
@@ -93,7 +73,7 @@ function ChannelsOverview() {
         <div className="rounded-lg border border-border bg-card p-4 shadow-sm">
           <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">{im.statsConnected}</div>
           <div className="text-3xl font-semibold text-foreground tabular-nums">
-            {connected}<span className="text-sm text-muted-foreground font-normal ml-1">/ {total}</span>
+            {configured}<span className="text-sm text-muted-foreground font-normal ml-1">/ {total}</span>
           </div>
         </div>
         <div className="rounded-lg border border-border bg-card p-4 shadow-sm">
@@ -103,7 +83,7 @@ function ChannelsOverview() {
         <div className="rounded-lg border border-border bg-card p-4 shadow-sm">
           <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">{im.statsStatus}</div>
           <div className="text-sm text-foreground">
-            {connected > 0 ? (
+            {configured > 0 ? (
               <span className="inline-flex items-center gap-1.5 text-success">
                 <CheckCircle2 size={14} /> {im.statsReady}
               </span>
@@ -115,39 +95,26 @@ function ChannelsOverview() {
       </div>
 
       {/* Platform grid — clickable */}
-      <h2 className="text-sm font-medium text-foreground mb-4">{im.platformsTitle}</h2>
+      <AgentSectionHeading
+        icon={<MessageSquare size={13} aria-hidden="true" />}
+        title={im.platformsTitle}
+        className="mb-4"
+      />
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {PLATFORMS.map(({ id, name, icon }) => {
-          const status = getStatus(id);
-          const isConnected = status?.connected ?? false;
-
+        {PLATFORMS.map((platform) => {
+          const status = getStatus(platform.id);
+          const channelStatus = resolveChannelListStatus(status);
           return (
             <Link
-              key={id}
-              href={`/agents?tab=channels&platform=${id}`}
-              className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 shadow-sm hover:border-[var(--amber)]/50 hover:bg-card/80 hover:shadow transition-all"
+              key={platform.id}
+              href={`/agents?tab=channels&platform=${platform.id}`}
+              className="grid min-h-[64px] grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 shadow-sm transition-all hover:border-[var(--amber)]/50 hover:bg-card/80 hover:shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <span className="text-xl shrink-0">{icon}</span>
+              <ChannelIcon platform={platform} size="md" />
               <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-foreground">{name}</div>
-                {isConnected && status?.botName ? (
-                  <div className="text-xs text-muted-foreground font-mono truncate">{status.botName}</div>
-                ) : (
-                  <div className="text-xs text-muted-foreground">{isConnected ? im.statusConnected : im.notConfigured}</div>
-                )}
-                {isConnected && status?.capabilities && status.capabilities.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-1.5">
-                    {status.capabilities.slice(0, 3).map(cap => (
-                      <span key={cap} className="text-xs px-2 py-0.5 rounded-md bg-muted text-muted-foreground">{cap}</span>
-                    ))}
-                  </div>
-                )}
+                <div className="truncate text-sm font-medium text-foreground" title={platform.name}>{platform.name}</div>
               </div>
-              {isConnected ? (
-                <CheckCircle2 size={18} className="text-success shrink-0" />
-              ) : (
-                <Circle size={18} className="text-border shrink-0" />
-              )}
+              <ChannelStatusIndicator status={channelStatus} labels={statusLabels} />
             </Link>
           );
         })}

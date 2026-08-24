@@ -1,6 +1,6 @@
 {
   "name": "@geminilight/mindos",
-  "version": "1.0.10",
+  "version": "1.1.62",
   "description": "MindOS — Human-Agent Collaborative Mind System. Local-first knowledge base that syncs your mind to all AI Agents via MCP.",
   "keywords": [
     "mindos",
@@ -57,17 +57,125 @@
       "types": "./dist/tool.d.ts",
       "import": "./dist/tool.js"
     },
-    "./session": {
-      "types": "./dist/session.d.ts",
-      "import": "./dist/session.js"
-    },
-    "./session/pi-coding-agent": {
-      "types": "./dist/session/pi-coding-agent-runtime.d.ts",
-      "import": "./dist/session/pi-coding-agent-runtime.js"
-    },
     "./agent": {
       "types": "./dist/agent.d.ts",
       "import": "./dist/agent.js"
+    },
+    "./agent/prompt": {
+      "types": "./dist/agent/prompt/index.d.ts",
+      "import": "./dist/agent/prompt/index.js"
+    },
+    "./agent/prompt/*": {
+      "types": "./dist/agent/prompt/*.d.ts",
+      "import": "./dist/agent/prompt/*.js"
+    },
+    "./agent/permission": {
+      "types": "./dist/agent/permission/index.d.ts",
+      "import": "./dist/agent/permission/index.js"
+    },
+    "./agent/permission/*": {
+      "types": "./dist/agent/permission/*.d.ts",
+      "import": "./dist/agent/permission/*.js"
+    },
+    "./agent/turn": {
+      "types": "./dist/agent/turn/index.d.ts",
+      "import": "./dist/agent/turn/index.js"
+    },
+    "./agent/turn/*": {
+      "types": "./dist/agent/turn/*.d.ts",
+      "import": "./dist/agent/turn/*.js"
+    },
+    "./agent/runtime": {
+      "types": "./dist/agent/runtime/index.d.ts",
+      "import": "./dist/agent/runtime/index.js"
+    },
+    "./agent/runtime/adapters": {
+      "types": "./dist/agent/runtime/adapters/index.d.ts",
+      "import": "./dist/agent/runtime/adapters/index.js"
+    },
+    "./agent/runtime/adapters/session-transcripts": {
+      "types": "./dist/agent/runtime/adapters/session-transcripts/index.d.ts",
+      "import": "./dist/agent/runtime/adapters/session-transcripts/index.js"
+    },
+    "./agent/runtime/adapters/session-transcripts/*": {
+      "types": "./dist/agent/runtime/adapters/session-transcripts/*.d.ts",
+      "import": "./dist/agent/runtime/adapters/session-transcripts/*.js"
+    },
+    "./agent/runtime/adapters/*": {
+      "types": "./dist/agent/runtime/adapters/*.d.ts",
+      "import": "./dist/agent/runtime/adapters/*.js"
+    },
+    "./agent/runtime/*": {
+      "types": "./dist/agent/runtime/*.d.ts",
+      "import": "./dist/agent/runtime/*.js"
+    },
+    "./agent/ledger": {
+      "types": "./dist/agent/ledger/index.d.ts",
+      "import": "./dist/agent/ledger/index.js"
+    },
+    "./agent/ledger/*": {
+      "types": "./dist/agent/ledger/*.d.ts",
+      "import": "./dist/agent/ledger/*.js"
+    },
+    "./agent/bridges": {
+      "types": "./dist/agent/bridges/index.d.ts",
+      "import": "./dist/agent/bridges/index.js"
+    },
+    "./agent/bridges/*": {
+      "types": "./dist/agent/bridges/*.d.ts",
+      "import": "./dist/agent/bridges/*.js"
+    },
+    "./agent/stream": {
+      "types": "./dist/agent/stream/index.d.ts",
+      "import": "./dist/agent/stream/index.js"
+    },
+    "./agent/stream/*": {
+      "types": "./dist/agent/stream/*.d.ts",
+      "import": "./dist/agent/stream/*.js"
+    },
+    "./agent/subagent": {
+      "types": "./dist/agent/subagent/index.d.ts",
+      "import": "./dist/agent/subagent/index.js"
+    },
+    "./agent/subagent/*": {
+      "types": "./dist/agent/subagent/*.d.ts",
+      "import": "./dist/agent/subagent/*.js"
+    },
+    "./agent/mindos-pi": {
+      "types": "./dist/agent/mindos-pi/index.d.ts",
+      "import": "./dist/agent/mindos-pi/index.js"
+    },
+    "./agent/mindos-pi/extension": {
+      "types": "./dist/agent/mindos-pi/extension/index.d.ts",
+      "import": "./dist/agent/mindos-pi/extension/index.js"
+    },
+    "./agent/mindos-pi/extension/*": {
+      "types": "./dist/agent/mindos-pi/extension/*.d.ts",
+      "import": "./dist/agent/mindos-pi/extension/*.js"
+    },
+    "./agent/mindos-pi/permission": {
+      "types": "./dist/agent/mindos-pi/permission/index.d.ts",
+      "import": "./dist/agent/mindos-pi/permission/index.js"
+    },
+    "./agent/mindos-pi/permission/*": {
+      "types": "./dist/agent/mindos-pi/permission/*.d.ts",
+      "import": "./dist/agent/mindos-pi/permission/*.js"
+    },
+    "./agent/mindos-pi/*": {
+      "types": "./dist/agent/mindos-pi/*.d.ts",
+      "import": "./dist/agent/mindos-pi/*.js"
+    },
+    "./agent/tool": {
+      "types": "./dist/agent/tool/index.d.ts",
+      "import": "./dist/agent/tool/index.js"
+    },
+    "./agent/tool/*": {
+      "types": "./dist/agent/tool/*.d.ts",
+      "import": "./dist/agent/tool/*.js"
+    },
+    "./agent/*": {
+      "types": "./dist/agent/*.d.ts",
+      "import": "./dist/agent/*.js"
     },
     "./foundation": {
       "types": "./dist/foundation.d.ts",
@@ -76,6 +184,10 @@
     "./knowledge": {
       "types": "./dist/knowledge.d.ts",
       "import": "./dist/knowledge.js"
+    },
+    "./intelligence": {
+      "types": "./dist/intelligence.d.ts",
+      "import": "./dist/intelligence.js"
     },
     "./retrieval": {
       "types": "./dist/retrieval.d.ts",
@@ -106,30 +218,35 @@
     "type-check": "tsc --noEmit",
     "test": "vitest run --dir src",
     "test:watch": "vitest",
-    "build": "tsc && pnpm run build:protocols",
+    "build": "tsc && node ../../scripts/copy-mindos-agent-assets.mjs && pnpm run build:protocols",
     "build:protocols": "node ../../scripts/build-product-protocols.mjs",
     "build:platform-packages": "node ../../scripts/build-platform-packages.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.93.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@sinclair/typebox": "^0.34.33",
     "chokidar": "^4.0.3",
     "pino": "^8.17.0",
     "pino-pretty": "^10.3.0",
-    "zod": "^3.22.4"
+    "zod": "^4.3.6"
   },
   "optionalDependencies": {
-    "@geminilight/mindos-darwin-arm64": "1.0.10",
-    "@geminilight/mindos-darwin-x64": "1.0.10",
-    "@geminilight/mindos-linux-arm64": "1.0.10",
-    "@geminilight/mindos-linux-arm64-musl": "1.0.10",
-    "@geminilight/mindos-linux-x64": "1.0.10",
-    "@geminilight/mindos-linux-x64-musl": "1.0.10",
-    "@geminilight/mindos-windows-arm64": "1.0.10",
-    "@geminilight/mindos-windows-x64": "1.0.10"
+    "@geminilight/mindos-darwin-arm64": "1.1.62",
+    "@geminilight/mindos-darwin-x64": "1.1.62",
+    "@geminilight/mindos-linux-arm64": "1.1.62",
+    "@geminilight/mindos-linux-arm64-musl": "1.1.62",
+    "@geminilight/mindos-linux-x64": "1.1.62",
+    "@geminilight/mindos-linux-x64-musl": "1.1.62",
+    "@geminilight/mindos-windows-arm64": "1.1.62",
+    "@geminilight/mindos-windows-x64": "1.1.62"
   },
   "devDependencies": {
-    "@agentclientprotocol/sdk": "^0.18.2",
-    "@mariozechner/pi-coding-agent": "^0.61.1",
-    "@modelcontextprotocol/sdk": "^1.25.0",
+    "@agentclientprotocol/sdk": "^1.0.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.170",
+    "@earendil-works/pi-agent-core": "0.81.1",
+    "@earendil-works/pi-ai": "0.81.1",
+    "@earendil-works/pi-coding-agent": "0.81.1",
     "@types/node": "^22.10.5",
     "esbuild": "^0.25.0",
     "typescript": "^5.7.3",

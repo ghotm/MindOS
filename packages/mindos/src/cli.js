@@ -1,6 +1,5 @@
 export const MINDOS_CORE_COMMANDS = [
   'agent',
-  'ask',
   'start',
   'stop',
   'status',
@@ -9,8 +8,9 @@ export const MINDOS_CORE_COMMANDS = [
   'space',
   'search',
   'mcp',
-  'init',
+  'onboard',
   'config',
+  'auth',
   'channel',
   'feishu-ws',
   'doctor',

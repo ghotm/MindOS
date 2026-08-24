@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-28 | Current version: v1.0 -->
+<!-- Last verified: 2026-06-16 | Current version: v1.1 -->
 
 # 编码约定 (Conventions)
 
@@ -34,6 +34,44 @@
 | CLI 模块 | kebab-case.js | `mcp-install.js`, `mcp-spawn.js` |
 | API Routes | kebab-case 目录 | `api/recent-files/route.ts` |
 | CSS 类 | Tailwind utility | 不写自定义 CSS class |
+
+## Markdown 元数据约定
+
+Markdown 笔记的文件内 metadata 统一使用顶部 YAML front matter，并遵守 `MindOS Properties v1`。完整规则见 `wiki/specs/spec-note-metadata-schema.md`。
+
+`type` 只表达知识生命周期，v1 只能使用：
+
+```text
+type: material | note | log
+```
+
+不要为来源渠道、场景或正文模板新增 `type`。`web-clip`、`readwise`、`voice-memo`、`session`、`meeting`、`daily`、`decision`、`rule` 等都通过 `source_type`、`source_platform`、正文结构或目录表达；只有明确需要跨库筛选时才补 `tags`。
+
+新写入 Markdown 时优先使用这些 canonical 字段：
+
+```yaml
+---
+title: "Title"
+description: "Optional short description"
+type: note
+status: active
+created: 2026-06-16
+tags:
+  - example
+---
+```
+
+素材型内容使用：
+
+```yaml
+type: material
+source_type: web
+source_url: "https://example.com"
+source_platform: github
+captured_at: 2026-06-16T10:30:00+08:00
+```
+
+兼容读取旧字段，但新写入不再使用 `source` 表示 URL，不再写 `clipped` / `clipped_at` / `saved_at`，统一写 `source_url` 和 `captured_at`。`description` 可选，缺失时由正文或索引层自动生成。不要把动态同步状态、索引状态、权限状态、摘要正文、密钥、token 或本机绝对路径写入 front matter。
 
 ## Git 提交
 
@@ -84,6 +122,13 @@ v1 使用 monorepo 后，测试按“归属边界”放置，不再把所有测�
 - 测试验证根 CLI、npm tarball、workflow、迁移边界，放在根 `tests/`。
 - 需要启动真实服务、打开端口、依赖浏览器的测试不放进默认 `pnpm test`，避免 commit/release 被外部环境卡住。
 - `.next/`、`_standalone/`、`.turbo/` 里的测试文件都是生成物或缓存，不是源码测试入口。
+
+### 验证命令分层
+
+- `git push` 走 `scripts/pre-push-checks.mjs` 的路径分层快门：文档-only 只跑 `git diff --check`；源码改动只跑受影响 package 的测试和 typecheck。
+- `pnpm test` 跑 root contracts、root unit 和 workspace package tests；它不再隐式触发 workspace build。
+- `pnpm run test:release` 是发布前全量门：root contracts / unit、workspace build、workspace test、workspace typecheck 全部执行。
+- `turbo run test` 只表示测试任务；不要再通过 `test.dependsOn=["build"]` 把 build 隐式塞进每次测试。需要 build 时显式运行 `turbo run build` 或 `pnpm run test:release`。
 
 ## Workspace package 依赖约定
 

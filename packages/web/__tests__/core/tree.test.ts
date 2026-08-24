@@ -1,6 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkTempMindRoot, cleanupMindRoot, seedFile } from './helpers';
-import { getFileTree, collectAllFiles, renderTree, buildFileIndex } from '@/lib/core/tree';
+import {
+  collectAllFiles,
+  getFileTree,
+  parseSearchIgnoredPathsContent,
+  renderTree,
+  buildFileIndex,
+  writeMindosIgnoreFile,
+} from '@/lib/core/tree';
 import fs from 'fs';
 import path from 'path';
 
@@ -32,9 +39,17 @@ describe('tree', () => {
       expect(tree[0].name).toBe('test.md');
     });
 
-    it('ignores .git and node_modules directories', () => {
+    it('ignores internal configuration and plugin runtime directories', () => {
       seedFile(mindRoot, '.git/config', 'git');
       seedFile(mindRoot, 'node_modules/pkg/index.md', 'npm');
+      seedFile(mindRoot, 'dist/generated.md', 'generated');
+      seedFile(mindRoot, 'coverage/report.md', 'coverage');
+      seedFile(mindRoot, '.turbo/cache.md', 'cache');
+      seedFile(mindRoot, '.cc-branch/branch.md', 'branch');
+      seedFile(mindRoot, '.claude/worktrees/task/note.md', 'agent worktree');
+      seedFile(mindRoot, '.obsidian/plugins/sample/data.json', '{"private":true}');
+      seedFile(mindRoot, '.plugins/sample/manifest.json', '{"id":"sample"}');
+      seedFile(mindRoot, '.mindos/assistant-runs/run.md', 'private');
       seedFile(mindRoot, 'real.md', 'content');
       const tree = getFileTree(mindRoot);
       expect(tree).toHaveLength(1);
@@ -67,6 +82,18 @@ describe('tree', () => {
       expect(tree.map(n => n.name)).toEqual(['dir', 'a.md', 'z.md']);
     });
 
+    it('respects .mindosignore custom path and glob rules', () => {
+      writeMindosIgnoreFile(mindRoot, ['Archive/', 'Scratch/*.md', 'Private Notes']);
+      seedFile(mindRoot, 'Archive/old.md', 'archived');
+      seedFile(mindRoot, 'Scratch/draft.md', 'scratch');
+      seedFile(mindRoot, 'Private Notes/secret.md', 'secret');
+      seedFile(mindRoot, 'Visible/real.md', 'content');
+
+      const paths = collectAllFiles(mindRoot).sort();
+      expect(paths).toEqual(['Visible/real.md']);
+      expect(JSON.stringify(getFileTree(mindRoot))).not.toContain('Archive');
+    });
+
     it('does not build a tree from a symlinked start directory outside root', () => {
       const outsideRoot = fs.mkdtempSync(path.join(path.dirname(mindRoot), 'mindos-tree-outside-'));
       try {
@@ -85,6 +112,11 @@ describe('tree', () => {
       seedFile(mindRoot, 'a.md', '');
       seedFile(mindRoot, 'sub/b.csv', '');
       seedFile(mindRoot, 'sub/c.txt', '');
+      seedFile(mindRoot, 'node_modules/pkg/index.md', 'dependency note');
+      seedFile(mindRoot, 'dist/generated.md', 'generated');
+      seedFile(mindRoot, '.claude/worktrees/task/note.md', 'agent worktree');
+      seedFile(mindRoot, '.obsidian/app.json', '{"theme":"obsidian"}');
+      seedFile(mindRoot, '.plugins/plugin/data.json', '{"enabled":true}');
       const files = collectAllFiles(mindRoot);
       expect(files.sort()).toEqual(['a.md', 'sub/b.csv']);
     });
@@ -99,6 +131,20 @@ describe('tree', () => {
       } finally {
         fs.rmSync(outsideRoot, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('search ignore parsing', () => {
+    it('normalizes comments, duplicates, unsafe paths, and trailing slashes', () => {
+      expect(parseSearchIgnoredPathsContent([
+        '# generated folders',
+        'Archive/',
+        './Archive',
+        '../outside',
+        '!Archive',
+        'Scratch/*.md',
+        '',
+      ].join('\n'))).toEqual(['Archive', 'Scratch/*.md']);
     });
   });
 

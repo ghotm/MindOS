@@ -6,11 +6,10 @@
  * falls back to pure BM25 — zero overhead.
  */
 
-import { searchFiles as bm25Search } from './search';
+import { ensureCoreSearchIndexReady, searchFiles as bm25Search } from './search';
 import { EmbeddingIndex } from './embedding-index';
 import { getEmbeddingConfig } from './embedding-provider';
 import { readFile } from './fs-ops';
-import { effectiveSopRoot } from '@/lib/settings';
 import type { SearchResult, SearchOptions } from './types';
 
 /** Module-level embedding index singleton — lazily initialized. */
@@ -79,6 +78,7 @@ export async function hybridSearch(
   const limit = opts.limit ?? 20;
 
   // Step 1: BM25 (always runs — synchronous, fast)
+  await ensureCoreSearchIndexReady(mindRoot);
   const bm25Results = bm25Search(mindRoot, query, { ...opts, limit: limit * 2 });
 
   // Step 2: Check if embedding is available
@@ -174,6 +174,7 @@ function rrfMerge(
       path: filePath,
       snippet: snippets.get(filePath) ?? '',
       score: rrfScore,
+      scoreKind: 'rank_fusion' as const,
       occurrences: bm25Scores.has(filePath) ? 1 : 0, // mark whether BM25 contributed
       // Add semantic match indicator for UI
       semanticMatch: semanticSimilarity.has(filePath) && !bm25Scores.has(filePath),

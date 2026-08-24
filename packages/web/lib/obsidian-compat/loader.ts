@@ -1,17 +1,36 @@
 /**
  * Obsidian Plugin Compatibility - Plugin Loader
- * Scans .plugins/ directory, validates manifests, loads and executes plugins
+ * Scans MindOS Obsidian plugin directories, validates manifests, loads and executes plugins
  */
 
 import fs from 'fs';
 import path from 'path';
+import nodeAssert from 'assert';
+import nodeAssertStrict from 'assert/strict';
+import * as nodeBuffer from 'buffer';
+import * as nodeCrypto from 'crypto';
+import * as nodeEvents from 'events';
+import * as nodeQuerystring from 'querystring';
+import * as nodeStream from 'stream';
+import * as nodeStringDecoder from 'string_decoder';
+import * as nodeTimers from 'timers';
+import * as nodeTimersPromises from 'timers/promises';
+import * as nodeUrl from 'url';
+import * as nodeUtil from 'util';
 import { validateManifest, ManifestError } from './manifest';
 import { CompatError, CompatErrorCodes } from './errors';
 import { Plugin } from './shims/plugin';
-import { createObsidianModule } from './shims/obsidian';
-import { AppShim } from './shims/app';
+import { createObsidianModule, installObsidianArrayPrototypeCompat } from './shims/obsidian';
+import { AppShim, type AppShimOptions } from './shims/app';
+import { createObsidianElement } from './shims/dom';
+import { ObsidianRuntimeHost } from './runtime';
+import { ObsidianRuntimeCapabilityLedgerStore } from './runtime-capability-ledger-store';
 import { PluginManifest } from './types';
-import { resolveExistingSafe } from '@/lib/core/security';
+import {
+  assertSafeObsidianPluginId,
+  resolveInstalledObsidianPluginDir,
+  resolveObsidianPluginRootsForRead,
+} from './plugin-paths';
 
 export interface LoadedPlugin {
   manifest: PluginManifest;
@@ -19,52 +38,91 @@ export interface LoadedPlugin {
   pluginDir: string;
 }
 
+export interface PluginLoaderOptions extends AppShimOptions {
+  runtimeCapabilityLedgerStore?: ObsidianRuntimeCapabilityLedgerStore;
+}
+
+type PluginLocalStorage = {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+};
+
+type PluginDocumentShim = {
+  body: HTMLElement;
+  head: HTMLElement;
+  createElement(tagName: string): HTMLElement;
+  createElementNS(namespaceURI: string, qualifiedName: string): HTMLElement;
+  createTextNode(text: string): Text | HTMLElement;
+  createEl(tagName: string, attrs?: unknown, callback?: (el: HTMLElement) => void): HTMLElement;
+  createDiv(attrs?: unknown, callback?: (el: HTMLElement) => void): HTMLElement;
+  createSpan(attrs?: unknown, callback?: (el: HTMLElement) => void): HTMLElement;
+  createDocumentFragment(): DocumentFragment | HTMLElement;
+  addEventListener(): void;
+  removeEventListener(): void;
+  on(): void;
+  off(): void;
+  querySelector(selector: string): HTMLElement | null;
+  querySelectorAll(selector: string): HTMLElement[];
+  getElementById(id: string): HTMLElement | null;
+  getElementsByTagName(tagName: string): HTMLElement[];
+  getElementsByClassName(className: string): HTMLElement[];
+};
+
+class CompatibilityHTMLElement {}
+
 /**
- * Plugin loader: scans .plugins/ directory and loads valid plugins
+ * Plugin loader: scans MindOS Obsidian plugin directories and loads valid plugins
  */
 export class PluginLoader {
   private plugins: Map<string, LoadedPlugin> = new Map();
   private app: AppShim;
 
-  constructor(private mindRoot: string) {
-    this.app = new AppShim(mindRoot);
+  constructor(private mindRoot: string, options: PluginLoaderOptions = {}) {
+    const { runtimeCapabilityLedgerStore, ...appOptions } = options;
+    const ledgerStore = runtimeCapabilityLedgerStore ?? new ObsidianRuntimeCapabilityLedgerStore(mindRoot);
+    this.app = new AppShim(mindRoot, new ObsidianRuntimeHost({
+      capabilityLedgerStore: ledgerStore,
+    }), appOptions);
   }
 
   private resolvePluginDir(pluginId: string): string {
-    if (!pluginId || pluginId.includes('..') || pluginId.includes('/') || pluginId.includes('\\')) {
-      throw new CompatError(`Plugin path escapes .plugins directory: ${pluginId}`, CompatErrorCodes.PLUGIN_NOT_FOUND, { pluginId });
-    }
     try {
-      return resolveExistingSafe(this.mindRoot, `.plugins/${pluginId}`);
+      assertSafeObsidianPluginId(pluginId);
     } catch {
-      throw new CompatError(`Plugin path escapes .plugins directory: ${pluginId}`, CompatErrorCodes.PLUGIN_NOT_FOUND, { pluginId });
+      throw new CompatError(`Plugin path escapes MindOS plugin directory: ${pluginId}`, CompatErrorCodes.PLUGIN_NOT_FOUND, { pluginId });
     }
+    const location = resolveInstalledObsidianPluginDir(this.mindRoot, pluginId);
+    if (!location) {
+      throw new CompatError(`Plugin not found: ${pluginId}`, CompatErrorCodes.PLUGIN_NOT_FOUND, { pluginId });
+    }
+    return location.pluginDir;
   }
 
   /**
-   * Scan .plugins/ directory and discover all plugins.
+   * Scan canonical .mindos/plugins plus legacy .plugins and discover all plugins.
    */
   discoverPlugins(): PluginManifest[] {
-    let pluginsDir: string;
-    try {
-      pluginsDir = resolveExistingSafe(this.mindRoot, '.plugins');
-    } catch {
-      return [];
-    }
-
-    if (!fs.existsSync(pluginsDir)) {
-      return [];
-    }
-
     const discovered: PluginManifest[] = [];
+    const seenPluginIds = new Set<string>();
 
-    try {
-      const entries = fs.readdirSync(pluginsDir);
+    for (const root of resolveObsidianPluginRootsForRead(this.mindRoot)) {
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(root.rootDir);
+      } catch (err) {
+        console.error(`[obsidian-compat] Failed to scan plugins directory: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
       for (const entry of entries) {
-        const pluginDir = path.join(pluginsDir, entry);
+        if (entry.startsWith('.')) {
+          continue;
+        }
+        const pluginDir = path.join(root.rootDir, entry);
         const manifestPath = path.join(pluginDir, 'manifest.json');
 
-        if (!fs.statSync(pluginDir).isDirectory()) {
+        const pluginDirStats = fs.lstatSync(pluginDir);
+        if (pluginDirStats.isSymbolicLink() || !pluginDirStats.isDirectory()) {
           continue;
         }
 
@@ -77,6 +135,15 @@ export class PluginLoader {
           const manifestRaw = fs.readFileSync(manifestPath, 'utf-8');
           const manifestObj = JSON.parse(manifestRaw);
           const manifest = validateManifest(manifestObj);
+          if (manifest.id !== entry) {
+            console.warn(`[obsidian-compat] Plugin directory "${entry}" does not match manifest id "${manifest.id}", skipping`);
+            continue;
+          }
+          if (seenPluginIds.has(manifest.id)) {
+            console.warn(`[obsidian-compat] Duplicate plugin "${manifest.id}" found in legacy plugins directory, using canonical package`);
+            continue;
+          }
+          seenPluginIds.add(manifest.id);
           discovered.push(manifest);
         } catch (err) {
           if (err instanceof ManifestError) {
@@ -86,8 +153,6 @@ export class PluginLoader {
           }
         }
       }
-    } catch (err) {
-      console.error(`[obsidian-compat] Failed to scan plugins directory: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return discovered;
@@ -98,7 +163,7 @@ export class PluginLoader {
    */
   async loadPlugin(pluginId: string): Promise<LoadedPlugin> {
     if (this.plugins.has(pluginId)) {
-      throw new CompatError(`Plugin already loaded: ${pluginId}`, CompatErrorCodes.PLUGIN_ALREADY_LOADED);
+      return this.plugins.get(pluginId)!;
     }
 
     const pluginDir = this.resolvePluginDir(pluginId);
@@ -145,9 +210,9 @@ export class PluginLoader {
 
     // Call onload
     try {
-      await instance.load();
+      await this.app.getRuntimeHost().runWithPluginContext(pluginId, () => instance.load());
     } catch (err) {
-      this.plugins.delete(pluginId);
+      await this.cleanupPlugin(pluginId, instance);
       throw new CompatError(
         `Plugin onload failed: ${err instanceof Error ? err.message : String(err)}`,
         CompatErrorCodes.PLUGIN_RUNTIME_ERROR,
@@ -168,35 +233,124 @@ export class PluginLoader {
     }
 
     try {
-      await loaded.instance.unload();
+      await this.app.getRuntimeHost().runWithPluginContext(pluginId, () => loaded.instance.unload());
     } catch (err) {
       console.error(`[obsidian-compat] Error during plugin unload: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    this.app.unregisterAllCommands(pluginId);
-    this.plugins.delete(pluginId);
+    this.clearPluginRegistrations(pluginId);
   }
 
   /**
-   * Execute plugin code in a sandbox with obsidian shim.
+   * Execute plugin code in a restricted CommonJS wrapper with the Obsidian shim.
+   *
+   * This is compatibility isolation for unsupported imports, not a security
+   * sandbox for arbitrary untrusted plugin code.
    */
   private executePluginModule(code: string, manifest: PluginManifest, pluginDir: string): Plugin {
     const module = { exports: {} as any };
     const exports = module.exports;
 
+    installObsidianArrayPrototypeCompat();
     const obsidianModule = createObsidianModule();
+    const supportedRuntimeModules: Record<string, unknown> = {
+      path,
+      'node:path': path,
+      assert: nodeAssert,
+      'node:assert': nodeAssert,
+      'assert/strict': nodeAssertStrict,
+      'node:assert/strict': nodeAssertStrict,
+      buffer: nodeBuffer,
+      'node:buffer': nodeBuffer,
+      crypto: nodeCrypto,
+      'node:crypto': nodeCrypto,
+      events: nodeEvents,
+      'node:events': nodeEvents,
+      querystring: nodeQuerystring,
+      'node:querystring': nodeQuerystring,
+      stream: nodeStream,
+      'node:stream': nodeStream,
+      string_decoder: nodeStringDecoder,
+      'node:string_decoder': nodeStringDecoder,
+      timers: nodeTimers,
+      'node:timers': nodeTimers,
+      'timers/promises': nodeTimersPromises,
+      'node:timers/promises': nodeTimersPromises,
+      url: nodeUrl,
+      'node:url': nodeUrl,
+      util: nodeUtil,
+      'node:util': nodeUtil,
+    };
 
     const require = (id: string) => {
       if (id === 'obsidian') {
         return obsidianModule;
       }
+      if (Object.prototype.hasOwnProperty.call(supportedRuntimeModules, id)) {
+        return supportedRuntimeModules[id];
+      }
       throw new CompatError(`Unsupported module: ${id}`, CompatErrorCodes.MODULE_NOT_SUPPORTED, { moduleId: id });
     };
 
+    const globals = this.createPluginGlobals(obsidianModule);
+
     try {
       const wrappedCode = `${code}\n//# sourceURL=obsidian-plugin:${manifest.id}/main.js`;
-      const fn = new Function('module', 'exports', 'require', 'console', wrappedCode);
-      fn(module, exports, require, console);
+      const fn = new Function(
+        'module',
+        'exports',
+        'require',
+        'console',
+        'window',
+        'document',
+        'activeWindow',
+        'activeDocument',
+        'self',
+        'globalThis',
+        'localStorage',
+        'app',
+        'createEl',
+        'createDiv',
+        'createSpan',
+        'createFragment',
+        'i18next',
+        'String',
+        'HTMLElement',
+        'CodeMirror',
+        'CodeMirrorAdapter',
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+        wrappedCode,
+      );
+      fn(
+        module,
+        exports,
+        require,
+        console,
+        globals.window,
+        globals.document,
+        globals.activeWindow,
+        globals.document,
+        globals.window,
+        globals.window,
+        globals.localStorage,
+        this.app,
+        globals.createEl,
+        globals.createDiv,
+        globals.createSpan,
+        globals.createFragment,
+        globals.i18next,
+        globals.String,
+        globals.HTMLElement,
+        globals.CodeMirror,
+        globals.CodeMirrorAdapter,
+        globals.setTimeout,
+        globals.clearTimeout,
+        globals.setInterval,
+        globals.clearInterval,
+      );
     } catch (err) {
       throw new Error(`Plugin code execution failed for "${manifest.id}": ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -227,5 +381,260 @@ export class PluginLoader {
    */
   getApp(): AppShim {
     return this.app;
+  }
+
+  private createPluginGlobals(obsidianModule: Record<string, unknown>) {
+    const localStorage = this.createLocalStorageShim();
+    const documentShim = this.createDocumentShim();
+    const codeMirrorShim = this.createCodeMirrorShim();
+    const codeMirrorAdapterShim = { commands: {} as Record<string, unknown> };
+    const stringShim = this.createStringShim();
+    const i18next = {
+      t: (key: string) => {
+        if (key === 'dialogue.button-continue') return 'Continue';
+        if (key === 'dialogue.button-cancel') return 'Cancel';
+        return String(key);
+      },
+    };
+    const createEl = (tagName: string, attrs?: unknown, callback?: (el: HTMLElement) => void) => {
+      const element = createObsidianElement(tagName);
+      this.applyCreateElAttrs(element, attrs);
+      callback?.(element);
+      return element;
+    };
+    const createDiv = (attrs?: unknown, callback?: (el: HTMLElement) => void) => createEl('div', attrs, callback);
+    const createSpan = (attrs?: unknown, callback?: (el: HTMLElement) => void) => createEl('span', attrs, callback);
+    const createFragment = (callback?: (el: HTMLElement) => void) => {
+      const fragment = createObsidianElement('fragment');
+      callback?.(fragment);
+      return fragment;
+    };
+    const runSafely = (callback: unknown, args: unknown[]) => {
+      try {
+        if (typeof callback === 'function') {
+          (callback as (...values: unknown[]) => void)(...args);
+        }
+      } catch (err) {
+        this.app.getRuntimeHost().warn({
+          code: 'plugin-async-callback-error',
+          message: `Plugin async callback failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    };
+    const safeSetTimeout = (callback: unknown, timeout?: number, ...args: unknown[]) => (
+      setTimeout(() => runSafely(callback, args), timeout)
+    );
+    const safeSetInterval = (callback: unknown, timeout?: number, ...args: unknown[]) => (
+      setInterval(() => runSafely(callback, args), timeout)
+    );
+
+    const windowShim = {
+      app: this.app,
+      document: documentShim,
+      activeDocument: documentShim,
+      CodeMirror: codeMirrorShim,
+      CodeMirrorAdapter: codeMirrorAdapterShim,
+      localStorage,
+      moment: obsidianModule.moment,
+      i18next,
+      String: stringShim,
+      setTimeout: safeSetTimeout,
+      clearTimeout,
+      setInterval: safeSetInterval,
+      clearInterval,
+      requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0),
+      cancelAnimationFrame: (id: number) => clearTimeout(id),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      getComputedStyle: () => ({
+        getPropertyValue: () => '',
+      }),
+      createEl,
+      createDiv,
+      createSpan,
+      createDocumentFragment: createFragment,
+    } as Record<string, unknown>;
+    windowShim.window = windowShim;
+    windowShim.self = windowShim;
+    windowShim.globalThis = windowShim;
+    windowShim.activeWindow = windowShim;
+
+    return {
+      window: windowShim,
+      document: documentShim,
+      activeWindow: windowShim,
+      localStorage,
+      createEl,
+      createDiv,
+      createSpan,
+      createFragment,
+      i18next,
+      String: stringShim,
+      HTMLElement: typeof HTMLElement === 'undefined' ? CompatibilityHTMLElement : HTMLElement,
+      CodeMirror: codeMirrorShim,
+      CodeMirrorAdapter: codeMirrorAdapterShim,
+      setTimeout: safeSetTimeout,
+      clearTimeout,
+      setInterval: safeSetInterval,
+      clearInterval,
+    };
+  }
+
+  private createLocalStorageShim(): PluginLocalStorage {
+    return {
+      getItem: (key: string) => {
+        const value = this.app.loadLocalStorage(String(key));
+        return typeof value === 'string' ? value : value == null ? null : JSON.stringify(value);
+      },
+      setItem: (key: string, value: string) => {
+        this.app.saveLocalStorage(String(key), String(value));
+      },
+      removeItem: (key: string) => {
+        this.app.removeLocalStorage(String(key));
+      },
+    };
+  }
+
+  private createStringShim(): StringConstructor & { isString?: (value: unknown) => boolean } {
+    const stringShim = String as StringConstructor & { isString?: (value: unknown) => boolean };
+    stringShim.isString ??= (value: unknown) => typeof value === 'string' || value instanceof String;
+    return stringShim;
+  }
+
+  private createDocumentShim(): PluginDocumentShim {
+    const body = createObsidianElement('body');
+    const head = createObsidianElement('head');
+    const querySelectorAll = (selector: string): HTMLElement[] => [
+      ...Array.from(body.querySelectorAll(selector)),
+      ...Array.from(head.querySelectorAll(selector)),
+    ] as HTMLElement[];
+    const getElementId = (element: HTMLElement): string | null => {
+      const directId = (element as { id?: unknown }).id;
+      if (typeof directId === 'string' && directId.length > 0) return directId;
+      return element.getAttribute('id');
+    };
+    const findElementById = (element: HTMLElement, id: string): HTMLElement | null => {
+      if (getElementId(element) === id) return element;
+      const children = (element as { children?: Iterable<HTMLElement>; childNodes?: Iterable<HTMLElement> }).children
+        ?? (element as { children?: Iterable<HTMLElement>; childNodes?: Iterable<HTMLElement> }).childNodes
+        ?? [];
+      for (const child of Array.from(children)) {
+        const match = findElementById(child, id);
+        if (match) return match;
+      }
+      return null;
+    };
+    const classSelector = (className: string): string => className
+      .split(/\s+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => `.${item.replace(/[^a-zA-Z0-9_-]/g, '\\$&')}`)
+      .join('');
+    return {
+      body,
+      head,
+      createElement: (tagName: string) => createObsidianElement(tagName),
+      createElementNS: (_namespaceURI: string, qualifiedName: string) => createObsidianElement(qualifiedName),
+      createTextNode: (text: string) => {
+        if (typeof document !== 'undefined' && typeof document.createTextNode === 'function') {
+          return document.createTextNode(String(text));
+        }
+        const node = createObsidianElement('text');
+        node.textContent = String(text);
+        return node;
+      },
+      createEl: (tagName: string, attrs?: unknown, callback?: (el: HTMLElement) => void) => {
+        const element = createObsidianElement(tagName);
+        this.applyCreateElAttrs(element, attrs);
+        callback?.(element);
+        return element;
+      },
+      createDiv: (attrs?: unknown, callback?: (el: HTMLElement) => void) => {
+        const element = createObsidianElement('div');
+        this.applyCreateElAttrs(element, attrs);
+        callback?.(element);
+        return element;
+      },
+      createSpan: (attrs?: unknown, callback?: (el: HTMLElement) => void) => {
+        const element = createObsidianElement('span');
+        this.applyCreateElAttrs(element, attrs);
+        callback?.(element);
+        return element;
+      },
+      createDocumentFragment: () => createObsidianElement('fragment'),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      on: () => {},
+      off: () => {},
+      querySelector: (selector: string) => querySelectorAll(selector)[0] ?? null,
+      querySelectorAll,
+      getElementById: (id: string) => findElementById(body, String(id)) ?? findElementById(head, String(id)),
+      getElementsByTagName: (tagName: string) => {
+        const normalized = tagName.toLowerCase();
+        if (normalized === 'body') return [body];
+        if (normalized === 'head') return [head];
+        return [];
+      },
+      getElementsByClassName: (className: string) => {
+        const selector = classSelector(className);
+        return selector ? querySelectorAll(selector) : [];
+      },
+    };
+  }
+
+  private createCodeMirrorShim() {
+    const modes: Record<string, unknown> = {};
+    return {
+      modes,
+      defineMode: (name: string, factory: unknown) => {
+        modes[String(name)] = factory;
+      },
+      getMode: (_config: unknown, name: string) => modes[String(name)] ?? { name },
+    };
+  }
+
+  private applyCreateElAttrs(element: HTMLElement, attrs: unknown): void {
+    if (!attrs || typeof attrs !== 'object') return;
+    const values = attrs as {
+      text?: unknown;
+      cls?: unknown;
+      attr?: Record<string, unknown>;
+      href?: unknown;
+      title?: unknown;
+      type?: unknown;
+      value?: unknown;
+    };
+    if (values.text !== undefined) element.textContent = String(values.text);
+    if (typeof values.cls === 'string') {
+      element.classList.add(...values.cls.split(/\s+/).filter(Boolean));
+    } else if (Array.isArray(values.cls)) {
+      element.classList.add(...values.cls.map(String));
+    }
+    if (values.href !== undefined) element.setAttribute('href', String(values.href));
+    if (values.title !== undefined) element.setAttribute('title', String(values.title));
+    if (values.type !== undefined) element.setAttribute('type', String(values.type));
+    if (values.value !== undefined) {
+      (element as unknown as { value: string }).value = String(values.value);
+    }
+    for (const [key, value] of Object.entries(values.attr ?? {})) {
+      element.setAttribute(key, String(value));
+    }
+  }
+
+  private async cleanupPlugin(pluginId: string, instance: Plugin): Promise<void> {
+    try {
+      await instance.unload();
+    } catch (err) {
+      console.error(`[obsidian-compat] Error during failed plugin cleanup: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.clearPluginRegistrations(pluginId);
+  }
+
+  private clearPluginRegistrations(pluginId: string): void {
+    this.app.unregisterAllCommands(pluginId);
+    this.app.getRuntimeHost().unregisterPlugin(pluginId);
+    delete this.app.plugins.plugins[pluginId];
+    this.app.plugins.enabledPlugins.delete(pluginId);
+    this.plugins.delete(pluginId);
   }
 }

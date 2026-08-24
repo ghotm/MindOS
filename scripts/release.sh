@@ -6,6 +6,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────
 
 BUMP="${1:-patch}"
+REPO_ROOT="$(pwd -P)"
 
 # 1. Ensure clean working tree
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -15,7 +16,7 @@ fi
 
 # 2. Run tests
 echo "🧪 Running tests..."
-npm test
+pnpm run test:release
 echo ""
 
 # 3. Verify Next.js build
@@ -67,7 +68,10 @@ echo "   📦 Platform: $PLATFORM_TARBALL ($PLATFORM_TARBALL_SIZE)"
 # Install from tarball in isolation (production deps only)
 cd "$SMOKE_DIR"
 npm init -y --silent >/dev/null 2>&1
-npm install "$PLATFORM_TARBALL_PATH" "$TARBALL_PATH" --ignore-scripts >/dev/null 2>&1
+# Omit registry optional deps here because this pre-bump smoke uses the current
+# package version; stale published platform packages can otherwise affect bin links.
+npm install "$PLATFORM_TARBALL_PATH" "$TARBALL_PATH" --ignore-scripts --omit=optional >/dev/null 2>&1
+npm rebuild --bin-links >/dev/null 2>&1
 
 # Verify bin entry exists and is executable
 if [ ! -f "$SMOKE_DIR/node_modules/.bin/mindos" ]; then
@@ -94,6 +98,29 @@ if ! echo "$HELP_OUTPUT" | grep -qi "mindos"; then
 fi
 echo "   ✅ mindos --help works"
 
+AGENT_HOME=$(mktemp -d)
+if PATH="$SMOKE_DIR/node_modules/.bin:$PATH" HOME="$AGENT_HOME" NODE_ENV=test "$SMOKE_DIR/node_modules/.bin/mindos" mcp install codex -g -y >/tmp/mindos-release-agent-install.log 2>&1; then
+  AGENT_DOCTOR=$(PATH="$SMOKE_DIR/node_modules/.bin:$PATH" HOME="$AGENT_HOME" NODE_ENV=test "$SMOKE_DIR/node_modules/.bin/mindos" doctor agents codex --json 2>&1 || true)
+  if ! echo "$AGENT_DOCTOR" | grep -Eq '"ready"[[:space:]]*:[[:space:]]*true'; then
+    echo "❌ 'mindos doctor agents codex --json' did not report ready after install"
+    echo "$AGENT_DOCTOR"
+    rm -rf "$AGENT_HOME" "$SMOKE_DIR"
+    exit 1
+  fi
+  if [ ! -f "$AGENT_HOME/.agents/skills/mindos/SKILL.md" ]; then
+    echo "❌ Codex Skill was not installed from packaged runtime"
+    rm -rf "$AGENT_HOME" "$SMOKE_DIR"
+    exit 1
+  fi
+else
+  echo "❌ 'mindos mcp install codex -g -y' failed in release smoke"
+  cat /tmp/mindos-release-agent-install.log
+  rm -rf "$AGENT_HOME" "$SMOKE_DIR"
+  exit 1
+fi
+rm -rf "$AGENT_HOME" /tmp/mindos-release-agent-install.log
+echo "   ✅ agent install + doctor readiness works"
+
 # Verify key files are present in the installed main package
 for f in bin/mindos-shim.cjs dist/index.js dist/protocols/acp/index.js dist/protocols/mcp-server/index.cjs; do
   if [ ! -f "$SMOKE_DIR/node_modules/@geminilight/mindos/$f" ]; then
@@ -116,9 +143,10 @@ if [ -d "$SMOKE_DIR/node_modules/@geminilight/mindos-$PLATFORM_KEY/_standalone" 
 fi
 echo "   ✅ Main + platform key files present"
 
-# Cleanup
+# Cleanup. Leave the temp install directory before deleting it so subsequent
+# git operations never run from a removed working directory.
+cd "$REPO_ROOT"
 rm -rf "$SMOKE_DIR"
-cd - >/dev/null
 echo "   🟢 Smoke test passed"
 echo ""
 

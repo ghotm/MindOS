@@ -1,6 +1,19 @@
 import type { AgentInfo, SkillInfo } from '@/components/settings/types';
 
-export type AgentsDashboardTab = 'overview' | 'mcp' | 'skills' | 'a2a' | 'sessions' | 'activity' | 'channels';
+export type AgentsDashboardTab =
+  | 'overview'
+  | 'assistant'
+  | 'agent'
+  | 'capabilities'
+  | 'runs'
+  | 'presets'
+  | 'mcp'
+  | 'skills'
+  | 'a2a'
+  | 'sessions'
+  | 'activity'
+  | 'channels';
+export type AgentsNavGroup = 'overview' | 'assistant' | 'agent' | 'capabilities' | 'channels';
 export type AgentResolvedStatus = 'connected' | 'detected' | 'notFound';
 export type SkillCapability = 'research' | 'coding' | 'docs' | 'ops' | 'memory';
 export type SkillSourceFilter = 'all' | 'builtin' | 'user';
@@ -24,7 +37,27 @@ export interface AgentBuckets {
 }
 
 export function parseAgentsTab(tab: string | undefined): AgentsDashboardTab {
-  if (tab === 'mcp' || tab === 'skills' || tab === 'a2a' || tab === 'sessions' || tab === 'activity' || tab === 'channels') return tab;
+  if (
+    tab === 'assistant' ||
+    tab === 'agent' ||
+    tab === 'capabilities' ||
+    tab === 'runs' ||
+    tab === 'presets' ||
+    tab === 'mcp' ||
+    tab === 'skills' ||
+    tab === 'a2a' ||
+    tab === 'sessions' ||
+    tab === 'activity' ||
+    tab === 'channels'
+  ) return tab;
+  return 'overview';
+}
+
+export function getAgentsNavGroup(tab: AgentsDashboardTab): AgentsNavGroup {
+  if (tab === 'assistant' || tab === 'presets') return 'assistant';
+  if (tab === 'agent' || tab === 'a2a') return 'agent';
+  if (tab === 'capabilities' || tab === 'skills' || tab === 'mcp') return 'capabilities';
+  if (tab === 'channels') return 'channels';
   return 'overview';
 }
 
@@ -42,7 +75,7 @@ export function resolveAgentStatus(agent: AgentInfo): AgentResolvedStatus {
   return 'notFound';
 }
 
-export function capabilityForSkill(skill: SkillInfo): SkillCapability {
+export function capabilityForSkill(skill: Pick<SkillInfo, 'name' | 'description'>): SkillCapability {
   return capabilityFromText(`${skill.name} ${skill.description}`);
 }
 
@@ -202,16 +235,40 @@ export interface McpBulkReconnectResult {
   ok: boolean;
 }
 
+export function createMcpReconnectPlan(agents: AgentInfo[]): {
+  targets: AgentInfo[];
+  skipped: AgentInfo[];
+} {
+  return {
+    targets: agents.filter((agent) => agent.present),
+    skipped: agents.filter((agent) => !agent.present),
+  };
+}
+
 export function summarizeMcpBulkReconnectResults(results: McpBulkReconnectResult[]): {
   total: number;
   succeeded: number;
   failed: number;
+  skipped: number;
+};
+export function summarizeMcpBulkReconnectResults(results: McpBulkReconnectResult[], skipped: number): {
+  total: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+};
+export function summarizeMcpBulkReconnectResults(results: McpBulkReconnectResult[], skipped = 0): {
+  total: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
 } {
   const failed = results.filter((item) => !item.ok).length;
   return {
-    total: results.length,
+    total: results.length + skipped,
     succeeded: results.length - failed,
     failed,
+    skipped,
   };
 }
 
@@ -237,19 +294,31 @@ export function aggregateCrossAgentMcpServers(agents: AgentInfo[]): CrossAgentMc
 export interface CrossAgentSkill {
   skillName: string;
   agents: string[];
+  sourcePaths: string[];
 }
 
 export function aggregateCrossAgentSkills(agents: AgentInfo[]): CrossAgentSkill[] {
   const map = new Map<string, string[]>();
+  const sourceMap = new Map<string, Set<string>>();
   for (const agent of agents) {
     for (const skill of agent.installedSkillNames ?? []) {
       const existing = map.get(skill);
       if (existing) existing.push(agent.name);
       else map.set(skill, [agent.name]);
+
+      if (agent.installedSkillSourcePath) {
+        const sources = sourceMap.get(skill) ?? new Set<string>();
+        sources.add(agent.installedSkillSourcePath);
+        sourceMap.set(skill, sources);
+      }
     }
   }
   return [...map.entries()]
-    .map(([skillName, agentNames]) => ({ skillName, agents: agentNames }))
+    .map(([skillName, agentNames]) => ({
+      skillName,
+      agents: agentNames,
+      sourcePaths: [...(sourceMap.get(skillName) ?? new Set<string>())],
+    }))
     .sort((a, b) => b.agents.length - a.agents.length || a.skillName.localeCompare(b.skillName));
 }
 
@@ -279,11 +348,15 @@ export function filterSkillsForAgentDetail(
 
 /* ────────── Unified Skill List (MindOS + Native) ────────── */
 
+export type SkillAvailability = 'global' | 'linked' | 'unlinked' | 'native-private';
+
 export interface UnifiedSkillItem {
   name: string;
   kind: 'mindos' | 'native';
   mindosSkill?: SkillInfo;
   agents: string[];
+  availability: SkillAvailability;
+  sourcePath?: string;
   capability: SkillCapability;
   enabled: boolean;
   source: 'builtin' | 'user' | 'native';
@@ -304,17 +377,21 @@ export function buildUnifiedSkillList(
   crossAgentSkills: CrossAgentSkill[],
 ): UnifiedSkillItem[] {
   const mindosNames = new Set(mindosSkills.map((s) => s.name));
-  const crossMap = new Map<string, string[]>();
-  for (const cs of crossAgentSkills) crossMap.set(cs.skillName, cs.agents);
+  const crossMap = new Map<string, CrossAgentSkill>();
+  for (const cs of crossAgentSkills) crossMap.set(cs.skillName, cs);
 
   const result: UnifiedSkillItem[] = [];
 
   for (const skill of mindosSkills) {
+    const crossSkill = crossMap.get(skill.name);
+    const agents = crossSkill?.agents ?? [];
     result.push({
       name: skill.name,
       kind: 'mindos',
       mindosSkill: skill,
-      agents: crossMap.get(skill.name) ?? [],
+      agents,
+      availability: resolveMindosSkillAvailability(skill, agents),
+      sourcePath: skill.path,
       capability: capabilityForSkill(skill),
       enabled: skill.enabled,
       source: skill.source,
@@ -328,6 +405,8 @@ export function buildUnifiedSkillList(
       name: cs.skillName,
       kind: 'native',
       agents: cs.agents,
+      availability: 'native-private',
+      sourcePath: cs.sourcePaths[0],
       capability: capabilityFromText(cs.skillName),
       enabled: true,
       source: 'native',
@@ -336,6 +415,16 @@ export function buildUnifiedSkillList(
   }
 
   return result;
+}
+
+function resolveMindosSkillAvailability(skill: SkillInfo, agentNames: string[]): SkillAvailability {
+  // Where the body lives decides the baseline:
+  //   ~/.agents/skills → the universal shared pool, visible to every universal agent
+  //   custom paths (an agent's own dir, e.g. ~/.codex/skills) → that agent's private skill
+  if (skill.origin === 'agents-global') return 'global';
+  if (skill.origin === 'custom') return 'native-private';
+  // MindOS-managed bodies: linked when at least one downstream agent has it.
+  return agentNames.length > 0 ? 'linked' : 'unlinked';
 }
 
 export function groupUnifiedSkills(skills: UnifiedSkillItem[]): Record<SkillCapability, UnifiedSkillItem[]> {

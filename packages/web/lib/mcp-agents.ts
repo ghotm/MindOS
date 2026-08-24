@@ -2,6 +2,20 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
+import {
+  resolveSkillLinkAgents,
+  type MindosMcpAgentRegistryDef,
+  type MindosSkillAgentRegistration,
+  type MindosSkillLinkAgent,
+} from '@geminilight/mindos/server';
+import { SKILL_AGENT_REGISTRY } from './mcp-agent-registry';
+import type { SkillInstallMode as SkillInstallModeType } from './mcp-agent-registry';
+import { loadCustomAgents } from './custom-agents';
+export {
+  SKILL_AGENT_REGISTRY,
+  type SkillAgentRegistration,
+  type SkillInstallMode,
+} from './mcp-agent-registry';
 
 /** Parse JSONC — strips single-line (//) and block comments before JSON.parse */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -24,9 +38,19 @@ function windowsAppDataRoot(): string {
   return normalizeConfigRoot(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'));
 }
 
+function windowsLocalAppDataRoot(): string {
+  return normalizeConfigRoot(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'));
+}
+
 function platformAppDataPath(options: { darwin: string; linux: string; win32: string }): string {
   if (process.platform === 'darwin') return options.darwin;
   if (process.platform === 'win32') return `${windowsAppDataRoot()}/${options.win32}`;
+  return options.linux;
+}
+
+function platformLocalAppDataPath(options: { darwin: string; linux: string; win32: string }): string {
+  if (process.platform === 'darwin') return options.darwin;
+  if (process.platform === 'win32') return `${windowsLocalAppDataRoot()}/${options.win32}`;
   return options.linux;
 }
 
@@ -48,27 +72,51 @@ const traeCnRoot = platformAppDataPath({
   win32: 'Trae CN',
 });
 
+const warpStableStateRoot = platformLocalAppDataPath({
+  darwin: '~/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Stable',
+  linux: '~/.local/state/warp-terminal',
+  win32: 'warp/Warp/data',
+});
+
+const warpPreviewStateRoot = platformLocalAppDataPath({
+  darwin: '~/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Preview',
+  linux: '~/.local/state/warp-terminal-preview',
+  win32: 'warp/WarpPreview/data',
+});
+
+const warpConfigRoot = platformLocalAppDataPath({
+  darwin: '~/.warp',
+  linux: '~/.config/warp-terminal',
+  win32: 'warp/Warp/config',
+});
+
+const warpDataRoot = platformAppDataPath({
+  darwin: '~/.warp',
+  linux: '~/.local/share/warp-terminal',
+  win32: 'warp/Warp/data',
+});
+
 export interface AgentDef {
   name: string;
   project: string | null;
   global: string;
+  /** Additional config files to inspect for existing installs without writing to them. */
+  projectReadAlso?: string[];
+  globalReadAlso?: string[];
   key: string;
   preferredTransport: 'stdio' | 'http';
   /** Config file format: 'json' (default), 'toml', or 'yaml'. */
   format?: 'json' | 'toml' | 'yaml';
   /** For agents whose global config nests under a parent key (e.g. VS Code: mcp.servers). */
   globalNestedKey?: string;
+  /** Agent-specific MCP entry shape. Defaults to the common Claude/Cursor style. */
+  entryStyle?: 'standard' | 'kilo';
+  /** Agent-specific skills workspace, when it differs from the config/presence root. */
+  skillDir?: string;
   /** CLI binary name for presence detection (e.g. 'claude'). Optional. */
   presenceCli?: string;
   /** Data directories for presence detection. Any one existing → present. */
   presenceDirs?: string[];
-}
-
-export type SkillInstallMode = 'universal' | 'additional' | 'unsupported';
-export interface SkillAgentRegistration {
-  mode: SkillInstallMode;
-  /** npx skills `-a` value for additional agents. */
-  skillAgentName?: string;
 }
 
 export const MCP_AGENTS: Record<string, AgentDef> = {
@@ -150,15 +198,6 @@ export const MCP_AGENTS: Record<string, AgentDef> = {
     presenceCli: 'codebuddy',
     presenceDirs: ['~/.codebuddy/'],
   },
-  'iflow-cli': {
-    name: 'iFlow CLI',
-    project: '.iflow/settings.json',
-    global: '~/.iflow/settings.json',
-    key: 'mcpServers',
-    preferredTransport: 'stdio',
-    presenceCli: 'iflow',
-    presenceDirs: ['~/.iflow/'],
-  },
   'kimi-cli': {
     name: 'Kimi Code',
     project: '.kimi/mcp.json',
@@ -176,6 +215,45 @@ export const MCP_AGENTS: Record<string, AgentDef> = {
     preferredTransport: 'stdio',
     presenceCli: 'opencode',
     presenceDirs: ['~/.config/opencode/'],
+  },
+  'kilo-code': {
+    name: 'Kilo Code',
+    project: '.kilo/kilo.jsonc',
+    global: '~/.config/kilo/kilo.jsonc',
+    projectReadAlso: [
+      '.kilo/kilo.json',
+      'kilo.jsonc',
+      'kilo.json',
+      '.kilocode/kilo.jsonc',
+      '.kilocode/kilo.json',
+      '.opencode/opencode.jsonc',
+      '.opencode/opencode.json',
+    ],
+    globalReadAlso: [
+      '~/.config/kilo/kilo.json',
+      '~/.config/kilo/opencode.jsonc',
+      '~/.config/kilo/opencode.json',
+      '~/.config/kilo/config.json',
+    ],
+    key: 'mcp',
+    preferredTransport: 'stdio',
+    entryStyle: 'kilo',
+    presenceCli: 'kilo',
+    presenceDirs: ['~/.config/kilo/', '~/.kilo/', '~/.kilocode/'],
+  },
+  'warp': {
+    name: 'Warp',
+    project: '.warp/.mcp.json',
+    global: '~/.warp/.mcp.json',
+    key: 'mcpServers',
+    preferredTransport: 'stdio',
+    presenceDirs: [
+      '~/.warp/',
+      `${warpStableStateRoot}/`,
+      `${warpPreviewStateRoot}/`,
+      `${warpConfigRoot}/`,
+      `${warpDataRoot}/`,
+    ],
   },
   'pi': {
     name: 'Pi',
@@ -312,40 +390,8 @@ export const MCP_AGENTS: Record<string, AgentDef> = {
   },
 };
 
-/**
- * Skill-install registry keyed by MCP agent key.
- * Keep in sync with docs and bin/lib/mcp-agents.js.
- */
-export const SKILL_AGENT_REGISTRY: Record<string, SkillAgentRegistration> = {
-  'claude-code': { mode: 'additional', skillAgentName: 'claude-code' },
-  'cursor': { mode: 'universal' },
-  'windsurf': { mode: 'additional', skillAgentName: 'windsurf' },
-  'cline': { mode: 'universal' },
-  'trae': { mode: 'additional', skillAgentName: 'trae' },
-  'gemini-cli': { mode: 'universal' },
-  'openclaw': { mode: 'additional', skillAgentName: 'openclaw' },
-  'codebuddy': { mode: 'additional', skillAgentName: 'codebuddy' },
-  'iflow-cli': { mode: 'additional', skillAgentName: 'iflow-cli' },
-  'kimi-cli': { mode: 'universal' },
-  'opencode': { mode: 'universal' },
-  'pi': { mode: 'additional', skillAgentName: 'pi' },
-  'augment': { mode: 'additional', skillAgentName: 'augment' },
-  'qwen-code': { mode: 'additional', skillAgentName: 'qwen-code' },
-  'qoder': { mode: 'additional', skillAgentName: 'qoder' },
-  'trae-cn': { mode: 'additional', skillAgentName: 'trae-cn' },
-  'roo': { mode: 'additional', skillAgentName: 'roo' },
-  'github-copilot': { mode: 'universal' },
-  'codex': { mode: 'universal' },
-  'antigravity': { mode: 'additional', skillAgentName: 'antigravity' },
-  'qclaw': { mode: 'unsupported' },
-  'workbuddy': { mode: 'unsupported' },
-  'lingma': { mode: 'unsupported' },
-  'copaw': { mode: 'unsupported' },
-  'hermes': { mode: 'unsupported' },
-};
-
 export interface SkillWorkspaceProfile {
-  mode: SkillInstallMode;
+  mode: SkillInstallModeType;
   skillAgentName?: string;
   workspacePath: string;
 }
@@ -499,14 +545,109 @@ function parseTomlServerNames(content: string, sectionKey: string): string[] {
   return [...names];
 }
 
+function sameNormalizedPath(a: string, b: string): boolean {
+  return path.normalize(a) === path.normalize(b);
+}
+
+function configPathCandidates(agent: AgentDef, scopeType: 'global' | 'project'): string[] {
+  const primary = scopeType === 'global' ? agent.global : agent.project;
+  const readAlso = scopeType === 'global' ? agent.globalReadAlso : agent.projectReadAlso;
+  return [primary, ...(readAlso ?? [])].filter((entry): entry is string => !!entry);
+}
+
+function configFileLooksMindosManagedOnly(filePath: string, agent: AgentDef): boolean {
+  const managedGlobalPaths = configPathCandidates(agent, 'global').map((candidate) => expandHome(candidate));
+  if (!managedGlobalPaths.some((globalPath) => sameNormalizedPath(filePath, globalPath))) return false;
+
+  let content = '';
+  try {
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return false;
+  }
+
+  const trimmed = content.trim();
+  if (!trimmed) return true;
+
+  try {
+    if (agent.format === 'toml') {
+      const names = parseTomlServerNames(content, agent.key);
+      return names.length === 0 || names.every(name => name === 'mindos');
+    }
+    if (agent.format === 'yaml') {
+      const names = parseYamlServerNames(content, agent.key);
+      return names.length === 0 || names.every(name => name === 'mindos');
+    }
+
+    const parsed = parseJsonc(content) as Record<string, unknown>;
+    const section = agent.globalNestedKey
+      ? readNestedRecord(parsed, agent.globalNestedKey)
+      : readOwnRecord(parsed, agent.key);
+    if (!section) return Object.keys(parsed).length === 0;
+    const serverNames = Object.keys(section);
+    if (!serverNames.every(name => name === 'mindos')) return false;
+
+    if (!agent.globalNestedKey) {
+      const topKeys = Object.keys(parsed);
+      return topKeys.length === 0 || (topKeys.length === 1 && topKeys[0] === agent.key);
+    }
+
+    let cursor: Record<string, unknown> | null = parsed;
+    const parts = agent.globalNestedKey.split('.').filter(Boolean);
+    for (const part of parts) {
+      if (!cursor || Object.keys(cursor).some(key => key !== part)) return false;
+      cursor = cursor[part] && typeof cursor[part] === 'object'
+        ? cursor[part] as Record<string, unknown>
+        : null;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function presencePathHasAgentSignal(candidatePath: string, agent: AgentDef): boolean {
+  if (!fs.existsSync(candidatePath)) return false;
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(candidatePath);
+  } catch {
+    return true;
+  }
+
+  if (stat.isFile()) return !configFileLooksMindosManagedOnly(candidatePath, agent);
+  if (!stat.isDirectory()) return true;
+
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(candidatePath, { withFileTypes: true });
+  } catch {
+    return true;
+  }
+
+  if (entries.length === 0) return false;
+
+  const ignoredEntryNames = new Set(['.DS_Store', 'skills']);
+  for (const entry of entries) {
+    if (ignoredEntryNames.has(entry.name)) continue;
+    const entryPath = path.join(candidatePath, entry.name);
+    if (entry.isFile() && configFileLooksMindosManagedOnly(entryPath, agent)) continue;
+    return true;
+  }
+
+  return false;
+}
+
 export function resolveSkillWorkspaceProfile(agentKey: string): SkillWorkspaceProfile {
   const registration = SKILL_AGENT_REGISTRY[agentKey] ?? { mode: 'unsupported' as const };
   if (registration.mode === 'universal') {
     return { mode: registration.mode, workspacePath: expandHome('~/.agents/skills') };
   }
   const agent = MCP_AGENTS[agentKey];
-  const root = agent ? resolveHiddenRootPath(agent) : expandHome('~/.agents');
-  const workspacePath = path.join(root, 'skills');
+  const workspacePath = agent?.skillDir
+    ? expandHome(agent.skillDir)
+    : path.join(agent ? resolveHiddenRootPath(agent) : expandHome('~/.agents'), 'skills');
   return {
     mode: registration.mode,
     skillAgentName: registration.skillAgentName,
@@ -519,23 +660,24 @@ export function detectAgentConfiguredMcpServers(agentKey: string): AgentConfigur
   if (!agent) return { servers: [], sources: [] };
   const serverSet = new Set<string>();
   const sources: string[] = [];
-  for (const [scopeType, cfgPath] of [['global', agent.global], ['project', agent.project]] as Array<[string, string | null]>) {
-    if (!cfgPath) continue;
-    const absPath = expandHome(cfgPath);
-    if (!fs.existsSync(absPath)) continue;
-    try {
-      const content = fs.readFileSync(absPath, 'utf-8');
-      const nestedPath = scopeType === 'global' ? agent.globalNestedKey : undefined;
-      const names =
-        agent.format === 'toml'
-          ? parseTomlServerNames(content, agent.key)
-          : agent.format === 'yaml'
-            ? parseYamlServerNames(content, agent.key)
-            : parseJsonServerNames(content, agent.key, nestedPath);
-      for (const name of names) serverSet.add(name);
-      sources.push(`${scopeType}:${cfgPath}`);
-    } catch {
-      continue;
+  for (const scopeType of ['global', 'project'] as const) {
+    for (const cfgPath of configPathCandidates(agent, scopeType)) {
+      const absPath = expandHome(cfgPath);
+      if (!fs.existsSync(absPath)) continue;
+      try {
+        const content = fs.readFileSync(absPath, 'utf-8');
+        const nestedPath = scopeType === 'global' ? agent.globalNestedKey : undefined;
+        const names =
+          agent.format === 'toml'
+            ? parseTomlServerNames(content, agent.key)
+            : agent.format === 'yaml'
+              ? parseYamlServerNames(content, agent.key)
+              : parseJsonServerNames(content, agent.key, nestedPath);
+        for (const name of names) serverSet.add(name);
+        sources.push(`${scopeType}:${cfgPath}`);
+      } catch {
+        continue;
+      }
     }
   }
   return {
@@ -628,43 +770,51 @@ export function detectInstalled(agentKey: string): { installed: boolean; scope?:
   const agent = MCP_AGENTS[agentKey];
   if (!agent) return { installed: false };
 
-  for (const [scopeType, cfgPath] of [['global', agent.global], ['project', agent.project]] as [string, string | null][]) {
-    if (!cfgPath) continue;
-    const absPath = expandHome(cfgPath);
-    if (!fs.existsSync(absPath)) continue;
-    try {
-      const content = fs.readFileSync(absPath, 'utf-8');
-      // Handle TOML format (e.g., codex)
-      if (agent.format === 'toml') {
-        const result = parseTomlMcpEntry(content, agent.key, 'mindos');
-        if (result.found && result.entry) {
-          const entry = result.entry;
-          const transport = entry.type === 'stdio' ? 'stdio' : entry.url ? 'http' : 'unknown';
-          return { installed: true, scope: scopeType, transport, configPath: cfgPath, url: entry.url };
+  for (const scopeType of ['global', 'project'] as const) {
+    for (const cfgPath of configPathCandidates(agent, scopeType)) {
+      const absPath = expandHome(cfgPath);
+      if (!fs.existsSync(absPath)) continue;
+      try {
+        const content = fs.readFileSync(absPath, 'utf-8');
+        // Handle TOML format (e.g., codex)
+        if (agent.format === 'toml') {
+          const result = parseTomlMcpEntry(content, agent.key, 'mindos');
+          if (result.found && result.entry) {
+            const entry = result.entry;
+            const transport = entry.type === 'stdio' ? 'stdio' : entry.url ? 'http' : 'unknown';
+            return { installed: true, scope: scopeType, transport, configPath: cfgPath, url: entry.url };
+          }
+        } else if (agent.format === 'yaml') {
+          const result = parseYamlMcpEntry(content, agent.key, 'mindos');
+          if (result.found && result.entry) {
+            const entry = result.entry;
+            const transport = entry.command ? 'stdio' : entry.url ? 'http' : 'unknown';
+            return { installed: true, scope: scopeType, transport, configPath: cfgPath, url: entry.url };
+          }
+        } else {
+          // JSON format (default)
+          const config = parseJsonc(content);
+          const servers = scopeType === 'global' && agent.globalNestedKey
+            ? readNestedRecord(config as Record<string, unknown>, agent.globalNestedKey)
+            : readOwnRecord(config, agent.key) ?? undefined;
+          if (servers?.mindos) {
+            const entry = servers.mindos as Record<string, unknown>;
+            const transport = isLocalMcpEntry(entry) ? 'stdio' : entry.url ? 'http' : 'unknown';
+            return { installed: true, scope: scopeType, transport, configPath: cfgPath, url: entry.url as string | undefined };
+          }
         }
-      } else if (agent.format === 'yaml') {
-        const result = parseYamlMcpEntry(content, agent.key, 'mindos');
-        if (result.found && result.entry) {
-          const entry = result.entry;
-          const transport = entry.command ? 'stdio' : entry.url ? 'http' : 'unknown';
-          return { installed: true, scope: scopeType, transport, configPath: cfgPath, url: entry.url };
-        }
-      } else {
-        // JSON format (default)
-        const config = parseJsonc(content);
-        const servers = scopeType === 'global' && agent.globalNestedKey
-          ? readNestedRecord(config as Record<string, unknown>, agent.globalNestedKey)
-          : readOwnRecord(config, agent.key) ?? undefined;
-        if (servers?.mindos) {
-          const entry = servers.mindos as Record<string, unknown>;
-          const transport = entry.type === 'stdio' ? 'stdio' : entry.url ? 'http' : 'unknown';
-          return { installed: true, scope: scopeType, transport, configPath: cfgPath, url: entry.url as string | undefined };
-        }
-      }
-    } catch { /* ignore parse errors */ }
+      } catch { /* ignore parse errors */ }
+    }
   }
 
   return { installed: false };
+}
+
+function isLocalMcpEntry(entry: Record<string, unknown>): boolean {
+  return entry.type === 'stdio'
+    || entry.type === 'local'
+    || typeof entry.command === 'string'
+    || Array.isArray(entry.command);
 }
 
 // Parse YAML to find MCP server entry without external library
@@ -804,6 +954,43 @@ export function detectAgentPresence(agentKey: string): boolean {
     } catch { /* not found */ }
   }
   // 2. Dir check
-  if (agent.presenceDirs?.some(d => fs.existsSync(expandHome(d)))) return true;
+  if (agent.presenceDirs?.some(d => presencePathHasAgentSignal(expandHome(d), agent))) return true;
   return false;
+}
+
+/* ── Skill Link Agents (skill × agent matrix) ──────────────────────────── */
+
+/**
+ * Downstream agents eligible for skill linking: present on this machine and
+ * skill-capable (universal/additional). Unsupported-mode agents, agents not
+ * detected on this machine, and MindOS itself are excluded. Custom agents are
+ * appended with their configured skill directory (additional mode).
+ */
+export function listSkillLinkAgents(): MindosSkillLinkAgent[] {
+  const linkAgents = resolveSkillLinkAgents({
+    agents: MCP_AGENTS as unknown as Record<string, MindosMcpAgentRegistryDef>,
+    skillAgentRegistry: SKILL_AGENT_REGISTRY as unknown as Record<string, MindosSkillAgentRegistration>,
+    detectAgentPresence,
+    resolveSkillWorkspaceProfile,
+    // Route fs probing through THIS module's fs so behavior is injectable in
+    // tests (the package's own fs import is not affected by web-side spies).
+    pathExists: (p: string) => fs.existsSync(p),
+  });
+
+  const seenKeys = new Set(linkAgents.map((agent) => agent.key));
+  for (const custom of loadCustomAgents()) {
+    if (custom.key === 'mindos' || custom.key in MCP_AGENTS || seenKeys.has(custom.key)) continue;
+    const presenceCandidates = [...(custom.presenceDirs ?? []), custom.baseDir].filter(Boolean);
+    if (!presenceCandidates.some((dir) => fs.existsSync(expandHome(dir)))) continue;
+    seenKeys.add(custom.key);
+    linkAgents.push({
+      key: custom.key,
+      name: custom.name,
+      mode: 'additional',
+      // Same skill-dir resolution as getTrustedNativeSkillRoots in app/api/skills/route.ts.
+      skillDir: expandHome(custom.skillDir || path.join(custom.baseDir, 'skills')),
+    });
+  }
+
+  return linkAgents;
 }

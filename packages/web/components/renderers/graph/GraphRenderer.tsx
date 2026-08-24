@@ -1,427 +1,253 @@
 'use client';
 
-import { useState, useEffect, useMemo, memo, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   ReactFlow,
   Background,
   BackgroundVariant,
   Controls,
   MiniMap,
-  Handle,
-  Position,
-  type NodeProps,
+  type NodeTypes,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import type { RendererContext } from '@/lib/renderers/registry';
-import type { GraphData, GraphNode, GraphEdge } from '@/app/api/graph/route';
+import type { GraphData, GraphDirection, GraphNode, GraphScope } from '@/app/api/graph/route';
 import { apiFetch } from '@/lib/api';
-
-// ─── Force Layout ──────────────────────────────────────────────────────────────
-
-interface Pos { x: number; y: number }
-
-function forceLayout(
-  nodeIds: string[],
-  edges: { source: string; target: string }[],
-  iterations?: number,
-): Record<string, Pos> {
-  const n = nodeIds.length;
-  if (n === 0) return {};
-
-  const iters = iterations ?? (n > 100 ? 80 : 150);
-  const width = 1200;
-  const height = 900;
-  // k is the "ideal" distance between nodes
-  const k = Math.sqrt((width * height) / Math.max(n, 1)) * 0.6;
-  const pos: Record<string, Pos> = {};
-
-  // Initialize in a more spread-out circle or random
-  nodeIds.forEach((id, i) => {
-    const angle = (2 * Math.PI * i) / n;
-    const radius = Math.min(width, height) * 0.4 * Math.random();
-    pos[id] = {
-      x: width / 2 + Math.cos(angle) * radius,
-      y: height / 2 + Math.sin(angle) * radius,
-    };
-  });
-
-  const disp: Record<string, Pos> = {};
-  const initTemp = width * 0.1;
-
-  for (let iter = 0; iter < iters; iter++) {
-    const temp = initTemp * (1 - iter / iters);
-
-    for (const id of nodeIds) disp[id] = { x: 0, y: 0 };
-
-    // Repulsion (nodes push each other away)
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        const u = nodeIds[i], v = nodeIds[j];
-        const dx = pos[u].x - pos[v].x;
-        const dy = pos[u].y - pos[v].y;
-        const distSq = dx * dx + dy * dy || 0.01;
-        const dist = Math.sqrt(distSq);
-        const force = (k * k) / dist;
-        disp[u].x += (dx / dist) * force;
-        disp[u].y += (dy / dist) * force;
-        disp[v].x -= (dx / dist) * force;
-        disp[v].y -= (dy / dist) * force;
-      }
-    }
-
-    // Attraction (edges pull nodes together)
-    for (const e of edges) {
-      const u = e.source, v = e.target;
-      if (!pos[u] || !pos[v]) continue;
-      const dx = pos[u].x - pos[v].x;
-      const dy = pos[u].y - pos[v].y;
-      const distSq = dx * dx + dy * dy || 0.01;
-      const dist = Math.sqrt(distSq);
-      const force = (dist * dist) / k;
-      disp[u].x -= (dx / dist) * force;
-      disp[u].y -= (dy / dist) * force;
-      disp[v].x += (dx / dist) * force;
-      disp[v].y += (dy / dist) * force;
-    }
-
-    // Gravity (pull towards center to avoid drifting)
-    for (const id of nodeIds) {
-      const dx = pos[id].x - width / 2;
-      const dy = pos[id].y - height / 2;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-      const force = 0.05 * dist; // Gentle pull
-      disp[id].x -= (dx / dist) * force;
-      disp[id].y -= (dy / dist) * force;
-    }
-
-    // Apply displacements
-    for (const id of nodeIds) {
-      const d = disp[id];
-      const dlen = Math.sqrt(d.x * d.x + d.y * d.y) || 0.01;
-      pos[id].x += (d.x / dlen) * Math.min(dlen, temp);
-      pos[id].y += (d.y / dlen) * Math.min(dlen, temp);
-      
-      // Softer clamping
-      pos[id].x = Math.max(0, Math.min(width, pos[id].x));
-      pos[id].y = Math.max(0, Math.min(height, pos[id].y));
-    }
-  }
-
-  return pos;
-}
-
-// ─── WikiNode ──────────────────────────────────────────────────────────────────
-
-interface WikiNodeData {
-  label: string;
-  id: string;
-  isCurrent: boolean;
-  isOrphan: boolean;
-  [key: string]: unknown;
-}
-
-const WikiNode = memo(function WikiNode({ data }: NodeProps) {
-  const router = useRouter();
-  const { label, id, isCurrent, isOrphan, size = 1 } = data as WikiNodeData & { size?: number };
-
-  const handleClick = useCallback(() => {
-    const encoded = (id as string).split('/').map(encodeURIComponent).join('/');
-    router.push('/view/' + encoded);
-  }, [id, router]);
-
-  const scale = 0.8 + Math.min(size * 0.1, 1.2);
-
-  return (
-    <div
-      onClick={handleClick}
-      title={id as string}
-      className="group font-display"
-      style={{
-        fontSize: 10 * scale,
-        padding: `${4 * scale}px ${12 * scale}px`,
-        borderRadius: 999, // Pill shape
-        cursor: 'pointer',
-        userSelect: 'none',
-        whiteSpace: 'nowrap',
-        maxWidth: 240,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        opacity: isOrphan ? 0.4 : 1,
-        background: isCurrent ? 'var(--amber)' : 'var(--card)',
-        color: isCurrent ? 'var(--amber-foreground)' : 'var(--foreground)',
-        border: `1.5px solid ${isCurrent ? 'var(--amber)' : 'var(--border)'}`,
-        boxShadow: isCurrent 
-          ? '0 0 20px var(--amber-dim), 0 0 0 2px var(--amber-dim)' 
-          : '0 2px 4px rgba(0,0,0,0.1)',
-        transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-        zIndex: isCurrent ? 10 : 1,
-      }}
-      onMouseEnter={e => {
-        if (!isCurrent) {
-          e.currentTarget.style.borderColor = 'var(--amber)';
-          e.currentTarget.style.background = 'var(--accent)';
-        }
-      }}
-      onMouseLeave={e => {
-        if (!isCurrent) {
-          e.currentTarget.style.borderColor = 'var(--border)';
-          e.currentTarget.style.background = 'var(--card)';
-        }
-      }}
-    >
-      <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      {label as string}
-      <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
-    </div>
-  );
-});
-
-// ─── GraphRenderer ─────────────────────────────────────────────────────────────
-
-type Scope = 'global' | 'local';
+import { useSmoothRouterPush } from '@/hooks/useSmoothRouterPush';
+import { GraphDetails } from './GraphDetails';
+import { WikiGraphNode } from './GraphNode';
+import { GraphToolbar } from './GraphToolbar';
+import { buildStableLayout, CENTER } from './graph-layout';
+import type { Depth, WikiNodeData } from './graph-types';
+import { RendererPageShell, RendererStatus } from '../renderer-primitives';
 
 export function GraphRenderer({ filePath }: RendererContext) {
+  const smoothPush = useSmoothRouterPush();
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [scope, setScope] = useState<Scope>('local');
+  const [error, setError] = useState<string | null>(null);
+  const [scope, setScope] = useState<GraphScope>('local');
+  const [depth, setDepth] = useState<Depth>(1);
+  const [direction, setDirection] = useState<GraphDirection>('both');
+  const [includeUnresolved, setIncludeUnresolved] = useState(true);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(filePath);
+  const [searchTerm, setSearchTerm] = useState('');
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => { setMounted(true); }, []);
 
   useEffect(() => {
-    apiFetch<GraphData>('/api/graph')
-      .then((data) => { setGraphData(data); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, []);
+    setSelectedNodeId(filePath);
+  }, [filePath]);
 
-  // Degree calculation (for node sizing)
-  const degrees = useMemo(() => {
-    if (!graphData) return new Map<string, number>();
-    const d = new Map<string, number>();
-    for (const e of graphData.edges) {
-      d.set(e.source, (d.get(e.source) || 0) + 1);
-      d.set(e.target, (d.get(e.target) || 0) + 1);
+  useEffect(() => {
+    const controller = new AbortController();
+    const params = new URLSearchParams({
+      scope,
+      includeUnresolved: String(includeUnresolved),
+    });
+    if (scope === 'local') {
+      params.set('path', filePath);
+      params.set('depth', String(depth));
+      params.set('direction', direction);
     }
-    return d;
-  }, [graphData]);
 
-  // Build adjacency for BFS (local scope)
-  const adjacency = useMemo(() => {
+    setLoading(true);
+    setError(null);
+    apiFetch<GraphData>(`/api/graph?${params.toString()}`, { signal: controller.signal })
+      .then((data) => {
+        setGraphData(data);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        setGraphData(null);
+        setError(err instanceof Error ? err.message : 'Unable to load graph');
+        setLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [depth, direction, filePath, includeUnresolved, scope]);
+
+  const activeNodeIds = useMemo(() => {
+    if (!graphData || !hoveredNodeId) return null;
+    const ids = new Set<string>([hoveredNodeId]);
+    for (const edge of graphData.edges) {
+      if (edge.source === hoveredNodeId) ids.add(edge.target);
+      if (edge.target === hoveredNodeId) ids.add(edge.source);
+    }
+    return ids;
+  }, [graphData, hoveredNodeId]);
+
+  const normalizedSearch = searchTerm.trim().toLowerCase();
+  const matchedNodeIds = useMemo(() => {
+    if (!graphData || !normalizedSearch) return null;
+    return new Set(
+      graphData.nodes
+        .filter((node) =>
+          node.label.toLowerCase().includes(normalizedSearch) ||
+          node.path.toLowerCase().includes(normalizedSearch) ||
+          node.tags.some((tag) => tag.toLowerCase().includes(normalizedSearch)),
+        )
+        .map((node) => node.id),
+    );
+  }, [graphData, normalizedSearch]);
+
+  const focusedNode = useMemo(() => {
     if (!graphData) return null;
-    const adj = new Map<string, Set<string>>();
-    for (const e of graphData.edges) {
-      if (!adj.has(e.source)) adj.set(e.source, new Set());
-      if (!adj.has(e.target)) adj.set(e.target, new Set());
-      adj.get(e.source)!.add(e.target);
-      adj.get(e.target)!.add(e.source);
-    }
-    return adj;
-  }, [graphData]);
+    return graphData.nodes.find((node) => node.id === selectedNodeId) ??
+      graphData.nodes.find((node) => node.id === hoveredNodeId) ??
+      graphData.nodes.find((node) => node.id === filePath) ??
+      graphData.nodes[0] ??
+      null;
+  }, [filePath, graphData, hoveredNodeId, selectedNodeId]);
 
-  // Scope filter
-  const { filteredNodes, filteredEdges } = useMemo(() => {
-    if (!graphData) return { filteredNodes: [], filteredEdges: [] };
-
-    let nodeSubset: GraphNode[];
-    let edgeSubset: GraphEdge[];
-
-    if (scope === 'global') {
-      nodeSubset = graphData.nodes;
-      edgeSubset = graphData.edges;
-    } else {
-      // local: BFS 2 hops
-      const visited = new Set<string>();
-      const queue: Array<{ id: string; depth: number }> = [{ id: filePath, depth: 0 }];
-      visited.add(filePath);
-      while (queue.length > 0) {
-        const { id, depth } = queue.shift()!;
-        if (depth >= 2) continue;
-        const neighbors = adjacency?.get(id) ?? new Set<string>();
-        for (const nb of neighbors) {
-          if (!visited.has(nb)) {
-            visited.add(nb);
-            queue.push({ id: nb, depth: depth + 1 });
-          }
-        }
-      }
-      nodeSubset = graphData.nodes.filter(n => visited.has(n.id));
-      const nodeIds = new Set(nodeSubset.map(n => n.id));
-      edgeSubset = graphData.edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target));
-    }
-
-    return { filteredNodes: nodeSubset, filteredEdges: edgeSubset };
-  }, [graphData, scope, filePath, adjacency]);
-
-  // Orphan detection (nodes with no edges in the current subset)
-  const connectedIds = useMemo(() => {
-    const s = new Set<string>();
-    for (const e of filteredEdges) {
-      s.add(e.source);
-      s.add(e.target);
-    }
-    return s;
-  }, [filteredEdges]);
-
-  // Compute layout + build RF nodes/edges
   const { rfNodes, rfEdges } = useMemo(() => {
-    if (filteredNodes.length === 0) return { rfNodes: [], rfEdges: [] };
+    if (!graphData || graphData.nodes.length === 0) return { rfNodes: [], rfEdges: [] };
+    const layout = buildStableLayout(graphData.nodes, graphData.edges, filePath, scope, direction);
 
-    const nodeIds = filteredNodes.map(n => n.id);
-    const layout = forceLayout(nodeIds, filteredEdges);
-
-    const rfNodes = filteredNodes.map(n => ({
-      id: n.id,
-      type: 'wiki' as const,
-      position: layout[n.id] ?? { x: 0, y: 0 },
-      data: {
-        label: n.label,
-        id: n.id,
-        isCurrent: n.id === filePath,
-        isOrphan: !connectedIds.has(n.id),
-        size: degrees.get(n.id) || 1,
-      },
-    }));
-
-    const rfEdges = filteredEdges.map((e, i) => {
-      const isRelatedToCurrent = e.source === filePath || e.target === filePath;
+    const rfNodes = graphData.nodes.map((node) => {
+      const matched = matchedNodeIds?.has(node.id) ?? false;
+      const dimmedByHover = activeNodeIds ? !activeNodeIds.has(node.id) : false;
+      const dimmedBySearch = matchedNodeIds ? !matched : false;
+      const selected = node.id === selectedNodeId;
+      const hovered = node.id === hoveredNodeId;
       return {
-        id: `e-${i}`,
-        source: e.source,
-        target: e.target,
-        type: 'default' as const, // Curved default
-        markerEnd: { type: 'arrowclosed' as const, color: isRelatedToCurrent ? 'var(--amber)' : 'var(--border)' },
-        style: { 
-          stroke: isRelatedToCurrent ? 'var(--amber)' : 'var(--border)', 
-          strokeWidth: isRelatedToCurrent ? 1.5 : 1,
-          opacity: isRelatedToCurrent ? 0.8 : 0.4,
+        id: node.id,
+        type: 'wiki' as const,
+        position: layout[node.id] ?? CENTER,
+        data: {
+          id: node.id,
+          label: node.label,
+          path: node.path,
+          isCurrent: Boolean(node.id === filePath || node.isCurrent),
+          isMissing: node.isMissing,
+          isAmbiguous: node.isAmbiguous,
+          dimmed: dimmedByHover || dimmedBySearch,
+          matched,
+          selected,
+          hovered,
+          degree: node.degree,
+          inDegree: node.inDegree,
+          outDegree: node.outDegree,
+        } satisfies WikiNodeData,
+      };
+    });
+
+    const rfEdges = graphData.edges.map((edge) => {
+      const isDirectCurrentEdge = edge.source === filePath || edge.target === filePath;
+      const isSelectedEdge = selectedNodeId ? edge.source === selectedNodeId || edge.target === selectedNodeId : false;
+      const isActive = activeNodeIds ? activeNodeIds.has(edge.source) && activeNodeIds.has(edge.target) : true;
+      const isSearchVisible = matchedNodeIds ? matchedNodeIds.has(edge.source) || matchedNodeIds.has(edge.target) : true;
+      const dimmed = !isActive || !isSearchVisible;
+      const highlighted = isSelectedEdge || isDirectCurrentEdge;
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        type: 'default' as const,
+        markerEnd: {
+          type: 'arrowclosed' as const,
+          color: edge.unresolved ? 'var(--muted-foreground)' : highlighted ? 'var(--amber)' : 'var(--border)',
         },
-        animated: isRelatedToCurrent,
+        style: {
+          stroke: edge.unresolved ? 'var(--muted-foreground)' : highlighted ? 'var(--amber)' : 'var(--border)',
+          strokeDasharray: edge.unresolved || edge.ambiguous ? '4 4' : undefined,
+          strokeWidth: highlighted ? 1.9 : Math.min(2.1, 1 + Math.log2(edge.count + 1) * 0.2),
+          opacity: dimmed ? 0.12 : highlighted ? 0.78 : 0.36,
+        },
+        animated: highlighted && !dimmed,
       };
     });
 
     return { rfNodes, rfEdges };
-  }, [filteredNodes, filteredEdges, filePath, connectedIds, degrees]);
+  }, [activeNodeIds, direction, filePath, graphData, hoveredNodeId, matchedNodeIds, scope, selectedNodeId]);
 
-  const nodeTypes = useMemo(() => ({ wiki: WikiNode }), []);
+  const nodeTypes = useMemo<NodeTypes>(() => ({ wiki: WikiGraphNode as NodeTypes[string] }), []);
 
-  const scopeButtons: { id: Scope; label: string }[] = [
-    { id: 'local', label: 'Local' },
-    { id: 'global', label: 'Global' },
-  ];
+  const openNode = useCallback((node: GraphNode) => {
+    if (node.isMissing) return;
+    const encoded = node.path.split('/').map(encodeURIComponent).join('/');
+    smoothPush('/view/' + encoded);
+  }, [smoothPush]);
 
   if (!mounted || loading) {
-    return (
-      <div
-        style={{
-          width: '100%',
-          height: 'calc(100vh - 160px)',
-          minHeight: 400,
-          borderRadius: 12,
-          background: 'var(--muted)',
-          border: '1px solid var(--border)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
-      >
-        <span className="font-display" style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>
-          {loading ? 'Building graph…' : 'Loading…'}
-        </span>
-      </div>
-    );
+    return <GraphStatus message="Building graph..." />;
+  }
+
+  if (error) {
+    return <GraphStatus message={error} />;
+  }
+
+  if (!graphData) {
+    return <GraphStatus message="No graph data available." />;
   }
 
   return (
-    <div style={{ width: '100%', position: 'relative', zIndex: 0 }}>
-      {/* Toolbar */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-          marginBottom: 10,
-          flexWrap: 'wrap',
-        }}
-      >
-        <span
-          className="font-display"
-          style={{
-            fontSize: 11,
-            color: 'var(--muted-foreground)',
-          }}
-        >
-          {filteredNodes.length} nodes · {filteredEdges.length} edges
-        </span>
+    <RendererPageShell wide className="relative z-0 py-0">
+      <GraphToolbar
+        scope={scope}
+        depth={depth}
+        direction={direction}
+        includeUnresolved={includeUnresolved}
+        searchTerm={searchTerm}
+        stats={graphData.stats}
+        onScopeChange={setScope}
+        onDepthChange={setDepth}
+        onDirectionChange={setDirection}
+        onIncludeUnresolvedChange={setIncludeUnresolved}
+        onSearchTermChange={setSearchTerm}
+      />
 
-        <div
-          style={{
-            display: 'flex',
-            gap: 2,
-            padding: 3,
-            borderRadius: 8,
-            background: 'var(--muted)',
-          }}
-        >
-          {scopeButtons.map(btn => (
-            <button
-              key={btn.id}
-              onClick={() => setScope(btn.id)}
-              className="font-display"
-              style={{
-                padding: '3px 12px',
-                borderRadius: 5,
-                fontSize: 11,
-                cursor: 'pointer',
-                border: 'none',
-                outline: 'none',
-                background: scope === btn.id ? 'var(--card)' : 'transparent',
-                color: scope === btn.id ? 'var(--foreground)' : 'var(--muted-foreground)',
-                boxShadow: scope === btn.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
-                transition: 'all 0.1s',
-              }}
-            >
-              {btn.label}
-            </button>
-          ))}
+      <div className="mt-3 grid items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(210px,260px)]">
+        <div className="h-[calc(100vh_-_178px)] min-h-[440px] w-full">
+          <ReactFlow
+            nodes={rfNodes}
+            edges={rfEdges}
+            nodeTypes={nodeTypes}
+            fitView
+            fitViewOptions={{ padding: 0.2 }}
+            proOptions={{ hideAttribution: true }}
+            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            onNodeDoubleClick={(_, node) => {
+              const graphNode = graphData.nodes.find((item) => item.id === node.id);
+              if (graphNode) openNode(graphNode);
+            }}
+            onPaneClick={() => setSelectedNodeId(filePath)}
+            onNodeMouseEnter={(_, node) => setHoveredNodeId(node.id)}
+            onNodeMouseLeave={() => setHoveredNodeId(null)}
+            className="rounded-lg border border-border bg-background"
+          >
+            <Background color="var(--border)" gap={24} size={1} variant={BackgroundVariant.Dots} />
+            <Controls showInteractive={false} />
+            {scope === 'global' ? (
+              <MiniMap
+                pannable
+                zoomable
+                nodeColor={(node) => {
+                  const data = node.data as WikiNodeData;
+                  if (data.isCurrent) return 'var(--amber)';
+                  if (data.isMissing) return 'var(--muted-foreground)';
+                  if (data.isAmbiguous) return 'var(--amber)';
+                  return 'var(--foreground)';
+                }}
+                nodeStrokeWidth={2}
+              />
+            ) : null}
+          </ReactFlow>
         </div>
-      </div>
 
-      {/* React Flow */}
-      <div
-        style={{
-          width: '100%',
-          height: 'calc(100vh - 160px)',
-          minHeight: 400,
-        }}
-      >
-        <ReactFlow
-          nodes={rfNodes}
-          edges={rfEdges}
-          nodeTypes={nodeTypes}
-          fitView
-          fitViewOptions={{ padding: 0.15 }}
-          proOptions={{ hideAttribution: true }}
-          style={{
-            background: 'var(--background)',
-            borderRadius: 12,
-            border: '1px solid var(--border)',
-          }}
-        >
-          <Background
-            color="var(--border)"
-            gap={24}
-            size={1}
-            variant={BackgroundVariant.Dots}
-          />
-          <Controls showInteractive={false} />
-          <MiniMap
-            nodeColor={(n) =>
-              (n.data as WikiNodeData)?.isCurrent ? 'var(--amber)' : 'var(--muted-foreground)'
-            }
-          />
-        </ReactFlow>
+        <GraphDetails node={focusedNode} data={graphData} onOpenNode={openNode} />
       </div>
-    </div>
+    </RendererPageShell>
+  );
+}
+
+function GraphStatus({ message }: { message: string }) {
+  return (
+    <RendererStatus framed className="h-[calc(100vh_-_160px)] w-full">
+      {message}
+    </RendererStatus>
   );
 }

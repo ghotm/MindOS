@@ -24,12 +24,12 @@ describe('MindOS client SDK boundary', () => {
       fetch: fetchMock,
     });
 
-    const result = await client.post('/api/ask', { message: 'hello' });
+    const result = await client.post('/api/agent/sessions/test-session/turns', { message: 'hello' });
 
     expect(result).toEqual({ ok: true });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0]!;
-    expect(String(url)).toBe('http://127.0.0.1:4567/api/ask');
+    expect(String(url)).toBe('http://127.0.0.1:4567/api/agent/sessions/test-session/turns');
     expect(init?.method).toBe('POST');
     expect(init?.body).toBe(JSON.stringify({ message: 'hello' }));
     const headers = new Headers(init?.headers);
@@ -99,18 +99,23 @@ describe('MindOS client SDK boundary', () => {
       offset: 1,
       limit: 1,
     });
-    await expect(client.search('hello')).resolves.toEqual([{ path: 'hello.md' }]);
+    await expect(client.search('hello', {
+      limit: 5,
+      scope: 'Projects',
+      file_type: 'md',
+      modified_after: '2026-01-01T00:00:00.000Z',
+    })).resolves.toEqual([{ path: 'hello.md' }]);
     await expect(client.settings()).resolves.toEqual({ mindRoot: '/tmp/mind' });
     await expect(client.updateSettings({ mindRoot: '/tmp/next' })).resolves.toEqual({ ok: true });
     await expect(client.mcpStatus()).resolves.toMatchObject({ running: true, port: 8567 });
 
     expect(String(fetchMock.mock.calls[1]![0])).toBe('http://localhost:3456/api/files?limit=1&offset=1');
-    expect(String(fetchMock.mock.calls[2]![0])).toBe('http://localhost:3456/api/search?q=hello');
+    expect(String(fetchMock.mock.calls[2]![0])).toBe('http://localhost:3456/api/search?q=hello&limit=5&scope=Projects&file_type=md&modified_after=2026-01-01T00%3A00%3A00.000Z');
     expect(fetchMock.mock.calls[4]![1]?.method).toBe('POST');
     expect(String(fetchMock.mock.calls[5]![0])).toBe('http://localhost:3456/api/mcp/status');
   });
 
-  it('streams ask events from SSE responses', async () => {
+  it('streams agent turn events from SSE responses', async () => {
     const encoder = new TextEncoder();
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -128,7 +133,7 @@ describe('MindOS client SDK boundary', () => {
     const client = createMindosClient({ baseUrl: 'http://localhost:3456', fetch: fetchMock });
 
     const events = [];
-    for await (const event of client.askStream({ messages: [{ role: 'user', content: 'Hi' }] })) {
+    for await (const event of client.agentTurnStream({ sessionId: 'test-session', messages: [{ role: 'user', content: 'Hi' }] })) {
       events.push(event);
     }
 
@@ -136,8 +141,9 @@ describe('MindOS client SDK boundary', () => {
       { type: 'text_delta', delta: 'hello' },
       { type: 'done' },
     ]);
-    expect(String(fetchMock.mock.calls[0]![0])).toBe('http://localhost:3456/api/ask');
+    expect(String(fetchMock.mock.calls[0]![0])).toBe('http://localhost:3456/api/agent/sessions/test-session/turns');
     expect(fetchMock.mock.calls[0]![1]?.method).toBe('POST');
+    expect(fetchMock.mock.calls[0]![1]?.body).toBe(JSON.stringify({ messages: [{ role: 'user', content: 'Hi' }] }));
   });
 });
 

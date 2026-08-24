@@ -1,6 +1,8 @@
 import type { Locale, Messages } from '@/lib/i18n';
 import type React from 'react';
 import type { Provider } from '@/lib/custom-endpoints';
+import type { MindosThinkingLevel } from '@/lib/agent/thinking';
+import type { AgentRuntimeEnvironmentSettings } from '@geminilight/mindos/agent/runtime/runtime-env';
 
 export interface AiSettings {
   activeProvider: string;
@@ -10,10 +12,13 @@ export interface AiSettings {
 export interface AgentSettings {
   maxSteps?: number;
   enableThinking?: boolean;
+  thinkingLevel?: MindosThinkingLevel;
   thinkingBudget?: number;
   contextStrategy?: 'auto' | 'off';
   reconnectRetries?: number;
 }
+
+export const DEFAULT_AGENT_MAX_STEPS = 100;
 
 export interface SettingsData {
   ai: AiSettings;
@@ -47,6 +52,8 @@ export interface SettingsData {
     enableAgentsDir?: boolean;
     custom?: string[];
   };
+  searchIgnoredPaths?: string[];
+  agentRuntimeEnv?: AgentRuntimeEnvironmentSettings;
   connectionMode?: {
     cli: boolean;
     mcp: boolean;
@@ -55,7 +62,8 @@ export interface SettingsData {
   envValues?: Record<string, string>;
 }
 
-export type Tab = 'ai' | 'appearance' | 'knowledge' | 'plugins' | 'mcp' | 'sync' | 'update' | 'uninstall';
+export type Tab = 'ai' | 'appearance' | 'navigation' | 'knowledge' | 'plugins' | 'mcp' | 'sync' | 'update' | 'uninstall';
+export type PluginPanel = 'installed' | 'community' | 'import' | 'surfaces';
 
 export const CONTENT_WIDTH_DEFAULT = '80%';
 export const CONTENT_WIDTH_MIN = 50;
@@ -91,7 +99,6 @@ export interface McpStatus {
   toolCount: number;
   authConfigured: boolean;
   maskedToken?: string;
-  authToken?: string;
   localIP?: string | null;
   connectionMode?: ConnectionMode;
 }
@@ -111,6 +118,7 @@ export interface AgentInfo {
   format: 'json' | 'toml' | 'yaml';
   configKey: string;
   globalNestedKey?: string;
+  entryStyle?: 'standard' | 'kilo';
   globalPath: string;
   projectPath?: string | null;
   skillMode?: 'universal' | 'additional' | 'unsupported';
@@ -127,6 +135,16 @@ export interface AgentInfo {
   installedSkillNames?: string[];
   installedSkillCount?: number;
   installedSkillSourcePath?: string;
+  skillCapabilities?: {
+    mode: 'universal' | 'additional' | 'unsupported';
+    workspacePath: string;
+    visibility: 'global' | 'agent' | 'manual';
+    nativeSkillScope: 'none' | 'global' | 'native-private';
+    canLinkMindosSkills: boolean;
+    canReceiveLinkedSkills: boolean;
+    canExportNativeSkills: boolean;
+    linkStrategy: 'symlink' | 'copy' | 'manual' | 'unsupported';
+  };
   /** True for user-defined agents (not built-in). */
   isCustom?: boolean;
   /** Base directory for custom agents (used for UI display). */
@@ -138,13 +156,97 @@ export interface SkillInfo {
   description: string;
   path: string;
   source: 'builtin' | 'user';
+  /** Which skill root the body lives in (e.g. 'app-builtin', 'agents-global', 'custom'). */
+  origin?: string;
   enabled: boolean;
   editable: boolean;
+  runtimeRequirements?: SkillRuntimeRequirements;
 }
 
-/** 🟢 MINOR #7: Moved from SyncTab.tsx for consistency */
+/** Roots owned by an external agent (or the npx skills ecosystem) — read-only in MindOS. */
+export function isAgentOwnedSkillOrigin(origin: string | undefined): boolean {
+  return origin === 'agents-global' || origin === 'custom';
+}
+
+/* ── Skill × Agent matrix (mirrors GET /api/skills/matrix) ────── */
+
+/** External agent cells use linked/copied/broken/conflict/native-disabled/none; the MindOS self column uses enabled/disabled. */
+export type SkillMatrixCellStatus =
+  | 'native-disabled'
+  | 'linked'
+  | 'copied'
+  | 'broken'
+  | 'conflict'
+  | 'none'
+  | 'enabled'
+  | 'disabled';
+
+export interface SkillMatrixAgent {
+  key: string;
+  name: string;
+  /** First entry is always { key: 'mindos', mode: 'self' }; the rest are detected skill-capable agents. */
+  mode: 'self' | 'universal' | 'additional';
+  skillDir?: string;
+}
+
+export interface SkillMatrixCell {
+  enabled: boolean;
+  status: SkillMatrixCellStatus;
+}
+
+export interface SkillMatrixSkill {
+  name: string;
+  description: string;
+  source: 'builtin' | 'user';
+  origin: string;
+  path: string;
+  runtimeRequirements?: SkillRuntimeRequirements;
+}
+
+export interface SkillMatrix {
+  skills: SkillMatrixSkill[];
+  agents: SkillMatrixAgent[];
+  state: Record<string, Record<string, boolean>>;
+  cells: Record<string, Record<string, SkillMatrixCell>>;
+}
+
+export type SkillRuntimeKindRequirement =
+  | 'any'
+  | 'mindos'
+  | 'codex'
+  | 'claude'
+  | 'acp'
+  | 'native';
+
+export type SkillRuntimeToolRequirement =
+  | 'shell'
+  | 'file'
+  | 'git'
+  | 'browser'
+  | 'mcp'
+  | 'plugins'
+  | 'skills';
+
+export type SkillRuntimeSafety = 'safe' | 'unsafe' | 'unknown';
+
+export type SkillRuntimeNeed = 'required' | 'not-required' | 'unknown';
+
+export interface SkillRuntimeRequirements {
+  schemaVersion: 1;
+  declared: boolean;
+  runtimeKinds: SkillRuntimeKindRequirement[];
+  requiredTools: SkillRuntimeToolRequirement[];
+  requiredCapabilities: string[];
+  remote: SkillRuntimeSafety;
+  unattended: SkillRuntimeSafety;
+  approvals: SkillRuntimeNeed;
+  userInput: SkillRuntimeNeed;
+  notes: string[];
+}
+
 export interface SyncStatus {
   enabled: boolean;
+  configured?: boolean;
   needsSetup?: boolean;
   provider?: string;
   remote?: string;
@@ -152,7 +254,13 @@ export interface SyncStatus {
   lastSync?: string | null;
   lastPull?: string | null;
   unpushed?: string;
-  conflicts?: Array<{ file: string; time: string }>;
+  conflicts?: Array<{
+    file: string;
+    time?: string;
+    noBackup?: boolean;
+    localExists?: boolean;
+    remoteExists?: boolean;
+  }>;
   lastError?: string | null;
   autoCommitInterval?: number;
   autoPullInterval?: number;
@@ -161,6 +269,8 @@ export interface SyncStatus {
 export interface McpTabProps {
   t: Messages;
 }
+
+export type SettingsMcpMessages = Messages['settings']['mcp'];
 
 export interface AppearanceTabProps {
   font: string;
@@ -195,17 +305,15 @@ export interface PluginsTabProps {
   setPluginStates: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   t: Messages;
   mindRoot?: string;
+  initialPanel?: PluginPanel;
+  onOpenPluginEntries?: () => void;
+  onOpenCommandCenter?: () => void;
+  onOpenPluginViews?: () => void;
 }
 
 export interface SyncTabProps {
   t: Messages;
   visible?: boolean;
-}
-
-export interface McpServerStatusProps {
-  status: McpStatus | null;
-  agents: AgentInfo[];
-  t: Messages;
 }
 
 export interface McpAgentInstallProps {
@@ -214,12 +322,9 @@ export interface McpAgentInstallProps {
   onRefresh: () => void;
   mode?: 'cli' | 'mcp';
   activeSkillName?: string;
+  status?: McpStatus | null;
 }
 
 export interface McpSkillsSectionProps {
-  t: Messages;
-}
-
-export interface ShortcutsTabProps {
   t: Messages;
 }

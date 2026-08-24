@@ -36,6 +36,10 @@ vi.mock('@/lib/stores/locale-store', () => ({
     t: {
       fileTree: {
         newFile: 'New File',
+        addAsContext: 'Add as Context',
+        addedAsContext: 'Added to context',
+        openInFileManager: 'Open in File Manager',
+        openInFileManagerFailed: 'Could not open in file manager',
         removeFromFavorites: 'Remove from Favorites',
         pinToFavorites: 'Pin to Favorites',
         convertToSpace: 'Convert to Space',
@@ -75,7 +79,7 @@ describe('FolderContextMenu convert to Space AI gating', () => {
       );
     });
 
-    const button = [...host.querySelectorAll('button')]
+    const button = [...document.body.querySelectorAll('button')]
       .find(el => el.textContent?.includes('Convert to Space'));
     expect(button).toBeTruthy();
     return { host, root, button: button as HTMLButtonElement };

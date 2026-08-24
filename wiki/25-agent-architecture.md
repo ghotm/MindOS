@@ -1,290 +1,546 @@
 # MindOS Agent 架构
 
-> 最后更新: 2026-04-27
-> 
-> **2026-04-10 更新**：Ask Panel UX 改进已上线。参见"Ask Panel 近期改进"部分。
+> 最后更新: 2026-06-26
+>
+> 当前 canonical turn endpoint 是 `POST /api/agent/sessions/:sessionId/turns`。历史文档中的 `/api/ask` 只代表旧实现或历史记录，不能作为新代码入口。
 
 ## 一、系统分层
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Web UI (浏览器)                          │
-│  AskContent.tsx → useAskSession hook → sessions.json (前端持久化) │
-│  发送: { messages[], sessionId, currentFile, attachedFiles }     │
+│                         Web UI                                  │
+│  ChatContent.tsx → useAgentChat                                 │
+│       ├─ agent-session-store: session metadata + runtime binding │
+│       └─ agent-run-store: per-session messages/runs/unread       │
+│                                                                 │
+│  Request body:                                                   │
+│  { messages, currentFile, attachedFiles, uploadedFiles,          │
+│    selectedRuntime, runtimeBinding, agentMode, permissionMode }  │
 └────────────────────────────┬────────────────────────────────────┘
-                             │ POST /api/ask (SSE)
+                             │ POST /api/agent/sessions/:sessionId/turns
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Next.js API Route Layer                       │
-│                  packages/web/app/api/ask/route.ts                   │
+│  packages/web/app/api/agent/sessions/[sessionId]/turns/route.ts  │
+│  packages/web/app/api/agent/_lib/turn-runner.ts                  │
 │                                                                 │
-│  1. System Prompt 组装                                           │
-│  2. Tools 组装 (内置 + Skills + MCP)                             │
-│  3. Session 创建 (持久化或 inMemory)                              │
-│  4. SSE 流式响应                                                 │
+│  1. Strict request contract validation                           │
+│  2. Runtime selection + runtimeBinding validation                 │
+│  3. Turn context prompt assembly                                 │
+│  4. Runtime lane 解析：MindOS Pi / native runtime / ACP           │
+│  5. SSE stream + run ledger 写入                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## 二、包依赖关系
+## 二、请求契约
 
-```
-@mariozechner/pi-ai              ← LLM provider 抽象 (Anthropic/OpenAI)
-    └─ @mariozechner/pi-agent-core   ← agent 执行循环 + session 管理
-         └─ @mariozechner/pi-coding-agent ← session 引擎 + model 注册 + auth
-```
+Turn request 使用严格契约。旧字段不再迁移、不再推断语义，直接返回 `400 Unknown field: ...`。
 
-MindOS 使用 `pi-coding-agent` 的部分（选择性采用）：
-
-- `createAgentSession` — agent 会话创建
-- `SessionManager` — session 持久化 (~/.mindos/sessions/)
-- `ModelRegistry` — provider/model 路由
-- `AuthStorage` — API key 存储
-- `convertToLlm` — LLM 格式转换
-- `SettingsManager` — 设置管理
-- `Skill`, `loadSkills` — Skill 发现与加载
-- `DefaultResourceLoader` — 资源加载
-- `ToolDefinition` — TypeBox schema 工具定义
-
-MindOS **不使用**的部分：
-
-- 内置 coding tools（bash/edit/write）— 用自己的 24 个知识库工具替代
-- CLI / TUI — MindOS 是 Web UI 产品
-- 默认 system prompt — 用 MindOS 自己的 prompt 覆盖
-- 目录约定（`.pi/agent/`）— MindOS 用自己的 `INSTRUCTION.md` + `CONFIG.json` 模型
-
-## 三、工具体系
-
-Agent 能使用的工具分四类：
-
-| 类别 | 数量 | 来源文件 | 工具列表 |
-|---|---|---|---|
-| 知识库工具 | 24 | `packages/web/lib/agent/tools.ts` | list_files, read_file, read_file_chunk, search, write_file, create_file, batch_create_files, append_to_file, insert_after_heading, update_section, edit_lines, delete_file, rename_file, move_file, get_backlinks, get_history, get_file_at_version, append_csv, get_recent, web_search, web_fetch, load_skill, lint, compile |
-| A2A 工具 | 6 | `packages/web/lib/a2a/a2a-tools.ts` | list_remote_agents, discover_agent, discover_agents, delegate_to_agent, check_task_status, orchestrate |
-| ACP 工具 | 2 | `packages/web/lib/acp/acp-tools.ts` | list_acp_agents, call_acp_agent |
-| IM 工具 | 2 | `packages/web/lib/im/index.ts` | send_im_message, list_im_channels |
-| **合计** | **34** | | |
-
-### 工具执行安全机制
-
-```
-用户/Agent 调用工具
-        │
-        ▼
-toPiCustomToolDefinitions 里的 execute wrapper
-        │
-        ├─ 是写操作？→ assertNotProtected() 检查
-        │               失败 → 返回错误文本，不执行
-        │
-        ├─ 执行实际工具逻辑
-        │
-        └─ logAgentOp() 记录操作日志
-```
-
-### 动态工具组装流程
-
-每次请求调用 `getRequestScopedTools()`：
-
-1. 加载内置 `knowledgeBaseTools`（包含知识库工具 + skill 工具 + MCP 桥接工具）
-2. MindOS 内置 MCP server 始终可用
-3. 额外 MCP servers 可通过 `~/.mindos/mcp.json` 配置（当前为 stub，预留扩展）
-
-然后 `toPiCustomToolDefinitions()` 把全部 `AgentTool[]` 转成 pi 的 `ToolDefinition[]`，在每个工具的 `execute` 里嵌入写保护和日志。
-
-### Chat 模式 vs Agent 模式
-
-MindOS 支持两种对话模式，用户可在 Ask 面板顶部切换：
-
-| 维度 | Chat 模式 | Agent 模式 |
-|---|---|---|
-| System Prompt | 精简 ~250 tokens | 完整 prompt + Skill + Bootstrap |
-| 工具数量 | 8 个（只读） | 34 个（读写 + A2A + ACP + IM） |
-| 可用工具 | list_files, read_file, read_file_chunk, search, get_recent, get_backlinks, web_search, web_fetch | 全部 34 个 |
-| Step 上限 | 8 | 默认 25 |
-| Token 节省 | ~81% overhead 减少 | — |
-| 适用场景 | 快速问答、文件检索 | 文件编辑、多步操作、Agent 协作 |
-
-## 四、Session 持久化
-
-```
-前端 (useAskSession)                 后端 (ask route)
-┌──────────────────┐                ┌──────────────────────────┐
-│ ChatSession      │                │ Pi SessionManager        │
-│   id: "1710..."  │───sessionId──→│                          │
-│   messages: [...]│                │ ~/.mindos/sessions/      │
-│   updatedAt      │                │   └─ <sessionId>/        │
-│                  │                │       └─ *.jsonl          │
-│ 权威源: 前端     │                │ 作用: compaction 缓存     │
-│ 存储: sessions.json│              │ + extension lifecycle     │
-└──────────────────┘                └──────────────────────────┘
-```
-
-### 请求时行为
-
-| 场景 | 行为 |
+| 字段 | 当前语义 |
 |---|---|
-| 有 sessionId + 已有 pi session | 复用已有 session（pi 负责 compaction） |
-| 有 sessionId + 无 pi session | 创建新 session + 灌入前端历史（惰性迁移） |
-| 无 sessionId | inMemory（一次性请求，如 Echo insight） |
+| `messages` | 前端会话消息 |
+| `currentFile` / `attachedFiles` | MindOS 知识库或本地 workspace 中的已存在文件 |
+| `uploadedFiles` | 用户本轮上传的文件内容，不默认存在于 MindOS 知识库 |
+| `selectedRuntime` | 本轮选择的 runtime identity，只表达 `mindos` / `codex` / `claude` / `acp` 等身份 |
+| `runtimeBinding` | 外部 runtime session/thread 的唯一续跑来源 |
+| `agentMode` | turn 行为模式，当前默认 `default`，为未来 `plan` / `goal` 保留 |
+| `permissionMode` | 本轮权限模式：`read` / `ask` / `auto` / `full` |
+| `runtimeOptions` | Codex / Claude Code 等 native runtime 的 per-turn 控制，例如 model override / reasoning effort |
+| `acpRuntimeOptions` | ACP active session projection 派生的 per-turn 控制，例如 `modeId` 与 `configValues`；只对 ACP lane 生效 |
+| `agentOptions` | MindOS Pi runtime 的 per-turn 控制，例如 thinking 开关与预算 |
 
-### 清理
+以下字段是明确非法字段：
 
-前端删除 session 时，`DELETE /api/ask-sessions` 同时清理 `~/.mindos/sessions/<sessionId>/` 目录。
+| 非法字段 | 原因 |
+|---|---|
+| `mode` | 旧 ask/chat/agent 混合语义已移除 |
+| `options.permissionMode` | 旧兼容层已移除 |
+| `runtimeOptions.permissionMode` | 权限是 turn 顶层字段 |
+| `runtimeOptions.agentMode` | agent mode 是 turn 顶层字段 |
+| `selectedRuntime.externalSessionId` | 外部 session 只能由 `runtimeBinding` 表达 |
 
-## 五、资源发现
+## 三、Runtime 选择与绑定
 
-### Skills（纯 prompt 扩展）
+`selectedRuntime` 和 `runtimeBinding` 是两个不同层次：
 
-扫描 4 个目录（按优先级，先到先得）：
+- `selectedRuntime`：用户本轮选择哪个 runtime，只用于展示和路由。
+- `runtimeBinding`：已有 Codex thread / Claude session / ACP session 的续跑绑定。
+- 后端会先校验 `runtimeBinding.runtime` / `runtimeBinding.runtimeId` 是否匹配 `selectedRuntime`。
+- `runtime_binding` SSE event 是写入 binding 的唯一来源。
+- UI 展示“当前选择 Codex/Claude/MindOS”时看 `selectedRuntime`；展示“已连接到 Codex thread xxx”时看 `runtimeBinding`。
 
-| 优先级 | 目录 | 类型 | 可编辑 |
-|---|---|---|---|
-| 1 | `packages/web/data/skills/` | MindOS 内置 | 否 |
-| 2 | `skills/` | 项目级内置 | 否 |
-| 3 | `{mindRoot}/.skills/` | 知识库用户自定义 | 是 |
-| 4 | `~/.mindos/skills` | 全局用户自定义 | 是 |
+## 四、Runtime Lifecycle Contract
 
-用途：注入到 system prompt，增强 agent 的专业能力。设置页可启用/禁用每个 skill。
+Agent 兼容不只看协议适配或单个 capability boolean。`AgentRuntimeDescriptor.lifecycle` 是 runtime governance 的统一投影，描述每个 runtime 在以下阶段的归属与支持方式：
 
-### Extensions（可执行代码扩展）
+```
+detect → health → configure → launch → session → context
+       → execute → interrupt → archive → remote → coordinate
+```
 
-- **发现**：`DefaultResourceLoader` 扫描 `.pi/extensions/` 目录
-- **能力**：注册工具（`registerTool`）、注册命令（`registerCommand`）、拦截生命周期事件
-- **示例**：`.pi/extensions/current-time.ts` — 在每次 LLM 调用前注入当前时间
-- **管理**：设置页可启用/禁用，显示 tools/commands 计数
-- **持久化**：`~/.mindos/config.json` 的 `disabledExtensions` 字段
+每个 stage 都标注：
 
-### MCP Tools（外部服务工具）
+| 字段 | 语义 |
+|---|---|
+| `support` | `owned` / `delegated` / `unsupported` / `unknown` |
+| `owner` | 当前阶段由 `mindos` 还是 `external` runtime 持有 |
+| `sources` | 这个判断来自 settings、native health、ACP detect、turn-runner、run-ledger 等哪一层 |
+| `summary` | 给 Runtime Health / Compatibility Center / 调试 UI 展示的人类可读解释 |
 
-- **内置**：MindOS MCP server 始终可用（源码在 `packages/mindos/src/protocols/mcp-server/`，发布为 `dist/protocols/mcp-server/index.cjs`）
-- **扩展**：额外 MCP servers 通过 `~/.mindos/mcp.json` 配置
-- **接入方式**：
-  - 静态桥接：`list_mcp_tools` / `call_mcp_tool`（通用入口）
-- **容错**：MCP 不可用时静默跳过，不影响其他功能
+当前归属原则：
 
-## 六、System Prompt 结构
+| Runtime | Lifecycle 归属 |
+|---|---|
+| MindOS Pi | MindOS 拥有 configure / launch / session / context / execute；Pi `SessionManager` 拥有完整 history 与 compaction entry |
+| Codex / Claude Code | MindOS 拥有 detect / health / prompt bridge；外部 runtime 拥有 model、auth、permission、session、compact、execute |
+| ACP | MindOS 拥有 registry/detect 与 launch metadata；具体 adapter 拥有 auth、session、context window、execute |
 
-组装顺序（从上到下，越靠后优先级越高）：
+### Runtime Adapter Contract
 
-| 段落 | 内容 | 来源 |
+`AgentRuntimeDescriptor.adapterContract` 是 runtime lifecycle 的 adapter-facing 只读 contract。它不替代 `lifecycle` / `compatibility`，而是把“这个 runtime 如何接入 MindOS”拆成五个可被 Runtime Doctor、Compatibility Center、未来 Agent Pack 消费的面：
+
+| 字段 | 语义 |
+|---|---|
+| `connection` | MindOS 通过 internal / stdio / app-server / SDK / CLI 哪种方式连接 runtime，以及 launch command 的安全摘要 |
+| `configuration` | 模型、凭证、settings 是 MindOS session/settings 持有，还是 runtime/adapter 自己持有 |
+| `health` | health 由 MindOS native probe、runtime native check、adapter 声明，还是未知 |
+| `commands` | slash/native command 是 MindOS skill 生成、runtime event 发现、adapter 静态声明，还是未知 |
+| `protocol` | ACP / native runtime 是否声明 streaming、auth、model、prompt、MCP、session lifecycle 等协议能力 |
+
+这层的安全边界：
+
+- 只暴露命令名、健康检查摘要、静态 command 名称等非敏感 metadata；不返回 env、headers、token。
+- 不启动 runtime、不执行 health check、不同步外部 settings，只描述当前已知 adapter contract。
+- ACP custom adapter 可以通过 settings 声明 `adapterMetadata.healthCheck`、`adapterMetadata.commands` 与 `connectionType` / `supportsStreaming` 等 protocol 相关能力；MindOS 只把这些作为兼容诊断和未来 command / model / session UI 的输入，不自动信任为完整 ready。
+- AionUI/adapter-pack 风格的 top-level 字段（如 `connectionType`、`supportsStreaming`、`authRequired`、`models`、`promptCapabilities`、`mcpCapabilities`、`sessionCapabilities`）会被归一化进非敏感 `adapterMetadata`。`env`、`headers`、`apiKeyFields` 等敏感字段不会进入 adapter contract 或 projection。
+- AionUI extension manifest 的 `contributes.acpAdapters` 与 `acp-adapters.json` 数组可以归一化为 MindOS custom ACP overrides；`cliCommand` / `defaultCliPath` / `acpArgs` / `healthCheck.versionCommand` / `healthCheck.timeout` 会映射到 MindOS 的 command / args / healthCheck contract。`connectionType: "cli"` 作为本地 CLI ACP adapter 兼容写法处理。
+
+### Runtime Adapter Projection
+
+Runtime adapter projection 是 `adapterContract` 的只读诊断投影，位于 `packages/mindos/src/server/handlers/runtime-adapter-projections.ts`，通过 `/api/agent-runtimes/adapter-projections` 暴露。它不解释 runtime 场景本身，而是把 adapter-facing contract 拆成五个 facet 供 Runtime Doctor 和调试 UI 使用：
+
+| 字段 | 语义 |
+|---|---|
+| `connection` | 连接形态、owner、launch command 的安全摘要，以及是否存在已知连接契约 |
+| `configuration` | 模型选择、凭证、settings 由谁拥有，是 MindOS session/settings、runtime-native 还是 adapter-declared |
+| `health` | 运行时健康语义由 MindOS native probe、runtime native check、adapter 声明，还是未知 |
+| `commands` | command discovery 来源、静态 command 名称与数量，以及是否存在已声明的 adapter 命令 |
+| `protocol` | streaming/auth 是否明确、静态 model 数量、prompt/MCP/session capability flags，以及声明连接类型是否与 MindOS 当前 ACP launch 能力匹配 |
+
+这层同样是只读的，不启动 runtime、不执行 health check、不同步外部 settings，也不暴露 env / token / secret。它的作用是让 readiness 能够先看到“接入契约本身是否完整”，再谈场景级 readiness。
+
+当前 generic ACP launch 仍以本地 CLI / stdio 为主：`connectionType: "cli"` 会被视为本地进程启动的 ACP adapter，`connectionType: "stdio"` 仍是直接 stdio adapter。如果 adapter 声明 `connectionType: "http"` 或 `"sse"`，projection 会保留该事实并把 `protocol` facet 标记为 `limited`，而不是假装已经支持这些 transport。后续要真正支持 http/sse，需要先扩展 ACP subprocess / session transport 层，再把 readiness 从 limited 提升。
+
+### Runtime Session Projection
+
+Runtime session projection 是 active runtime session 的动态状态投影，位于 `packages/mindos/src/server/handlers/runtime-session-projections.ts`，通过 `/api/agent-runtimes/session-projections` 暴露。它和 adapter projection 的分工不同：
+
+| Projection | 负责什么 | 不负责什么 |
 |---|---|---|
-| AGENT_SYSTEM_PROMPT | 身份、7 条 Core Directives、Context Mechanics、Output 格式 | `packages/web/lib/agent/prompt.ts` |
-| Time Context | 当前 UTC / 本地时间 / Unix 时间戳 | 运行时生成 |
-| Init Status | bootstrap 加载结果 | 运行时检测 |
-| Init Context | SKILL.md + 用户规则 + INSTRUCTION.md + 首页 + config | 知识库文件 |
-| Attached Files | 用户正在浏览的文件内容 | 前端传入 |
-| Uploaded Files | 用户上传的附件内容 | 前端传入 |
-| LANGUAGE LOCK | 动态检测用户语言并锁定回复语言 | 运行时检测 |
+| `adapter-projections` | 静态/声明式接入契约：connection、health、commands、protocol model metadata | 不读取 active session，也不承诺当前 session 的真实 model/mode |
+| `session-projections` | active session 观测到的 controls、slash commands、tool events、permission events | 不启动 runtime，不创建 session，不替 runtime 存完整历史 |
 
-### 语言对齐机制
+ACP session projection 的来源是 `AcpSessionSnapshot`：
 
-三层保障确保 Agent 用用户的语言回复：
+| 字段 | 语义 |
+|---|---|
+| `controls.model` / `controls.mode` / `controls.thoughtLevel` | 从 ACP `session/new` / `session/update` / `session/set_config_option` 观测到的 select controls；Web UI 用它生成 ACP capsule |
+| `slashCommands` | 从 ACP `available_commands_update` 或 adapter 静态 commands 生成 runtime slash commands；ACP command 不会被当作 MindOS skill |
+| `toolEvents` | 从 ACP `tool_call` / `tool_call_update` 归一化的最近 tool calls 与 summary |
+| `permissionEvents` | ACP client bridge 观测到的 permission request/resolution；当前是运行中投影，不是 durable approval queue |
+| `session` | MindOS session id、agent session id、state、cwd、lastActivityAt 等 active session 指针 |
 
-1. Core Directive 第 7 条：静态规则，"You MUST reply in the same language"
-2. Output 段落：静态强调，"CRITICAL: Reply in the SAME language"
-3. LANGUAGE LOCK：运行时检测最后一条用户消息是否含中文，在 prompt 末尾追加明确的语言锁定指令
+Web 层消费方式：
 
-## 七、Agents 管理
+- `useRuntimeSessionProjection()` 只在选中 ACP runtime 且 Ask 可见时读取 session projection，并做轻量刷新。
+- `AcpRuntimeOptionsCapsule` 只渲染 session projection 中可用的 model/mode/thought controls；用户改动会进入 `acpRuntimeOptions`。
+- ACP lane 在 `createSession → prompt` 之间调用 `setMode()` / `setConfigOption()`，确保 UI 选择真实进入 ACP runtime。
+- Slash command 合并时，MindOS skill 仍生成 skill chip；ACP runtime command 只回填 `/<command>` 到输入框，由外部 agent 解释。
 
-MindOS 把自己注册为和其他 coding agent 同类的 agent：
+这层的边界很重要：Codex / Claude Code 继续使用它们自己的 native session、compact、model/control 机制；MindOS Pi 继续由 Pi runtime/session manager 负责；ACP session projection 只是把 ACP adapter 运行时已经暴露的状态变成 UI 和 readiness 可消费的安全投影。
 
+`lifecycle.remote` 不等于“已经有 24/7 调度器”。它只回答 runtime 是否能在 MindOS server 所在主机运行，以及 unattended 能力是否完整。当前 native / ACP / MindOS Pi 都是 `server-runnable`，但 unattended 仍是 `limited`：还需要 scheduler、approval routing、wake/resume、missed trigger 和失败审计这些产品层能力。
+
+`lifecycle.coordination` 是未来 Team Mode 的底层边界，不是当前 UI 承诺。现在只声明 runtime 是否能消费共享 MindOS context，以及是否已有 mailbox / task-board primitives。当前共享 context 已有，mailbox 与 task-board 还没有 first-class contract。
+
+### Runtime Compatibility Profile
+
+`AgentRuntimeDescriptor.compatibility` 是 lifecycle 的场景化投影：lifecycle 回答“哪个阶段由谁拥有”，compatibility 回答“这个 runtime 适不适合某类产品场景，以及还缺什么”。它同样是 core runtime descriptor 的一部分，由 `packages/mindos/src/agent/runtime/compatibility.ts` 生成，Web/API/Capability Registry 只消费结果，不重复推断。
+
+当前 profile 覆盖这些场景：
+
+| Scenario | 语义 |
+|---|---|
+| `interactive-turn` | 当前 runtime 是否适合一轮普通交互式对话/执行 |
+| `coding-workflow` | 是否适合真实 coding agent 工作流，如 shell/file/git/diff/branch/PR |
+| `session-continuity` | 是否有清晰的 resume/list/attach/archive 或等价 session 续跑能力 |
+| `context-governance` | MindOS 与 runtime 如何分工 context 注入、history、compact、context-window |
+| `permission-governance` | 权限请求由谁处理，能否被 MindOS 桥接和审计 |
+| `mcp-tooling` | MCP/tool 配置是否可由 MindOS 投影到 runtime |
+| `skill-execution` | Skill 能否被当前 runtime 正确加载/执行，以及是否已有机器可读 runtime requirements |
+| `artifact-governance` | 产物、diff、branch、PR、artifact 是否能被 MindOS 统一索引和复查 |
+| `remote-control` | 这个 runtime 是否能在 MindOS server host 上被远程手动控制 |
+| `unattended-automation` | 是否适合 24/7 / scheduled / headless 自动化 |
+| `team-coordination` | 是否具备 shared context、mailbox、task-board 等多 agent 协作 primitives |
+
+每个 scenario 使用：
+
+| 字段 | 语义 |
+|---|---|
+| `level` | `ready` / `limited` / `blocked` / `unknown` |
+| `owner` | `mindos` / `external` / `shared` |
+| `requirements` | 机器可读的已满足、外部拥有、缺失或未知前置条件 |
+| `blockers` | 阻止该场景成为 ready 的关键缺口 |
+
+当前几个刻意保守的结论：
+
+- `remote-control` 与 `unattended-automation` 分开。Codex / Claude / ACP / MindOS Pi 可以是 `server-runnable`，但 24/7 仍是 `limited`，因为还缺 scheduler、approval routing、wake/resume、failure audit。MindOS 已有只读 automation runtime projection contract，把“可远程手动控制”和“可无人值守自动化”拆成两个 readiness 字段。
+- `team-coordination` 现在最多是 `limited`。MindOS 已有 shared context，但还没有 first-class mailbox / task-board primitives，不应该在 UI 上承诺复杂 Team Mode。
+- `permission-governance` 已有只读 permission runtime projection contract。它能解释 Pi 的 `read/ask/auto/full` policy、native runtime 的交互式 permission bridge、ACP adapter 的未知审批契约；但 durable approval queue 还没有实现，所以 native bridge 不能等同 24/7 可用。
+- `skill-execution` 现在是 `limited`。MindOS 能注入/加载 skill，读取 `SKILL.md` runtime requirements，提供 skill × runtime matcher，并在明确 `blocked` 时阻止显式选中的不兼容 skill；runtime selector 会在 turn 前展示聚合 readiness 与主要 gap，但还不会自动 runtime routing。
+- `mcp-tooling` 对 native runtime 仍是 `limited`。MindOS 已有只读 MCP runtime projection contract，可以解释每个 runtime 当前是 `ready` / `projectable` / `limited` / `blocked` / `unknown`；但不会自动改写 Codex / Claude / ACP adapter 的外部 MCP 配置。
+- `artifact-governance` 现在是 `limited` / `blocked` / `unknown`。MindOS 已有只读 artifact runtime projection contract，可以解释 runtime 的 text/diff/checkpoint/artifact/branch/PR 输出形态；但 MindOS 还没有跨 runtime artifact index，所以不能把“runtime 会产出”说成“MindOS 已统一治理”。
+
+### Runtime Readiness Aggregation
+
+Runtime readiness aggregation 是 Runtime Doctor / Compatibility Center 的只读聚合契约，位于 `packages/mindos/src/server/handlers/runtime-readiness.ts`，通过 `/api/agent-runtimes/readiness?permissionMode=<read|ask|auto|full>` 暴露。它把 `AgentRuntimeDescriptor.compatibility` 与五个细分 projection 合并成每个 runtime 的用例级 readiness：
+
+| 用例 | 来源 |
+|---|---|
+| `adapter-contract` | runtime adapter projection |
+| `interactive-turn` / `coding-workflow` / `session-continuity` / `context-governance` / `skill-execution` / `team-coordination` | runtime compatibility profile |
+| `permission-governance` | permission runtime projection |
+| `mcp-tooling` | MCP runtime projection |
+| `artifact-governance` | artifact runtime projection |
+| `remote-control` / `unattended-automation` | automation runtime projection |
+
+aggregation 输出：
+
+| 字段 | 语义 |
+|---|---|
+| `overallStatus` | `ready` / `usable` / `limited` / `blocked` / `unknown`；只用于总览，不替代用例级判断 |
+| `recommendations` | 当前 runtime 适合强推荐或条件推荐的用例，例如交互式 coding、MCP tooling、remote manual control |
+| `useCases` | 每个场景的 `status`、`source`、`sourceStatus`、requirements、blockers 和少量安全的 details |
+| `gaps` | 去重后的缺口清单，按 `mindos-product` / `runtime-native` / `adapter-contract` / `deployment` / `user-setup` / `shared` 分类 |
+| `blockers` | 只列 truly blocking 的缺口，例如 runtime 不可用；`limited` 的产品缺口仍留在 `gaps` 中 |
+
+这层有三个硬边界：
+
+- **不做自动路由**：它解释 runtime 适合什么，不替用户切 runtime，也不在 turn 前自动改写选择。
+- **不触发副作用**：它不启动 runtime、不同步 MCP、不创建 scheduler、不写 artifact index，只聚合现有只读诊断。
+- **不把单点能力说成产品 ready**：Codex / Claude 的 native permission bridge 仍只是 `interactive-only`；server-runnable 仍不等于 24/7；reviewable output 仍不等于 MindOS artifact governance ready。
+
+### Automation Runtime Projection
+
+Automation runtime projection 是 `remote-control` 和 `unattended-automation` compatibility 的只读诊断契约，位于 `packages/mindos/src/server/handlers/runtime-automation-projections.ts`，通过 `/api/agent-runtimes/automation-projections` 暴露。它不启动后台任务，也不创建 scheduler；只解释 runtime 当前是否能被远程手动控制，以及距离 24/7 / scheduled / headless 自动化还缺什么。
+
+projection 输出：
+
+| 字段 | 语义 |
+|---|---|
+| `status` | `ready` / `remote-only` / `limited` / `blocked` / `unknown`；当前通常是 `limited`，因为 24/7 前置条件未齐 |
+| `remoteControl` | runtime 是否可在 MindOS server host 上被远程手动控制；包含 `mode`（如 `server-runnable`）和 remote blockers |
+| `unattendedAutomation` | runtime 是否适合 24/7 / scheduled / headless；明确区分 technical runnable 与 product-ready automation |
+| `productPrerequisites` | 当前统一列出 `scheduler`、`approval-routing`、`wake-resume`、`failure-audit` 四个产品层前置条件 |
+| `reasons` / `blockers` | runtime availability、server-runnable、remote control surface、unattended automation 及各前置条件的逐项判断 |
+
+当前结论：
+
+- MindOS Pi / Codex / Claude / ACP 可以是 `server-runnable`，但这只证明 remote/manual control 的底层可能性。
+- 24/7 readiness 需要 durable scheduler、无人值守审批路由、wake/resume/missed trigger reconciliation、failure audit；缺一项就不能在 UI 上承诺 fully unattended。
+- Native runtime 的 permission bridge 是交互式能力，不自动升级成后台任务审批；automation projection 会继续把它标成 `limited`，直到 durable approval queue 落地。
+- Generic ACP 需要 adapter-specific health / permission / artifact contract 才能进一步从 `limited` 或 `unknown` 提升。
+
+### Runtime Control Plane Primitives
+
+Runtime control plane 是 remote / cron / team 的第一层可写后端 substrate，位于 `packages/mindos/src/server/handlers/runtime-control-plane.ts`，通过 `/api/agent-runtimes/control-plane` 暴露。它只保存安全的状态、摘要和指针，不启动 runtime、不执行 cron、不自动批准权限，也不把后台任务升级成 ready。
+
+当前持久化文件：
+
+```text
+<mindRoot>/.mindos/runtime-control-plane.json
 ```
-MCP_AGENTS 注册表 (packages/web/lib/mcp-agents.ts)
-├─ claude-code    检测 ~/.claude/
-├─ cursor         检测 ~/.cursor/
-├─ windsurf       检测 ~/.codeium/windsurf/
-├─ pi             检测 ~/.pi/
-├─ mindos         检测 ~/.mindos/          ← MindOS 自己
-├─ ...            (共 20+ 个 agent)
-└─ codex          检测 ~/.codex/
-```
 
-在 Agents 页面 (`/agents`)，所有 agent 并列显示连接状态、MCP servers、安装的 skills。
+control plane 覆盖六类 primitive：
 
-## 八、SSE 流协议
+| Primitive | 语义 |
+|---|---|
+| `schedules` | cron / interval / event / manual schedule registry；保存 trigger、runtimeId、target pointer、policy 和摘要 |
+| `approvalQueue` | durable unattended approval queue substrate；保存 pending / resolved 状态与最小安全摘要 |
+| `wakeEvents` | wake / missed trigger reconciliation ledger；记录 pending / claimed / completed / missed |
+| `failureAudits` | background run failure audit substrate；记录 timeout、permission、tool、runtime 等失败摘要 |
+| `mailbox` | Team Mode mailbox substrate；保存 runtime-to-runtime message pointer 和摘要 |
+| `tasks` | Team Mode task-board substrate；保存 assignee runtime、状态和优先级 |
 
-POST /api/ask 返回 Server-Sent Events，自定义 6 种事件类型：
+POST mutation 使用 `action` 分发：
 
-| 事件 | 格式 | 说明 |
+| Action | 作用 |
+|---|---|
+| `create-schedule` / `update-schedule` | 创建或更新 schedule registry entry |
+| `enqueue-approval` / `resolve-approval` | 写入或关闭 approval queue item |
+| `record-wake` | 记录 wake / missed trigger event |
+| `record-failure` | 记录失败审计 |
+| `send-message` | 写入 mailbox message |
+| `upsert-task` | 写入或更新 team task |
+
+边界：
+
+- 只接受声明式 metadata，不保存 env、headers、token、api key、secret 或 artifact/blob 内容；文本摘要会做 secret redaction。
+- schedule 默认 `disabled`，即使 status 设为 `enabled`，当前也只是 registry 状态，不会启动真实 runner。
+- cron 只做基础格式校验，不计算 next fire、不创建后台 timer。
+- automation projection 仍然保守：有 control-plane substrate 不等于 24/7 fully ready；runner、approval routing policy、missed-trigger executor 和通知/UI 仍要后续实现。
+
+### Permission Runtime Projection
+
+Permission runtime projection 是 `permission-governance` compatibility 的只读诊断契约，位于 `packages/mindos/src/server/handlers/runtime-permission-projections.ts`，通过 `/api/agent-runtimes/permission-projections?permissionMode=<read|ask|auto|full>` 暴露。它只解释当前 runtime 在某个 MindOS permission mode 下的权限治理状态，不直接批准、拒绝或重放任何运行时请求。
+
+projection 输出：
+
+| 字段 | 语义 |
+|---|---|
+| `status` | `ready` / `interactive-only` / `limited` / `blocked` / `unknown` |
+| `harnessPermissionModel` | runtime harness 当前声明的权限模型：`mindos-only` / `runtime-bridged` / `none` / `unknown` |
+| `interactiveApproval` | 交互式场景中权限由 Pi policy、native bridge、external runtime 还是 adapter 自己处理 |
+| `unattendedApproval` | 只从 permission 角度判断是否适合 headless / scheduled；scheduler、wake/resume、failure audit 仍属于 `unattended-automation` 场景 |
+| `policy` / `policyModes` | MindOS Pi 的 `read/ask/auto/full` policy 摘要：KB 写入范围、terminal/MCP/IM/schedule/user-extension/delegation 是否开启 |
+| `reasons` / `blockers` | runtime availability、permission owner、bridge、durable approval queue、adapter approval contract 等逐项判断 |
+
+当前结论：
+
+- MindOS Pi 的 `read` mode 从 permission 角度可无人值守，因为没有写入、terminal、MCP、IM、schedule 或 user-extension scope；但真正 24/7 仍需要 scheduler / wake-resume / failure audit。
+- MindOS Pi 的 `ask` mode 是交互安全默认值，不等于 durable approval queue；后台任务如果需要保留“问用户”的语义，还需要持久审批队列。
+- Codex / Claude 的 permission bridge 是 `interactive-only`：MindOS 能把 native permission prompt 变成产品流事件，但 pending 状态在 active run 的进程内，不能当作 headless / resumed run 的 durable approval。
+- Generic ACP 仍是 `unknown`：ACP adapter 必须声明自己的 approval contract，MindOS 才能可靠路由或预授权。
+
+### MCP Runtime Projection
+
+MCP runtime projection 是 `mcp-tooling` compatibility 的只读诊断契约，位于 `packages/mindos/src/server/handlers/mcp-runtime-projections.ts`，通过 `/api/agent-runtimes/mcp-projections` 暴露。它把三类现有信息合在一起：
+
+1. `AgentRuntimeDescriptor`：runtime identity、kind、status、capabilities、`mcpAgentKey`；
+2. MCP agent profile：来自 `/api/mcp/agents` 的每个 agent 配置路径、已检测 server 名称与来源；
+3. canonical MindOS MCP config：`~/.mindos/mcp.json` 中的 server 名称，以及 MindOS Agent runtime allowlist。
+
+projection 输出：
+
+| 字段 | 语义 |
+|---|---|
+| `status` | `ready` / `projectable` / `limited` / `blocked` / `unknown` |
+| `configuredServers` | 当前 runtime 自己的 MCP 配置中已检测到的 server 名称 |
+| `mindosConfigServers` | canonical MindOS MCP config 中的 server 名称 |
+| `projectedServers` | 当前 runtime 实际可投影的 server 名称；MindOS Pi 只包含显式 allowlist，native runtime 等同其已检测配置 |
+| `reasons` / `blockers` | runtime availability、MCP profile、MindOS config、allowlist/native config 等逐项判断 |
+
+这层有两个硬边界：
+
+- **不泄露 secrets**：只暴露 server 名称、来源和状态，不返回 command、args、env、headers、token。
+- **不自动写配置**：`projectable` 只表示 MindOS 有足够信息提示用户去 install/copy/sync，不代表当前 runtime 已可用；外部 runtime 的 MCP config 仍由显式 `/api/mcp/install`、`/api/mcp/copy-server` 或用户自己的配置动作修改。
+
+### Artifact Runtime Projection
+
+Artifact runtime projection 是 `artifact-governance` compatibility 的只读诊断契约，位于 `packages/mindos/src/server/handlers/runtime-artifact-projections.ts`，通过 `/api/agent-runtimes/artifact-projections` 暴露。它把 runtime descriptor 中的 `harnessCapabilities.output` 投影成产品可解释的产物治理状态，不创建、不修改、不索引真实 artifact。
+
+projection 输出：
+
+| 字段 | 语义 |
+|---|---|
+| `status` | `ready` / `limited` / `blocked` / `unknown`；当前通常不会是 `ready`，因为统一 artifact index 尚未实现 |
+| `outputKinds` | runtime 声明可产出的原始输出形态：`text` / `diff` / `checkpoint` / `artifact` / `branch` / `pr` |
+| `reviewableOutputKinds` | 可复查或可交付的输出子集：`diff` / `checkpoint` / `artifact` / `branch` / `pr` |
+| `nativeHandoffTargets` | 面向 UI / Runtime Doctor 的交付目标：message、diff、checkpoint、artifact、branch、pull-request |
+| `nativeReview` | runtime 是否声明了可复查输出；Codex / Claude 通常是有，generic ACP 需要 adapter 声明 |
+| `artifactIndex` | MindOS 是否已经具备统一 cross-runtime artifact index；当前为 `missing` |
+| `rollback` | runtime 是否声明 checkpoint 输出，可作为未来 Compare / Restore / rollback 的锚点 |
+| `branchPr` | runtime 是否能交付 branch 或 PR reference |
+| `reasons` / `blockers` | runtime availability、output contract、artifact projection contract、artifact index、checkpoint、branch/PR 等逐项判断 |
+
+当前结论：
+
+- MindOS Pi 有 text/artifact 输出，所以 artifact projection 是 `limited`：能说明产物形态，但缺统一 artifact index。
+- Codex / Claude 能声明 diff/artifact/branch/PR 等 native coding output，所以适合 Runtime Doctor 展示“可复查输出”，但仍不能跳过 MindOS artifact index。
+- Generic ACP 默认是 `unknown`：ACP 只证明 text/tool-event streaming，不证明 adapter 能交付 diff、branch、PR 或 checkpoint。
+- Artifact projection 的边界是诊断和路由，不代替真实 artifact 存储；下一步如果要从 `limited` 走向 `ready`，需要实现 cross-runtime artifact index、source/run binding、review/rollback metadata。
+
+## 五、执行路径
+
+`turn-runner.ts` 只做总控：完成 request/session/file context 解析后，通过 `turn-runtime-lane.ts` 选择 runtime lane，再把本轮 turn input 交给对应 lane。这样 MindOS Pi、Codex、Claude、ACP 在入口上并列，runtime/session/compact 语义仍由各 runtime 自己拥有。
+
+| 路径 | 文件 | 说明 |
 |---|---|---|
-| `text_delta` | `{ content: string }` | 文本增量 |
-| `thinking_delta` | `{ content: string }` | Extended Thinking 增量 |
-| `tool_start` | `{ name, args }` | 工具调用开始 |
-| `tool_end` | `{ name, result }` | 工具调用结束 |
-| `done` | `{ usage }` | 流结束 |
-| `error` | `{ message, code }` | 错误 |
+| Runtime lane facade | `packages/web/app/api/agent/_lib/turn-runtime-lane.ts` | 将已校验的 `selectedRuntime` / ACP 选择解析为 `native`、`acp`、`mindos-pi` lane |
+| MindOS Pi lane | `packages/web/app/api/agent/_lib/turn-runner-mindos-pi.ts` | 创建 MindOS Pi runtime，注入 system/context prompt，注册 MindOS Pi tools/extensions |
+| Native runtime lane | `packages/web/app/api/agent/_lib/turn-lane-native.ts` | Codex / Claude 的 prompt bridge、permission bridge、stream 转换、ledger 写入 |
+| ACP runtime lane | `packages/web/app/api/agent/_lib/turn-lane-acp.ts` | ACP session create/prompt stream/close、permission 映射、ledger 写入 |
+| Shared runtime lane contract | `packages/web/app/api/agent/_lib/turn-lane-shared.ts` | native / ACP 共享的 turn 输入基类，以及各 lane 独有 options 的类型边界 |
+| Shared request/context | `turn-request.ts` / `turn-context.ts` / `runtime-selection.ts` | 请求校验、上下文装载、runtime/binding 解析 |
 
-## 九、A2A & ACP 协作
+为了避免 Next.js route 静态引入 Node-only pi runtime，各 lane 在执行时使用动态 import 加载具体 runner。
 
-### A2A Protocol (Agent-to-Agent)
+### Skill Runtime Requirements
 
-MindOS 实现了 Google A2A 协议，使得不同 MindOS 实例（或任何 A2A 兼容 Agent）可以互相通信：
+Skill requirements 是 `skill-execution` compatibility 的第一层机器可读契约，来源于每个 `SKILL.md` 的 frontmatter，由 server handler 统一解析并投影到 `/api/skills` 与 `/api/skills/matrix`。缺少 requirements 的旧 skill 继续可用，但 `runtimeRequirements.declared=false`，且 remote / unattended / approval / user-input 状态都是 `unknown`，不能被 runtime matcher 当作“全 runtime 安全”。
+
+当前支持的字段：
+
+| Field | 语义 |
+|---|---|
+| `runtimeKinds` / `runtimes` | 可声明 `mindos`、`codex`、`claude`、`acp`、`native`、`any` |
+| `requiredTools` / `tools` | 可声明 `shell`、`file`、`git`、`browser`、`mcp`、`plugins`、`skills` |
+| `requiredCapabilities` / `capabilities` | 额外能力标签，如 `artifact-output`、`approval-routing` |
+| `remoteSafe` | skill 是否适合远程手动控制场景 |
+| `unattendedSafe` | skill 是否适合 24/7 / scheduled / headless 场景 |
+| `requiresApprovals` | skill 是否需要人工或 runtime 权限审批 |
+| `requiresUserInput` | skill 执行中是否需要用户输入 |
+| `runtimeNotes` | 给 runtime matcher / UI / 审计看的简短说明 |
+
+这层只解决“skill 需要什么”的 declaration，不等于已经有自动调度。runtime requirements 的共享类型位于 `packages/mindos/src/agent/runtime/skill-runtime-requirements.ts`，`SKILL.md` frontmatter 解析仍由 server handler 负责。
+
+### Skill Runtime Matcher
+
+Skill runtime matcher 是 `skill-execution` compatibility 的第二层诊断契约，位于 `packages/mindos/src/agent/runtime/skill-runtime-matcher.ts`，通过 `/api/skills/runtime-matches?scenario=<scenario>` 暴露。它把 skill requirements 与 `AgentRuntimeDescriptor` / `harnessCapabilities` 做匹配，输出：
+
+- `level`: `ready` / `limited` / `blocked` / `unknown`
+- `reasons`: runtime kind、runtime scenario readiness、required tools、known capabilities、approval/user-input、remote/unattended safety 的逐项解释
+- `blockers`: 缺失的硬依赖，如 `runtime-kind`、`tool:git`、`capability:pr-output`、`remote-unsafe`、`user-input-required`
+
+matcher 只回答“这个 skill 和这个 runtime 在某个 scenario 下是否匹配，以及为什么”。它不启动自动路由，也不替代 runtime 自己的权限、session、compact 或执行语义。
+
+### Skill Runtime Enforcement
+
+Skill runtime enforcement 是 `skill-execution` compatibility 的第三层 turn-runner gate，位于 `packages/web/app/api/agent/_lib/skill-runtime-enforcement.ts`。当用户显式选择 skill 时，`POST /api/agent/sessions/:sessionId/turns` 会在构造 prompt、启动 Pi / Codex / Claude / ACP runtime 之前：
+
+1. 解析当前 runtime lane 的 `AgentRuntimeDescriptor`；
+2. 从实际 skill roots 读取该 skill 的 runtime requirements；
+3. 用 matcher 计算 `interactive-turn` 匹配结果；
+4. 只在 `level=blocked` 时返回 `409 skill-runtime-blocked`，并带上 `runtimeId`、`runtimeKind`、`skillName`、`blockers` 与逐项 `reasons`。
+
+这条 gate 只处理“明确不能跑”的硬不兼容。缺少 requirements 的旧 skill、`unknown`、`limited` 仍继续进入当前 runtime，避免破坏现有 skill 生态。Runtime selector 会以只读提示展示聚合 readiness 与主要 gap，帮助用户在 turn 前理解风险；它不自动切换 runtime，也不把 `limited/unknown` 升级成硬阻断。
+
+## 六、Prompt 与上下文
+
+Prompt 分三层，分别处理稳定规则、Assistant 角色合同和每轮动态材料：
+
+| 层 | 变化频率 | 来源 |
+|---|---|---|
+| System prompt | 稳定，创建 runtime/session 时使用 | `packages/mindos/src/agent/prompt/agent-prompt.txt` + `buildMindosSystemPrompt()` |
+| Active Assistant overlay | 仅 Assistant run 或选中 Assistant 时注入 | `.mindos/assistants/<id>.md` / 内置 Assistant prompt + `packages/mindos/src/agent/prompt/assistant-prompt.ts` |
+| Turn context prompt | 每轮动态计算，但按签名去重 | `buildMindosContextPrompt()` / `renderMindosContextPrompt()` |
+
+`agent-prompt.txt` 是 MindOS 的 base prompt，不被 Assistant 替换。Assistant Markdown body 会被解析成 `## Active Assistant` overlay：它描述当前 Assistant 的 id/name/instructions/skills/MCP hints/permission 默认值，但不能覆盖 system、安全、permission 或 tool-use 规则。
+
+不同 runtime 的注入位置不同：
+
+| Runtime | Assistant 注入方式 |
+|---|---|
+| MindOS Pi | `buildMindosSystemPrompt({ activeAssistant })` 直接把 overlay 放入 system prompt |
+| Codex / Claude Code / ACP | `prependMindosActiveAssistantPrompt()` 把 overlay 放在 external prompt 前面，由各自 adapter 再映射 runtime 能力 |
+
+Assistant run 的目标、文件、上传内容、recall 和 session metadata 仍属于 Turn context，不复制 Assistant 的长期规则。
+
+Turn context 包括：
+
+- 当前时间：每轮精简注入。
+- Session Context：仅当 workDir / selected spaces / assistants / warnings 签名变化时注入。
+- Attached MindOS files：文件选择或内容变化时注入全文；未变化时只注入轻量引用。
+- Uploaded files：用户本轮上传的文件内容，按本轮请求处理。
+- Active recall：按用户消息召回相关知识片段。
+- Initialization context：MindOS Pi 初始化失败、截断或规则加载结果。
+
+### MindOS 文件上下文去重
+
+`currentFile` / `attachedFiles` 会先被本地读取并生成签名：
 
 ```
-MindOS A ──── A2A JSON-RPC ────▶ MindOS B
-  │                                   │
-  ├─ discover_agent(url)              ├─ /.well-known/agent-card.json
-  ├─ delegate_to_agent(task)          ├─ POST /api/a2a (SendMessage)
-  └─ check_task_status(id)            └─ GET /api/a2a (GetTask)
+fileContextSignature = JSON.stringify({
+  files: [{ label, path, hash, size }],
+  failed: [...]
+})
 ```
 
-**暴露的 KB 技能：** Search Knowledge Base, Read Note, Write Note, List Files, Organize Files
+如果当前 session 最近一次 run 的 `fileContextSignature` 相同，本轮 prompt 不再重复文件全文，只渲染：
 
-### ACP Protocol (Agent Client Protocol)
+```
+These selected MindOS files are unchanged since the last turn, so their full content is not repeated.
+- Current: ...
+- Attached: ...
+```
 
-MindOS 集成了 ACP 协议，可作为客户端调用远程 ACP Agent：
+这意味着：用户一直停在同一个文件上时，模型不会每轮重复收到全文；如果文件内容、文件列表或读取失败状态变化，则重新注入全文。
 
-- **注册表**：31+ 个 ACP Agent 可用（/api/acp/registry）
-- **Session**：通过 subprocess 启动 ACP agent，管理生命周期
-- **工具**：`list_acp_agents` 列举可用 Agent，`call_acp_agent` 调用指定 Agent
+## 七、工具与权限
+
+工具分 runtime 处理：
+
+| Runtime | 工具来源 | 权限处理 |
+|---|---|---|
+| MindOS Pi | MindOS Pi registered tools/extensions：KB tools、subagent、ask-user-question、pi-web-access 等 | `createMindosAgentPermissionPolicy()` 根据 `permissionMode` 生成 Pi policy |
+| Codex | Codex adapter / SDK / app-server | 由 Codex runtime adapter 映射并执行权限模型 |
+| Claude Code | Claude CLI / SDK bridge | 由 Claude adapter 和 permission prompt bridge 处理 |
+| ACP | ACP session tools | 由 ACP adapter 与 runtime binding 控制 |
+
+工具 schema 本身不需要写进 system prompt。Pi runtime 通过注册的 `ToolDefinition` / extension registry 把工具交给模型；prompt 只保留必要的高层能力说明。
+
+Assistant profile 中的 `skills` / `mcp` 只表达偏好和激活提示，不等于真实工具授权。真实可用工具始终来自当前 runtime registry；真实 skill 内容通过 `load_skill` 等 runtime tool 按需加载。
+
+## 八、文件与附件
+
+MindOS 区分两类文件：
+
+| 类型 | 来源 | 处理方式 |
+|---|---|---|
+| Attached files from the MindOS knowledge base | `currentFile` / `attachedFiles` 指向已存在的 MindOS/base/workspace 文件 | 可稳定引用路径；按签名决定全文或轻量引用 |
+| Files uploaded by the user for this request | 用户本轮上传的本地文件或图片 | 作为本轮输入传给 runtime；不默认写入知识库 |
+
+图片与可传递文件会同时转换为 runtime attachment，让支持多模态/文件输入的 adapter 直接消费；不支持的 runtime 会退化为文本上下文或文件引用。
+
+## 九、Session 与 Run Ledger
+
+| 数据 | 权威源 |
+|---|---|
+| Chat session metadata | `agent-session-store` + `/api/agent/sessions` |
+| Messages / running state / unread | `agent-run-store` |
+| Runtime binding | `runtime_binding` SSE event → session store |
+| Agent run timeline | run ledger |
+| File/session context signatures | run metadata |
+
+Run metadata 会记录 `sessionContextSignature`、`fileContextSignature`、是否注入全文、以及相关路径，供下一轮 turn 判断是否需要重复注入。
+
+MindOS Pi 的 persisted session 由 Pi `SessionManager` 自己持有完整 JSONL history 与 compaction entry；common layer 只在新建/空 session 时 bootstrap 一次 UI history。恢复已有 Pi session 时，MindOS 可以读取 `buildSessionContext()` 计算 context usage / fallback payload，但不能把 common history 重新 append 进 Pi session，也不能用 run ledger 代存完整 transcript。Run ledger 只保留 run 索引、状态摘要和 runtime archive pointer（`sessionId` / `path`）。
 
 ## 十、关键文件索引
 
 | 文件 | 职责 |
 |---|---|
-| `packages/web/app/api/ask/route.ts` | 核心入口：prompt 组装、session 创建、SSE 流 |
-| `packages/web/lib/agent/prompt.ts` | 静态 system prompt 模板 |
-| `packages/web/lib/agent/tools.ts` | 工具定义 + request-scoped 动态组装 |
-| `packages/web/lib/agent/to-agent-messages.ts` | 前端消息 → pi AgentMessage 转换 |
-| `packages/web/lib/agent/model.ts` | 模型配置（provider/key/model 选择） |
-| `packages/web/lib/agent/log.ts` | 工具操作日志 |
-| `packages/web/lib/pi-integration/skills.ts` | skill 扫描（app-builtin / project-builtin / mindos-user） |
-| `packages/web/lib/pi-integration/extensions.ts` | Extension 发现与加载 |
-| `packages/web/lib/pi-integration/mcp-config.ts` | MCP 配置读取与热刷新 |
-| `packages/web/lib/pi-integration/session-store.ts` | session 路径管理 (~/.mindos/sessions/) |
-| `packages/web/lib/mcp-agents.ts` | agent 注册表（含 MindOS） |
-| `packages/web/lib/settings.ts` | 持久化配置（disabledSkills/Extensions） |
-| `packages/web/lib/im/index.ts` | IM Extension 注册（pi 兼容） |
-| `packages/web/components/ask/AskContent.tsx` | 前端发消息入口 |
-| `packages/web/hooks/useAskSession.ts` | 前端 session 管理 |
-
-## 十一、Ask Panel 近期改进（2026-04-10）
-
-### Portal Popover 优化
-- **改进**：从 inline expand 改为 portal popover（不受 z-index 限制）
-- **影响**：Ask Panel 在 sidebar 导航时不再被遮挡
-- **代码**：`packages/web/components/ask/SaveSessionPopover.tsx` (新建，复用于单消息/全会话保存)
-
-### Session Switcher 增强
-- **改进 1**：提升 hit target（更易点击）
-- **改进 2**：列表过长时自动滚动，保证当前 session 可见
-- **改进 3**：显示 provider name 而非 protocol name（用户更友好）
-- **代码**：`packages/web/components/ask/AskPanel.tsx`, `packages/web/components/ask/SessionSwitcher.tsx`
-
-### 导航同步
-- **改进 1**：点击 Sidebar 导航时自动关闭 Ask 最大化状态（同步进行）
-- **改进 2**：导航到 Home 时自动关闭 Ask Panel，清理界面
-- **代码**：`packages/web/components/SidebarLayout.tsx` → `RightAskPanel` / `AskModal` 通信
-
-### Save Session 新功能
-- **功能**：一键保存整个对话到知识库，支持 AI 自动总结
-- **三种模式**：Save Full Session / Archive & Digest / Organize to Note
-- **详见**：`wiki/specs/spec-save-session.md`
-
-
-| `packages/web/components/settings/McpSkillsSection.tsx` | 设置页：skills + extensions + toggle |
-| `packages/web/lib/a2a/a2a-tools.ts` | A2A 工具定义（6 个） |
-| `packages/web/lib/a2a/agent-card.ts` | Agent Card 生成 |
-| `packages/web/lib/a2a/task-handler.ts` | A2A 任务处理 |
-| `packages/web/lib/acp/acp-tools.ts` | ACP 工具定义（2 个） |
-| `packages/web/lib/acp/session.ts` | ACP Session 管理 |
-| `packages/web/lib/acp/registry.ts` | ACP Agent 注册表 |
+| `packages/web/components/chat/ChatContent.tsx` | 前端 Chat/Agent 入口 |
+| `packages/web/hooks/useAgentChat.ts` | 发起 turn、消费 SSE、写入 run/session store |
+| `packages/web/hooks/useRuntimeSessionProjection.ts` | Web 层读取 active runtime session projection，当前主要服务 ACP controls / slash commands |
+| `packages/web/components/ask/AcpRuntimeOptionsCapsule.tsx` | ACP model/mode/thought controls 的 composer capsule |
+| `packages/web/lib/agent-session-store.ts` | session metadata + runtime binding |
+| `packages/web/lib/agent-run-store.ts` | messages/runs/unread/persist timers |
+| `packages/web/app/api/agent/sessions/[sessionId]/turns/route.ts` | canonical turn endpoint |
+| `packages/web/app/api/agent/_lib/turn-request.ts` | strict request contract |
+| `packages/web/app/api/agent/_lib/runtime-selection.ts` | selectedRuntime / runtimeBinding 解析与校验 |
+| `packages/web/app/api/agent/_lib/turn-context.ts` | session/file context 签名与去重 |
+| `packages/web/app/api/agent/_lib/turn-runner.ts` | turn 总控 |
+| `packages/web/app/api/agent/_lib/turn-runtime-lane.ts` | runtime lane facade，统一 MindOS Pi / native / ACP 入口 |
+| `packages/web/app/api/agent/_lib/turn-runner-mindos-pi.ts` | MindOS Pi 执行路径 |
+| `packages/web/app/api/agent/_lib/turn-lane-native.ts` | Codex / Claude native runtime 执行路径 |
+| `packages/web/app/api/agent/_lib/turn-lane-acp.ts` | ACP runtime 执行路径 |
+| `packages/web/app/api/agent/_lib/turn-lane-shared.ts` | native / ACP runtime lane 共享输入契约 |
+| `packages/web/app/api/assistant-runs/route.ts` | Assistant run 入口，解析 Active Assistant 后委托 agent turn |
+| `packages/mindos/src/agent/runtime/registry.ts` | Runtime descriptor / capability / lifecycle 类型源头 |
+| `packages/mindos/src/agent/runtime/lifecycle.ts` | MindOS Pi / native / ACP lifecycle metadata builder |
+| `packages/mindos/src/server/handlers/runtime-adapter-projections.ts` | Runtime adapter projection contract，统一解释 connection / configuration / health / commands / protocol 的只读接入诊断 |
+| `packages/mindos/src/server/handlers/runtime-session-projections.ts` | Runtime session projection contract，统一解释 active ACP session 的 controls / slash / tools / permission events |
+| `packages/mindos/src/agent/runtime/compatibility.ts` | Runtime compatibility profile builder，投影 interactive / remote / unattended / skill / team 场景 readiness |
+| `packages/mindos/src/agent/runtime/adapter-contracts.ts` | Runtime adapter contract builder，描述 connection / configuration / health / commands / protocol 的只读接入契约 |
+| `packages/mindos/src/agent/runtime/descriptors.ts` | Runtime descriptor 组装，统一暴露 capability / harness / lifecycle |
+| `packages/mindos/src/server/handlers/runtime-permission-projections.ts` | Permission runtime projection contract，统一解释每个 runtime 的交互式审批与 unattended permission readiness |
+| `packages/mindos/src/server/handlers/mcp-runtime-projections.ts` | MCP runtime projection contract，统一解释每个 runtime 的 MCP ready/projectable/limited/blocked/unknown |
+| `packages/mindos/src/server/handlers/runtime-artifact-projections.ts` | Artifact runtime projection contract，统一解释每个 runtime 的 output/handoff/artifact-index readiness |
+| `packages/mindos/src/server/handlers/runtime-automation-projections.ts` | Automation runtime projection contract，统一解释 remote-control 与 24/7 unattended readiness |
+| `packages/mindos/src/server/handlers/runtime-readiness.ts` | Runtime Doctor 聚合契约，把 compatibility profile 与 permission/MCP/artifact/automation projection 合并成用例级 readiness / gaps / recommendations |
+| `packages/mindos/src/agent/prompt/agent-prompt.txt` | MindOS 默认 base prompt |
+| `packages/mindos/src/agent/prompt/assistant-prompt.ts` | Active Assistant overlay 解析与渲染 |
+| `packages/mindos/src/agent/prompt/context-prompt.ts` | context prompt 渲染 |
+| `packages/mindos/src/agent/turn/index.ts` | turn 输入、上传文件、外部 runtime prompt bridge |
+| `packages/mindos/src/agent/mindos-pi/**` | MindOS Pi extensions / permissions / runtime config |

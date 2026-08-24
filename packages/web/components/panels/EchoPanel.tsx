@@ -2,12 +2,11 @@
 
 import type { ReactNode } from 'react';
 import { usePathname } from 'next/navigation';
-import { Footprints, Brain, Eye } from 'lucide-react';
+import { Footprints, GitBranch, LayoutDashboard, Sprout } from 'lucide-react';
 import PanelHeader from './PanelHeader';
-import { PanelNavRow } from './PanelNavRow';
-import EchoSidebarStats from './EchoSidebarStats';
+import { PanelPrimaryNav, PanelNavRow } from './PanelNavRow';
 import { useLocale } from '@/lib/stores/locale-store';
-import { ECHO_SEGMENT_HREF, ECHO_SEGMENT_ORDER, type EchoSegment } from '@/lib/echo-segments';
+import { ECHO_PRIMARY_SEGMENT_ORDER, ECHO_SEGMENT_HREF, type EchoSegment } from '@/lib/echo-segments';
 
 interface EchoPanelProps {
   active: boolean;
@@ -15,35 +14,40 @@ interface EchoPanelProps {
   onMaximize?: () => void;
 }
 
-export default function EchoPanel({ active, maximized, onMaximize }: EchoPanelProps) {
+export default function EchoPanel({ active }: EchoPanelProps) {
   const { t } = useLocale();
   const e = t.panels.echo;
   const pathname = usePathname() ?? '';
 
-  const rowBySegment: Record<EchoSegment, { icon: ReactNode; title: string }> = {
+  const rowBySegment: Partial<Record<EchoSegment, { icon: ReactNode; title: string }>> = {
+    overview: { icon: <LayoutDashboard size={14} />, title: e.overviewTitle },
     imprint: { icon: <Footprints size={14} />, title: e.imprintTitle },
-    growth: { icon: <Brain size={14} />, title: e.growthTitle },
-    self: { icon: <Eye size={14} />, title: e.selfTitle },
+    growth: { icon: <Sprout size={14} />, title: e.growthTitle },
+    practice: { icon: <GitBranch size={14} />, title: e.practiceTitle },
   };
 
   return (
     <div className={`flex flex-col h-full ${active ? '' : 'hidden'}`}>
-      <PanelHeader title={e.title} maximized={maximized} onMaximize={onMaximize} />
-      <div className="flex-1 overflow-y-auto min-h-0 flex flex-col">
-        <div className="flex flex-col gap-0.5 py-1.5">
-          {ECHO_SEGMENT_ORDER.map((segment) => {
-            const row = rowBySegment[segment];
-            const href = ECHO_SEGMENT_HREF[segment];
-            const isActive = pathname === href || pathname.startsWith(`${href}/`);
-            return (
-              <PanelNavRow key={segment} href={href} icon={row.icon} title={row.title} active={isActive} />
-            );
-          })}
-        </div>
-        <div className="mt-auto">
-          <EchoSidebarStats />
-        </div>
-      </div>
+      <PanelHeader title={e.title} />
+      <PanelPrimaryNav aria-label={e.title}>
+        {ECHO_PRIMARY_SEGMENT_ORDER.map((segment) => {
+          const row = rowBySegment[segment];
+          if (!row) return null;
+          const href = ECHO_SEGMENT_HREF[segment];
+          const isActive = pathname === href || pathname.startsWith(`${href}/`);
+          return (
+            <PanelNavRow
+              key={segment}
+              href={href}
+              icon={row.icon}
+              title={row.title}
+              active={isActive}
+              activeVariant="rail"
+            />
+          );
+        })}
+      </PanelPrimaryNav>
+      <div className="sidebar-scroll-area min-h-0 flex-1 overflow-y-auto" aria-hidden="true" />
     </div>
   );
 }

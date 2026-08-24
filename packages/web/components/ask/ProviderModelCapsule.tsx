@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Cpu, ChevronDown, ChevronRight, Check, Loader2, Search, RefreshCw } from 'lucide-react';
 import { useLocale } from '@/lib/stores/locale-store';
@@ -10,10 +10,11 @@ import {
   isProviderId,
 } from '@/lib/agent/providers';
 import { type Provider, isProviderEntryId, findProvider } from '@/lib/custom-endpoints';
+import type { ProviderSelection } from '@/lib/session-model-selection';
 
 const STORAGE_KEY = 'mindos-provider-model';
 
-export type ProviderSelection = ProviderId | `p_${string}` | null;
+export type { ProviderSelection } from '@/lib/session-model-selection';
 
 interface ProviderModelCapsuleProps {
   providerValue: ProviderSelection;
@@ -22,6 +23,7 @@ interface ProviderModelCapsuleProps {
   onModelChange: (model: string | null) => void;
   disabled?: boolean;
   storageKey?: string;
+  persistSelection?: boolean;
   systemLabel?: string;
   emptyLabel?: string;
 }
@@ -72,7 +74,7 @@ function getConfiguredProviders(data: SettingsData): string[] {
 /* ── Component ── */
 
 export default function ProviderModelCapsule({
-  providerValue, onProviderChange, modelValue, onModelChange, disabled = false, storageKey = STORAGE_KEY, systemLabel, emptyLabel,
+  providerValue, onProviderChange, modelValue, onModelChange, disabled = false, storageKey = STORAGE_KEY, persistSelection = true, systemLabel, emptyLabel,
 }: ProviderModelCapsuleProps) {
   const { t, locale } = useLocale();
   const [open, setOpen] = useState(false);
@@ -148,9 +150,9 @@ export default function ProviderModelCapsule({
     if (providerValue && !configuredProviders.includes(providerValue)) {
       onProviderChange(null);
       onModelChange(null);
-      persistProviderModel(null, null, storageKey);
+      if (persistSelection) persistProviderModel(null, null, storageKey);
     }
-  }, [configuredProviders, onModelChange, onProviderChange, providerValue, settingsData, storageKey]);
+  }, [configuredProviders, onModelChange, onProviderChange, persistSelection, providerValue, settingsData, storageKey]);
 
   // Resolve active display
   const activeProvider = providerValue ?? defaultProvider;
@@ -164,46 +166,63 @@ export default function ProviderModelCapsule({
 
   /* ── Dropdown positioning ── */
   const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
-  const repositionTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const repositionFrameRef = useRef<number | undefined>(undefined);
 
-  const reposition = useCallback(() => {
-    if (!triggerRef.current) return;
+  const computeDropdownStyle = useCallback((): React.CSSProperties | null => {
+    if (!triggerRef.current) return null;
+    const dropdownWidth = 276;
+    const viewportPadding = 8;
     const rect = triggerRef.current.getBoundingClientRect();
     const goUp = rect.top > window.innerHeight - rect.bottom && rect.top > 280;
-    setDropdownStyle({
+    return {
       position: 'fixed',
-      left: Math.min(rect.left, window.innerWidth - 270),
+      left: Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - dropdownWidth - viewportPadding)),
+      width: dropdownWidth,
       ...(goUp ? { bottom: window.innerHeight - rect.top + 6 } : { top: rect.bottom + 6 }),
       zIndex: 60,
-    });
+    };
   }, []);
 
-  // Debounce repositioning to prevent jank from rapid mouse events
-  const debouncedReposition = useCallback(() => {
-    if (repositionTimerRef.current) clearTimeout(repositionTimerRef.current);
-    repositionTimerRef.current = setTimeout(() => {
+  const reposition = useCallback(() => {
+    const nextStyle = computeDropdownStyle();
+    if (!nextStyle) return;
+    setDropdownStyle(previous => {
+      const same =
+        previous.left === nextStyle.left &&
+        previous.top === nextStyle.top &&
+        previous.bottom === nextStyle.bottom &&
+        previous.width === nextStyle.width;
+      return same ? previous : nextStyle;
+    });
+  }, [computeDropdownStyle]);
+
+  const scheduleReposition = useCallback(() => {
+    if (repositionFrameRef.current !== undefined) cancelAnimationFrame(repositionFrameRef.current);
+    repositionFrameRef.current = requestAnimationFrame(() => {
+      repositionFrameRef.current = undefined;
       reposition();
-    }, 0); // Use requestAnimationFrame-like timing
+    });
   }, [reposition]);
 
   // Cleanup timers on unmount
   useEffect(() => () => {
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
     if (openTimerRef.current) clearTimeout(openTimerRef.current);
-    if (repositionTimerRef.current) clearTimeout(repositionTimerRef.current);
+    if (repositionFrameRef.current !== undefined) cancelAnimationFrame(repositionFrameRef.current);
   }, []);
 
-  useEffect(() => { if (open) reposition(); }, [open, reposition]);
+  useLayoutEffect(() => { if (open) reposition(); }, [open, reposition]);
   useEffect(() => {
     if (!open) return;
-    window.addEventListener('scroll', debouncedReposition, true);
-    window.addEventListener('resize', debouncedReposition);
+    window.addEventListener('resize', scheduleReposition);
     return () => { 
-      window.removeEventListener('scroll', debouncedReposition, true); 
-      window.removeEventListener('resize', debouncedReposition); 
-      if (repositionTimerRef.current) clearTimeout(repositionTimerRef.current);
+      window.removeEventListener('resize', scheduleReposition);
+      if (repositionFrameRef.current !== undefined) {
+        cancelAnimationFrame(repositionFrameRef.current);
+        repositionFrameRef.current = undefined;
+      }
     };
-  }, [open, debouncedReposition]);
+  }, [open, scheduleReposition]);
 
   // Close on outside click — check trigger, provider panel, and flyout
   useEffect(() => {
@@ -345,16 +364,16 @@ export default function ProviderModelCapsule({
   const handleSelectProvider = useCallback((provider: ProviderSelection) => {
     onProviderChange(provider);
     onModelChange(null);
-    persistProviderModel(provider, null, storageKey);
+    if (persistSelection) persistProviderModel(provider, null, storageKey);
     setOpen(false); setHoveredProvider(null); setModelSearch('');
-  }, [onModelChange, onProviderChange, storageKey]);
+  }, [onModelChange, onProviderChange, persistSelection, storageKey]);
 
   const handleSelectModel = useCallback((provider: ProviderSelection, model: string) => {
     onProviderChange(provider);
     onModelChange(model);
-    persistProviderModel(provider, model, storageKey);
+    if (persistSelection) persistProviderModel(provider, model, storageKey);
     setOpen(false); setHoveredProvider(null); setModelSearch('');
-  }, [onModelChange, onProviderChange, storageKey]);
+  }, [onModelChange, onProviderChange, persistSelection, storageKey]);
 
   /* ── Filtered models ── */
   const filteredModels = useMemo(() => {
@@ -512,10 +531,13 @@ export default function ProviderModelCapsule({
       <div
         ref={providerPanelRef}
         role="listbox"
-        aria-label={t.ask?.providerCapsule ?? 'Provider'}
-        className="w-[260px] rounded-lg border border-border bg-card shadow-lg py-1 animate-in fade-in-0 zoom-in-95 duration-100"
+        aria-label="Model"
+        className="w-full rounded-lg border border-border bg-card shadow-lg py-1 animate-in fade-in-0 zoom-in-95 duration-100"
         style={{ maxHeight: '70vh', overflowY: 'auto' }}
       >
+        <div className="border-b border-border/40 px-3 py-2">
+          <div className="text-xs font-semibold text-foreground">Model</div>
+        </div>
         <button
           type="button"
           role="option"
@@ -601,19 +623,27 @@ export default function ProviderModelCapsule({
         type="button"
         onClick={() => {
           if (disabled) return;
-          setOpen(v => !v);
-          if (open) { setHoveredProvider(null); setModelSearch(''); }
+          if (open) {
+            setOpen(false);
+            setHoveredProvider(null);
+            setModelSearch('');
+            return;
+          }
+          reposition();
+          setOpen(true);
         }}
         disabled={disabled}
+        data-hit-active={providerValue || hasModelOverride || open ? 'true' : undefined}
         className={`
-          relative z-10 inline-flex min-h-6 items-center gap-1 rounded-full px-2.5 py-0.5
-          text-2xs font-medium transition-colors select-none max-w-[260px]
+          hit-target-box relative z-10 inline-flex min-h-6 w-[148px] items-center gap-1 px-2.5 py-0.5
+          text-2xs font-medium transition-colors select-none sm:w-[164px]
           pointer-events-auto touch-manipulation
-          border focus:outline-none focus-visible:ring-2 focus-visible:ring-ring
+          border border-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
           disabled:pointer-events-none disabled:opacity-40 disabled:cursor-not-allowed
+          [--hit-target-border-width:1px] [--hit-target-radius:9999px]
           ${providerValue || hasModelOverride
-            ? 'bg-[var(--amber)]/10 border-[var(--amber)]/25 text-foreground hover:bg-[var(--amber)]/15'
-            : 'bg-muted/50 border-border/50 text-muted-foreground hover:bg-muted hover:text-foreground'
+            ? 'text-foreground [--hit-target-active-bg:color-mix(in_srgb,var(--amber)_10%,transparent)] [--hit-target-active-border:color-mix(in_srgb,var(--amber)_25%,transparent)] [--hit-target-hover-bg:color-mix(in_srgb,var(--amber)_15%,transparent)] [--hit-target-hover-border:color-mix(in_srgb,var(--amber)_35%,transparent)]'
+            : 'text-muted-foreground hover:text-foreground [--hit-target-bg:color-mix(in_srgb,var(--muted)_50%,transparent)] [--hit-target-border:color-mix(in_srgb,var(--border)_50%,transparent)] [--hit-target-hover-bg:var(--muted)] [--hit-target-hover-border:color-mix(in_srgb,var(--border)_65%,transparent)]'
           }
         `}
         title={capsuleTooltip}

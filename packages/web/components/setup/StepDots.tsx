@@ -2,45 +2,65 @@
 
 import { CheckCircle2 } from 'lucide-react';
 import { useLocale } from '@/lib/stores/locale-store';
+import { cn } from '@/lib/utils';
 
 export interface StepDotsProps {
   step: number;
   setStep: (s: number) => void;
   stepTitles: readonly string[];
   disabled?: boolean;
-  /** Number of "numbered" steps to show (Confirm step is not numbered) */
+  /** Number of steps to show in the header progress rail. */
   numberedSteps?: number;
 }
 
 export default function StepDots({ step, setStep, stepTitles, disabled, numberedSteps }: StepDotsProps) {
   const { t } = useLocale();
   const count = numberedSteps ?? stepTitles.length;
-  // Only render dots for numbered steps (exclude Confirm)
+  // Render the setup steps that should appear in the header progress rail.
   const dotsToShow = stepTitles.slice(0, count);
   const isConfirmStep = step >= count;
 
   return (
-    <div className="flex items-center gap-2 mb-8" role="navigation" aria-label="Setup steps">
+    <div className="flex items-center gap-1" role="navigation" aria-label="Setup steps">
       {dotsToShow.map((title: string, i: number) => (
-        <div key={i} className="flex items-center gap-2">
-          {i > 0 && <div className="w-8 h-px" style={{ background: i <= step || isConfirmStep ? 'var(--amber)' : 'var(--border)' }} />}
-          <button onClick={() => setStep(i)}
+        <div key={i} className="flex items-center gap-1.5">
+          {i > 0 && (
+            <div
+              className={cn(
+                'h-px w-9 rounded-full',
+                i <= step || isConfirmStep ? 'bg-success/35' : 'bg-border',
+              )}
+            />
+          )}
+          <button type="button" onClick={() => setStep(i)}
             aria-current={i === step ? 'step' : undefined}
             aria-label={title}
-            className="flex flex-col items-center gap-1 p-1 -m-1 disabled:cursor-not-allowed disabled:opacity-60"
+            className="group -m-1 flex flex-col items-center gap-1 p-1 transition-opacity disabled:cursor-not-allowed disabled:opacity-60"
             disabled={disabled || i > step}
             title={(disabled || i > step) ? t.hints.cannotJumpForward : undefined}>
+            {(() => {
+              const isDone = i < step || isConfirmStep;
+              const isActive = i === step && !isConfirmStep;
+              return (
             <div
-              className="w-6 h-6 rounded-full text-xs font-medium flex items-center justify-center transition-colors"
-              style={{
-                background: (i < step || isConfirmStep) ? 'var(--amber)' : i === step ? 'var(--amber)' : 'var(--muted)',
-                color: (i <= step || isConfirmStep) ? 'var(--amber-foreground)' : 'var(--muted-foreground)',
-                opacity: (i <= step || isConfirmStep) ? 1 : 0.5,
-              }}>
-              {(i < step || isConfirmStep) ? <CheckCircle2 size={14} /> : i + 1}
+              className={cn(
+                'flex h-7 w-7 items-center justify-center rounded-full border text-xs font-semibold',
+                isDone && 'border-success/40 bg-background text-success',
+                isActive && 'border-[var(--amber)] bg-[var(--amber)] text-[var(--amber-foreground)]',
+                !isDone && !isActive && 'border-border bg-muted text-muted-foreground opacity-50',
+              )}
+            >
+              {isDone ? <CheckCircle2 size={14} /> : i + 1}
             </div>
-            <span className="text-[10px] leading-tight hidden sm:inline max-w-[4rem] text-center truncate"
-              style={{ color: (i === step && !isConfirmStep) ? 'var(--foreground)' : 'var(--muted-foreground)', opacity: (i <= step || isConfirmStep) ? 1 : 0.5 }}>
+              );
+            })()}
+            <span
+              className={cn(
+                'hidden max-w-[4rem] truncate text-center text-[10px] leading-tight sm:inline',
+                i === step && !isConfirmStep ? 'text-foreground' : 'text-muted-foreground',
+                i <= step || isConfirmStep ? 'opacity-100' : 'opacity-50',
+              )}
+            >
               {title}
             </span>
           </button>

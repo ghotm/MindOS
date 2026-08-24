@@ -1,10 +1,15 @@
 import { describe, it, expect } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 import { MINDOS_AGENT } from '@/lib/ask-agent';
 import { aiChatEn, aiChatZh } from '@/lib/i18n/modules/ai-chat';
 import { navigationEn, navigationZh } from '@/lib/i18n/modules/navigation';
+import { knowledgeEn, knowledgeZh } from '@/lib/i18n/modules/knowledge';
 import { featuresEn, featuresZh } from '@/lib/i18n/modules/features';
 import { panelsEn, panelsZh } from '@/lib/i18n/modules/panels';
 import { onboardingEn, onboardingZh } from '@/lib/i18n/modules/onboarding';
+
+const repoRoot = path.resolve(__dirname, '../../../..');
 
 describe('MindOS copy alignment', () => {
   it('uses MindOS as the default local assistant name', () => {
@@ -32,5 +37,91 @@ describe('MindOS copy alignment', () => {
     expect(featuresZh.help.whatIs.body).not.toContain('同一个大脑');
     expect(panelsEn.panels.im.emptyDesc.toLowerCase()).not.toContain('mindos agent');
     expect(panelsZh.panels.im.emptyDesc).not.toContain('MindOS Agent');
+  });
+
+  it('frames the local knowledge surface as Mind in English and 心智 in Chinese', () => {
+    expect(navigationEn.sidebar.files).toBe('Mind');
+    expect(navigationZh.sidebar.files).toBe('心智');
+    expect(navigationEn.sidebar.builtInSpacesTitle).toBe('MindOS System');
+    expect(navigationZh.sidebar.builtInSpacesTitle).toBe('MindOS System');
+    expect(navigationEn.sidebar.builtInSpacesRoot).toContain('Dao');
+    expect(navigationEn.sidebar.builtInSpacesRoot).toContain('Shu');
+    expect(navigationZh.sidebar.builtInSpacesRoot).toContain('道');
+    expect(navigationZh.sidebar.builtInSpacesRoot).toContain('术');
+
+    expect(knowledgeEn.home.builtInSpacesTitle).toBe('Mind System');
+    expect(knowledgeZh.home.builtInSpacesTitle).toBe('心智系统');
+    expect(knowledgeEn.home.builtInSpacesDesc).toBe('Organize your knowledge with four built-in spaces.');
+    expect(knowledgeZh.home.builtInSpacesDesc).toBe('');
+    expect(knowledgeZh.home.builtInSpacesDesc).not.toBe('用四个内置空间整理你的知识。');
+    expect(knowledgeZh.home.builtInSpacesDesc).not.toContain('.mindos');
+    expect(Object.keys(knowledgeEn.home.mindPillars)).toEqual(['dao', 'fa', 'shu', 'qi']);
+    expect(Object.keys(knowledgeZh.home.mindPillars)).toEqual(['dao', 'fa', 'shu', 'qi']);
+  });
+
+  it('localizes Inbox as 收集箱 in Chinese UI while keeping English and path names stable', () => {
+    expect(navigationEn.sidebar.capture).toBe('Inbox');
+    expect(knowledgeEn.inbox.title).toBe('Inbox');
+    expect(knowledgeEn.inbox.composerTitle).toBe('Add to Inbox');
+    expect(knowledgeEn.inbox.viewQueue).toBe('Pending');
+    expect(knowledgeEn.inbox.viewShelved).toBe('Shelved');
+    expect(knowledgeEn.inbox.viewHistory).toBe('Done');
+
+    expect(navigationZh.sidebar.capture).toBe('收集箱');
+    expect(knowledgeZh.inbox.title).toBe('收集箱');
+    expect(knowledgeZh.inbox.capturePageTitle).toBe('收集箱');
+    expect(knowledgeZh.inbox.composerTitle).toBe('加入收集箱');
+    expect(knowledgeZh.inbox.captureButton).toBe('保存到收集箱');
+    expect(knowledgeZh.inbox.organizeToMindAction).toBe('整理到心智');
+    expect(knowledgeZh.inbox.organizationAgentTitle).toBe('收集箱整理助理');
+    expect(knowledgeZh.inbox.viewQueue).toBe('待处理');
+    expect(knowledgeZh.inbox.viewShelved).toBe('已搁置');
+    expect(knowledgeZh.inbox.viewHistory).toBe('已完成');
+    expect(knowledgeZh.importHistory.processedArchive).toContain('Inbox/.processed/');
+
+    const visibleZhCopy = [
+      navigationZh.sidebar.capture,
+      knowledgeZh.inbox.title,
+      knowledgeZh.inbox.capturePageTitle,
+      knowledgeZh.inbox.reviewPageSubtitle,
+      knowledgeZh.inbox.composerTitle,
+      knowledgeZh.inbox.captureButton,
+      knowledgeZh.inbox.organizeToMindAction,
+      knowledgeZh.inbox.organizationAgentTitle,
+      knowledgeZh.inbox.queuePreviewDesc,
+      knowledgeZh.inbox.contentPreviewFailed,
+      knowledgeZh.inbox.sourcePreviewIdleDesc,
+      knowledgeZh.inbox.sourcePreviewTextCapture,
+      knowledgeZh.inbox.emptyTitle,
+      aiChatZh.ask.suggestions[0]?.label,
+      aiChatZh.ask.suggestions[0]?.prompt,
+    ].join('\n');
+
+    expect(visibleZhCopy).toContain('收集箱');
+    expect(visibleZhCopy).not.toContain('Inbox Agent');
+    expect(visibleZhCopy).not.toContain('收集箱整理 Agent');
+    expect(visibleZhCopy).not.toContain('收件箱');
+    expect(visibleZhCopy).not.toContain('暂存台');
+    expect(visibleZhCopy).not.toContain('捕获');
+  });
+
+  it('packages every built-in MindOS skill reference used by SKILL.md', () => {
+    for (const skillName of ['mindos', 'mindos-zh']) {
+      const sourceSkillPath = path.join(repoRoot, 'skills', skillName, 'SKILL.md');
+      const packagedSkillPath = path.join(repoRoot, 'packages/web/data/skills', skillName, 'SKILL.md');
+      const sourceSkill = fs.readFileSync(sourceSkillPath, 'utf-8');
+      const packagedSkill = fs.readFileSync(packagedSkillPath, 'utf-8');
+      const refs = Array.from(sourceSkill.matchAll(/references\/[\w.-]+\.md/g), match => match[0]);
+
+      expect(packagedSkill).toBe(sourceSkill);
+      expect(sourceSkill).not.toContain('暂存台');
+      expect(refs.length).toBeGreaterThan(0);
+      for (const ref of new Set(refs)) {
+        const sourceRef = path.join(repoRoot, 'skills', skillName, ref);
+        const packagedRef = path.join(repoRoot, 'packages/web/data/skills', skillName, ref);
+        expect(fs.existsSync(packagedRef), `${skillName} missing packaged ${ref}`).toBe(true);
+        expect(fs.readFileSync(packagedRef, 'utf-8')).toBe(fs.readFileSync(sourceRef, 'utf-8'));
+      }
+    }
   });
 });

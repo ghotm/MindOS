@@ -1,18 +1,24 @@
 import path from 'path';
-import type {
-  MindosAskMode,
-  MindosExecutableTool,
-} from '@geminilight/mindos/session';
-import type { MindosPiCodingAgentRuntimeHostServices } from '@geminilight/mindos/session/pi-coding-agent';
+import os from 'os';
+import type { MindosPiCodingAgentRuntimeHostServices } from '@geminilight/mindos/agent/mindos-pi';
 import { getModelConfig, hasImages } from '@/lib/agent/model';
-import { getChatTools, getOrganizeTools, getRequestScopedTools } from '@/lib/agent/tools';
 import { estimateStringTokens, getOllamaContextWindow } from '@/lib/agent/context';
 import { isProviderId, toPiProvider, type ProviderId } from '@/lib/agent/providers';
-import { isCustomProviderId, findCustomProvider } from '@/lib/custom-endpoints';
-import { setKbMode } from '@/lib/agent/kb-extension';
+import { findProvider, isProviderEntryId } from '@/lib/custom-endpoints';
+import { registerWebKbExtensionHost } from '@/lib/agent/kb-extension-host';
 import { scanExtensionPaths } from '@/lib/pi-integration/extensions';
 import { generateSkillsXml } from '@/lib/agent/skills-xml';
 import { getSkillSearchPaths } from '@/lib/agent/skill-paths';
+import { ensureMindosAgentMcpRuntimeConfig } from '@/lib/pi-integration/mcp-config';
+import {
+  resolveBuiltinWebRuntimePackagePath,
+  resolveMindosWebRuntimeSourcePath,
+} from './builtin-extension-runtime';
+import {
+  createMindosAgentPermissionPolicy,
+  hasMindosExtensionScope,
+  type MindosAgentPermissionPolicy,
+} from '@geminilight/mindos/agent/mindos-pi/permission';
 
 type WebServerSettings = {
   disabledSkills?: string[];
@@ -25,33 +31,52 @@ type WebServerSettings = {
   };
 };
 
-export function getMindosWebRequestTools(mode: MindosAskMode): MindosExecutableTool[] {
-  const tools = mode === 'organize'
-    ? getOrganizeTools()
-    : mode === 'chat'
-      ? getChatTools()
-      : getRequestScopedTools();
-  return tools as unknown as MindosExecutableTool[];
-}
-
 export function getMindosWebPiRuntimePaths(input: {
   projectRoot: string;
   mindRoot: string;
   serverSettings: WebServerSettings;
-}): { additionalSkillPaths: string[]; additionalExtensionPaths: string[] } {
+  permissionPolicy?: MindosAgentPermissionPolicy;
+}): { agentDir: string; additionalSkillPaths: string[]; additionalExtensionPaths: string[] } {
+  const policy = input.permissionPolicy ?? createMindosAgentPermissionPolicy('ask');
   const webAppDir = path.join(input.projectRoot, 'packages', 'web');
+  const additionalExtensionPaths: string[] = [];
+
+  // The kb-extension entry reads the web toolkit back from a process-global
+  // slot at reload() time — register it before the loader can run.
+  registerWebKbExtensionHost();
+
+  if (hasMindosExtensionScope(policy, 'kb')) {
+    additionalExtensionPaths.push(resolveMindosWebRuntimeSourcePath(webAppDir, 'lib', 'agent', 'kb-extension.ts'));
+  }
+  if (hasMindosExtensionScope(policy, 'ask-user-question')) {
+    additionalExtensionPaths.push(resolveMindosWebRuntimeSourcePath(webAppDir, 'lib', 'agent', 'ask-user-question-bridge-extension.ts'));
+  }
+  if (hasMindosExtensionScope(policy, 'pi-web-access')) {
+    additionalExtensionPaths.push(resolveBuiltinWebRuntimePackagePath(webAppDir, 'pi-web-access', 'index.ts'));
+  }
+  if (hasMindosExtensionScope(policy, 'user-extensions')) {
+    additionalExtensionPaths.push(...scanExtensionPaths());
+  }
+  if (hasMindosExtensionScope(policy, 'pi-mcp-adapter')) {
+    const mcpRuntimeConfig = ensureMindosAgentMcpRuntimeConfig();
+    if (mcpRuntimeConfig.serverCount > 0) {
+      additionalExtensionPaths.push(resolveMindosWebRuntimeSourcePath(webAppDir, 'lib', 'agent', 'mindos-mcp-adapter-extension.ts'));
+    }
+  }
+  if (hasMindosExtensionScope(policy, 'im')) {
+    additionalExtensionPaths.push(resolveMindosWebRuntimeSourcePath(webAppDir, 'lib', 'im', 'index.ts'));
+  }
+  if (hasMindosExtensionScope(policy, 'subagents')) {
+    additionalExtensionPaths.push(resolveMindosWebRuntimeSourcePath(webAppDir, 'lib', 'agent', 'subagent-ledger-extension.ts'));
+  }
+  if (hasMindosExtensionScope(policy, 'schedule-prompt')) {
+    additionalExtensionPaths.push(resolveMindosWebRuntimeSourcePath(webAppDir, 'lib', 'schedule-prompt', 'index.ts'));
+  }
+
   return {
+    agentDir: path.join(os.homedir(), '.pi'),
     additionalSkillPaths: getSkillSearchPaths(input.projectRoot, input.mindRoot, input.serverSettings as any),
-    additionalExtensionPaths: [
-      ...scanExtensionPaths(),
-      path.join(webAppDir, 'lib', 'agent', 'kb-extension.ts'),
-      path.join(webAppDir, 'node_modules', 'pi-mcp-adapter', 'index.ts'),
-      path.join(webAppDir, 'lib', 'im', 'index.ts'),
-      path.join(webAppDir, 'node_modules', 'pi-subagents', 'index.ts'),
-      path.join(webAppDir, 'lib', 'agent', 'web-search-extension.ts'),
-      path.join(webAppDir, 'node_modules', 'pi-web-access', 'index.ts'),
-      path.join(webAppDir, 'lib', 'schedule-prompt', 'index.ts'),
-    ],
+    additionalExtensionPaths,
   };
 }
 
@@ -62,17 +87,19 @@ export function createWebMindosPiRuntimeHostServices(
     resolveModelConfig: (input) => {
       let providerOverride: ProviderId | undefined;
       let customProviderConfig: { apiKey: string; model: string; baseUrl: string } | undefined;
+      let customProviderEntry: ReturnType<typeof findProvider> | undefined;
 
       if (input.providerOverride) {
-        if (isCustomProviderId(input.providerOverride)) {
-          const customProvider = findCustomProvider((serverSettings.ai?.providers ?? []) as any, input.providerOverride);
+        if (isProviderEntryId(input.providerOverride)) {
+          const customProvider = findProvider((serverSettings.ai?.providers ?? []) as any, input.providerOverride);
           if (!customProvider) {
-            const error = new Error('Custom provider not found') as Error & { code?: string; status?: number };
+            const error = new Error('Provider not found') as Error & { code?: string; status?: number };
             error.code = 'INVALID_REQUEST';
             error.status = 400;
             throw error;
           }
           providerOverride = customProvider.protocol;
+          customProviderEntry = customProvider;
           customProviderConfig = {
             apiKey: customProvider.apiKey,
             model: customProvider.model,
@@ -90,26 +117,31 @@ export function createWebMindosPiRuntimeHostServices(
         model: modelOverride ?? customProviderConfig?.model,
         baseUrl: customProviderConfig?.baseUrl,
         hasImages: hasImages(input.messages as any),
+        providerEntry: customProviderEntry,
       });
     },
     toRuntimeProvider: (provider) => toPiProvider(provider as ProviderId),
-    setKbMode: (mode) => setKbMode(mode === 'organize' ? 'organize' : mode === 'chat' ? 'chat' : 'agent'),
     generateSkillsXml: (skills) => generateSkillsXml(skills as any),
     getOllamaContextWindow,
     estimateTokens: estimateStringTokens,
     onOllamaContext: ({ modelName, contextWindow, promptTokens, maxPromptTokens }) => {
       if (contextWindow) {
-        console.log(`[ask] Ollama model="${modelName}" context=${contextWindow} promptTokens=${promptTokens} maxPromptTokens=${maxPromptTokens}`);
+        console.log(`[agent] Ollama model="${modelName}" context=${contextWindow} promptTokens=${promptTokens} maxPromptTokens=${maxPromptTokens}`);
       }
       if (maxPromptTokens && promptTokens > maxPromptTokens) {
-        console.warn(`[ask] Ollama context overflow: prompt ${promptTokens} tokens > ${maxPromptTokens} max (${contextWindow} ctx). Compacting...`);
+        console.warn(`[agent] Ollama context overflow: prompt ${promptTokens} tokens > ${maxPromptTokens} max (${contextWindow} ctx). Compacting...`);
       }
     },
     onOllamaCompactStrip: (section, sectionTokens) => {
-      console.log(`[ask] Ollama compact: stripping section (${sectionTokens} tokens): ${section.slice(0, 80)}...`);
+      console.log(`[agent] Ollama compact: stripping section (${sectionTokens} tokens): ${section.slice(0, 80)}...`);
     },
     onOllamaCompacted: ({ beforeTokens, afterTokens }) => {
-      console.log(`[ask] Ollama compacted: ${beforeTokens} -> ${afterTokens} tokens`);
+      console.log(`[agent] Ollama compacted: ${beforeTokens} -> ${afterTokens} tokens`);
+    },
+    onExtensionLoadErrors: (errors) => {
+      for (const entry of errors) {
+        console.error(`[agent] extension failed to load: ${entry.path}: ${entry.error}`);
+      }
     },
   };
 }

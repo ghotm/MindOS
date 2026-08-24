@@ -9,12 +9,13 @@ export function ChannelTestSend({ platformId, im, recipientExample, onSent }: {
   onSent: () => void;
 }) {
   const [recipient, setRecipient] = useState('');
-  const [message, setMessage] = useState('Hello from MindOS');
+  const [message, setMessage] = useState(im.messagePlaceholder ?? 'Hello from MindOS');
   const [status, setStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const canSend = Boolean(recipient.trim() && message.trim());
 
   const handleSend = async () => {
-    if (!recipient.trim() || !message.trim()) return;
+    if (!canSend) return;
     setStatus('sending');
     setResult(null);
     try {
@@ -26,11 +27,14 @@ export function ChannelTestSend({ platformId, im, recipientExample, onSent }: {
       const data = await res.json();
       if (data.ok) {
         setStatus('success');
-        setResult({ ok: true, msg: data.messageId ? `Sent (ID: ${data.messageId})` : im.sentOk });
+        setResult({
+          ok: true,
+          msg: data.messageId && typeof im.sentWithId === 'function' ? im.sentWithId(data.messageId) : im.sentOk,
+        });
         onSent();
       } else {
         setStatus('error');
-        setResult({ ok: false, msg: data.error || 'Failed' });
+        setResult({ ok: false, msg: data.error || im.failed || 'Failed' });
       }
     } catch (err) {
       setStatus('error');
@@ -39,8 +43,8 @@ export function ChannelTestSend({ platformId, im, recipientExample, onSent }: {
   };
 
   return (
-    <details className="rounded-lg border border-border bg-card shadow-sm overflow-hidden group">
-      <summary className="flex items-center gap-2.5 px-5 py-3.5 cursor-pointer select-none text-sm font-medium text-muted-foreground hover:text-foreground transition-colors list-none [&::-webkit-details-marker]:hidden">
+    <details className="overflow-hidden rounded-lg border border-border bg-card shadow-sm group">
+      <summary className="flex cursor-pointer select-none items-center gap-2.5 px-5 py-3.5 text-sm font-medium text-muted-foreground transition-colors list-none hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
         <Send size={14} className="text-[var(--amber)]" />
         <span>{im.sendSample}</span>
         <span className="ml-auto text-xs text-muted-foreground/60 group-open:hidden">{im.expandToSee ?? 'Click to expand'}</span>
@@ -75,8 +79,8 @@ export function ChannelTestSend({ platformId, im, recipientExample, onSent }: {
           <button
             type="button"
             onClick={handleSend}
-            disabled={status === 'sending' || !recipient.trim()}
-            className="h-10 px-5 text-sm font-medium rounded-md inline-flex items-center gap-2 bg-[var(--amber)] text-[var(--amber-foreground)] shadow-sm hover:opacity-90 hover:shadow disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            disabled={status === 'sending' || !canSend}
+            className="inline-flex h-10 items-center gap-2 rounded-md bg-[var(--amber)] px-5 text-sm font-medium text-[var(--amber-foreground)] shadow-sm transition-all hover:opacity-90 hover:shadow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
           >
             {status === 'sending' ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
             {im.sendSample}

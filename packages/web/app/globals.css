@@ -55,11 +55,25 @@
 
 body {
   font-family: var(--font-ui), 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji';
+  overflow-x: hidden;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+.app-main-scrollport {
+  background-color: var(--background);
   scrollbar-gutter: stable;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+.stable-scroll-area,
+.sidebar-scroll-area {
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
 }
 
 
 :root {
+  color-scheme: light;
   --font-inter: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-ibm-plex-sans: "IBM Plex Sans", Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-ibm-plex-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
@@ -104,9 +118,13 @@ body {
   --sidebar-accent-foreground: #1c1a17;
   --sidebar-border: rgba(28, 26, 23, 0.08);
   --sidebar-ring: rgba(28, 26, 23, 0.3);
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: color-mix(in srgb, var(--foreground) 24%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--foreground) 34%, transparent);
 }
 
 .dark {
+  color-scheme: dark;
   --background: #131210;
   --foreground: #e8e4dc;
   --card: #1c1a17;
@@ -144,6 +162,8 @@ body {
   --sidebar-accent-foreground: #e8e4dc;
   --sidebar-border: rgba(232, 228, 220, 0.07);
   --sidebar-ring: rgba(232, 228, 220, 0.2);
+  --scrollbar-thumb: color-mix(in srgb, var(--foreground) 28%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--foreground) 42%, transparent);
 }
 
 @layer base {
@@ -161,23 +181,157 @@ body {
   letter-spacing: 0.03em;
 }
 
-/* Content width — controlled by Settings > Appearance */
-:root { --content-width: 80%; --toc-width: 0px; }
-.content-width { max-width: var(--content-width-override, var(--content-width)); margin-left: auto; margin-right: auto; padding-left: 0.75rem; padding-right: 0.75rem; }
+/* Side panel headers own their responsive action priority. */
+.panel-header {
+  container-type: inline-size;
+}
+@container (max-width: 272px) {
+  .files-panel-header-actions {
+    gap: 0;
+  }
+  .files-panel-header-actions > .w-px {
+    margin-inline: 0.125rem;
+  }
+}
 
-/* TOC offset — only on xl screens where TOC is visible.
-   --toc-width is set by TableOfContents.tsx (212px when expanded, 0px when collapsed).
-   Applied as padding-right on #main-content so content-width's margin:auto
-   centers within the remaining space (not overlapping the fixed TOC).
-   Note: SidebarLayout also sets padding-right via inline style with !important
-   for Ask panel; the TOC offset is added via --toc-extra-right there. */
+/* Content width — controlled by Settings > Appearance */
+:root {
+  --content-width: 80%;
+  --z-app-page: 10;
+  --z-app-sticky: 20;
+  --z-app-nav: 30;
+  --z-app-rail: 31;
+  --z-app-rail-affordance: 32;
+  --z-app-overlay: 40;
+  --z-app-modal: 50;
+  --z-app-popover: 60;
+  --z-app-popover-flyout: 61;
+  --z-app-walkthrough-backdrop: 100;
+  --z-app-walkthrough-surface: 101;
+  --z-app-walkthrough-tooltip: 102;
+  --z-app-critical-overlay: 99999;
+}
+.content-width { max-width: var(--main-body-content-max-width, var(--content-width-override, var(--content-width))); margin-left: auto; margin-right: auto; padding-left: 0.75rem; padding-right: 0.75rem; }
+.echo-page-hero {
+  container-type: inline-size;
+}
+.echo-page-hero__row {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1rem;
+}
+.echo-page-hero__copy {
+  min-width: 0;
+}
+.echo-page-hero__actions {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.echo-page-hero__actions > * {
+  max-width: 100%;
+}
+.echo-imprint-header-actions {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
+}
+.echo-imprint-header-actions__primary {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+@container (max-width: 519px) {
+  .echo-page-hero__actions > * {
+    flex: 1 1 100%;
+  }
+}
+@container (min-width: 760px) {
+  .echo-page-hero__row {
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+  .echo-page-hero__copy {
+    flex: 1 1 0;
+    padding-right: 1rem;
+  }
+  .echo-page-hero__actions {
+    width: auto;
+    max-width: min(42rem, 58%);
+    justify-content: flex-end;
+  }
+  .echo-imprint-header-actions {
+    width: auto;
+    justify-content: flex-end;
+  }
+  .echo-imprint-header-actions__primary {
+    flex: 0 1 auto;
+  }
+}
+.echo-memory-reader-container {
+  container-type: inline-size;
+}
+.echo-memory-reader-grid--empty {
+  max-width: 36rem;
+}
+@container (min-width: 860px) {
+  .echo-memory-reader-grid--with-detail {
+    height: calc(100vh - 13rem);
+    min-height: 34rem;
+    max-height: 46rem;
+    grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr);
+  }
+}
+@media (max-width: 639px) {
+  .content-width.workbench-content-page { max-width: 100%; }
+  .content-width.agents-content-page { max-width: 100%; }
+  .content-width.channel-detail-content { max-width: 100%; }
+}
+
+.z-app-rail { z-index: var(--z-app-rail); }
+.z-app-rail-affordance { z-index: var(--z-app-rail-affordance); }
+.z-app-sticky { z-index: var(--z-app-sticky); }
+.z-app-nav { z-index: var(--z-app-nav); }
+.z-app-overlay { z-index: var(--z-app-overlay); }
+.z-app-modal { z-index: var(--z-app-modal); }
+.z-app-popover { z-index: var(--z-app-popover); }
+.z-app-popover-flyout { z-index: var(--z-app-popover-flyout); }
+.z-app-walkthrough-backdrop { z-index: var(--z-app-walkthrough-backdrop); }
+.z-app-walkthrough-surface { z-index: var(--z-app-walkthrough-surface); }
+.z-app-walkthrough-tooltip { z-index: var(--z-app-walkthrough-tooltip); }
+.z-app-critical-overlay { z-index: var(--z-app-critical-overlay); }
+
+.markdown-view-frame {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 1.5rem;
+}
+.markdown-view-body {
+  min-width: 0;
+}
 @media (min-width: 1280px) {
-  :root { --toc-extra-right: var(--toc-width, 0px); }
+  .markdown-view-frame--with-toc {
+    grid-template-columns: minmax(0, 1fr) 212px;
+    gap: 1.75rem;
+  }
+  .markdown-view-frame--toc-collapsed {
+    grid-template-columns: minmax(0, 1fr) 0;
+    gap: 0;
+    position: relative;
+  }
 }
 
 ::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
 .prose {
   font-family: var(--prose-font-override, var(--font-ui));
@@ -250,6 +404,172 @@ body {
   margin: 0 0.05em 0 0.1em !important;
 }
 .prose hr { border: none; border-top: 1px solid var(--prose-border); margin: 1.8em 0; }
+
+.markdown-frontmatter {
+  margin: 0 0 1.45rem;
+  border: 1px solid var(--prose-border);
+  border-left: 3px solid var(--amber);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--amber) 7%, transparent),
+      color-mix(in srgb, var(--card) 82%, transparent)
+    );
+  color: var(--prose-body);
+  overflow: hidden;
+}
+
+.markdown-frontmatter__toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.9rem;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  font-family: var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.markdown-frontmatter[data-expanded="true"] .markdown-frontmatter__toggle {
+  border-bottom-color: color-mix(in srgb, var(--prose-border) 72%, transparent);
+}
+
+.markdown-frontmatter__toggle:hover {
+  background: color-mix(in srgb, var(--amber) 5%, transparent);
+}
+
+.markdown-frontmatter__toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring) inset;
+}
+
+.markdown-frontmatter__label {
+  color: var(--prose-heading);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.markdown-frontmatter__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--prose-subtle);
+}
+
+.markdown-frontmatter__count {
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.markdown-frontmatter__chevron {
+  color: var(--prose-subtle);
+  transition: transform 120ms ease;
+}
+
+.markdown-frontmatter[data-expanded="true"] .markdown-frontmatter__chevron {
+  transform: rotate(180deg);
+}
+
+.markdown-frontmatter__list {
+  display: grid;
+  margin: 0;
+  padding: 0.35rem 0.9rem 0.75rem;
+}
+
+.markdown-frontmatter__row {
+  display: grid;
+  grid-template-columns: minmax(7rem, 0.32fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.48rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--prose-border) 42%, transparent);
+}
+
+.markdown-frontmatter__row:last-child {
+  border-bottom: 0;
+}
+
+.markdown-frontmatter dt {
+  min-width: 0;
+  color: var(--prose-subtle);
+  font-family: var(--font-code);
+  font-size: 0.74rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.markdown-frontmatter dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--prose-heading);
+  font-family: var(--font-ui);
+  font-size: 0.84rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.markdown-frontmatter__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.markdown-frontmatter__chip {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--amber) 22%, var(--prose-border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--amber) 8%, var(--background));
+  color: var(--prose-heading);
+  padding: 0.08rem 0.42rem;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.markdown-frontmatter__empty {
+  color: var(--prose-subtle);
+  font-style: italic;
+}
+
+.markdown-frontmatter__object {
+  display: inline;
+  max-width: 100%;
+  background: color-mix(in srgb, var(--prose-code-border) 70%, transparent);
+  color: var(--prose-heading);
+  border-radius: var(--radius-sm);
+  padding: 0.1rem 0.35rem;
+  font-family: var(--font-code);
+  font-size: 0.76rem;
+  white-space: normal;
+}
+
+@media (max-width: 639px) {
+  .markdown-frontmatter {
+    margin-bottom: 1.1rem;
+  }
+
+  .markdown-frontmatter__toggle {
+    padding-inline: 0.75rem;
+  }
+
+  .markdown-frontmatter__list {
+    padding-inline: 0.75rem;
+  }
+
+  .markdown-frontmatter__row {
+    grid-template-columns: 1fr;
+    gap: 0.12rem;
+  }
+}
 
 /* Ask Panel — compact prose for side panel chat bubbles */
 .prose.prose-panel {
@@ -357,6 +677,45 @@ body {
 @layer utilities {
   .text-2xs { font-size: 10px; line-height: 1.4; }
   .animate-spin-slow { animation: spin 3s linear infinite; }
+  .hit-target-box {
+    isolation: isolate;
+    border-radius: 0 !important;
+    background: transparent !important;
+  }
+  .hit-target-box:not(.absolute):not(.fixed):not(.sticky) {
+    position: relative;
+  }
+  .hit-target-box::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    box-sizing: border-box;
+    border-radius: var(--hit-target-radius, var(--radius-md));
+    border-width: var(--hit-target-outline-width, 0px);
+    border-style: var(--hit-target-outline-style, solid);
+    border-color: var(--hit-target-outline, transparent);
+    background: var(--hit-target-bg, transparent);
+    box-shadow:
+      var(--hit-target-shadow, 0 0 transparent),
+      inset 0 0 0 var(--hit-target-border-width, 0px) var(--hit-target-border, transparent);
+    transition: background-color 75ms ease, box-shadow 75ms ease, border-color 75ms ease;
+  }
+  .hit-target-box:hover::before {
+    border-color: var(--hit-target-hover-outline, var(--hit-target-outline, transparent));
+    background: var(--hit-target-hover-bg, var(--muted));
+    box-shadow:
+      var(--hit-target-hover-shadow, var(--hit-target-shadow, 0 0 transparent)),
+      inset 0 0 0 var(--hit-target-border-width, 0px) var(--hit-target-hover-border, var(--hit-target-border, transparent));
+  }
+  .hit-target-box[data-hit-active="true"]::before {
+    border-color: var(--hit-target-active-outline, var(--hit-target-hover-outline, var(--hit-target-outline, transparent)));
+    background: var(--hit-target-active-bg, var(--hit-target-hover-bg, var(--muted)));
+    box-shadow:
+      var(--hit-target-active-shadow, var(--hit-target-hover-shadow, var(--hit-target-shadow, 0 0 transparent))),
+      inset 0 0 0 var(--hit-target-border-width, 0px) var(--hit-target-active-border, var(--hit-target-hover-border, var(--hit-target-border, transparent)));
+  }
   /* Checkerboard background for transparent image preview */
   .bg-checkerboard {
     background-color: #f0f0f0;
@@ -553,6 +912,11 @@ input[type="checkbox"].form-check:checked {
   border-color: var(--amber);
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3E%3C/svg%3E");
 }
+input[type="checkbox"].form-check:checked:hover,
+input[type="checkbox"].form-check:checked:active {
+  background-color: var(--amber);
+  border-color: var(--amber);
+}
 input[type="checkbox"].form-check:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--ring);
@@ -580,6 +944,47 @@ input[type="radio"].form-radio:focus-visible {
   box-shadow: 0 0 0 2px var(--ring);
 }
 
-/* macOS Electron: traffic-light safe zone. Actual CSS is injected by Electron
-   main process via webContents.insertCSS(); this is a no-op fallback. */
-.electron-mac-titlebar-pad { display: none; }
+/* ── Workspace titlebar row (spec-titlebar-row) ──
+   Variables default to 0 so every consumer (rail, panels, main padding) keeps
+   today's geometry on mobile and old shells.
+   Phase 1 (mac shell): html[data-mac-titlebar-row] is set pre-paint by the
+   layout.tsx inline script when the shell preload exposes
+   mindosShell.macTitlebarRow — the row doubles as the window drag strip.
+   Phase 2 (all desktop): the ≥768px media query gives browser/win/linux the
+   row as the workspace tab strip. The media rule is additive coverage — the
+   mac attribute rule still owns traffic-light clearance and keeps the row
+   alive when a mac shell window is zoomed below 768px. */
+:root {
+  --app-titlebar-h: 0px;
+  --workspace-header-h: max(var(--app-titlebar-h), 40px);
+  --window-controls-left: 0px;
+  /* Pushes the rail logo below the traffic lights — mac shell only. Browser /
+     win / linux desktops keep 0 so the logo sits in the first row. */
+  --rail-titlebar-offset: 0px;
+  --rail-width: 0px;
+  --titlebar-row-left: max(var(--rail-width, 0px), 48px);
+  --titlebar-row-padding-left: max(0px, calc(var(--window-controls-left, 0px) - var(--titlebar-row-left, 48px)));
+}
+@media (min-width: 768px) {
+  :root {
+    --app-titlebar-h: 42px;
+  }
+}
+html[data-mac-titlebar-row] {
+  --app-titlebar-h: 42px;
+  --window-controls-left: 70px; /* traffic lights span x12..64 + 6px margin */
+  --titlebar-row-left: max(var(--window-controls-left), var(--rail-width, 0px));
+  --rail-titlebar-offset: var(--app-titlebar-h);
+}
+/* Fullscreen hides the traffic lights: no clearance, rail logo back to top */
+html[data-mac-titlebar-row][data-mac-fullscreen] {
+  --window-controls-left: 0px;
+  --titlebar-row-left: max(var(--rail-width, 0px), 48px);
+  --rail-titlebar-offset: 0px;
+}
+/* Render gating — desktop viewports or the mac shell (any viewport) */
+.titlebar-row { display: none; }
+html[data-mac-titlebar-row] .titlebar-row { display: flex; }
+@media (min-width: 768px) {
+  .titlebar-row { display: flex; }
+}

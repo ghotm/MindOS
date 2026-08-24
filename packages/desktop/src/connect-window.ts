@@ -2,7 +2,7 @@
  * Connect Window — local BrowserWindow for remote mode server configuration.
  * Loads connect.html and bridges IPC to shared/connection SDK.
  */
-import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
+import { app, BrowserWindow, ipcMain, safeStorage, session } from 'electron';
 import { existsSync } from 'fs';
 import path from 'path';
 import { resolvePreferUnpacked } from './resolve-packaged-asset';
@@ -15,11 +15,23 @@ import { parseSshConfig, isSshAvailable, SshTunnel, PASSPHRASE_NEEDED, addKeyToA
 import { findAvailablePort } from './port-finder';
 import { analyzeMindOsLayout, resolveWebAppDir } from './mindos-runtime-layout';
 import { getDefaultBundledMindOsDirectory } from './mindos-runtime-path';
+import { getDesktopHome } from './desktop-home';
+import { authenticateRemoteWebSession } from './remote-auth';
 
 // Active SSH tunnel (shared across windows)
 let activeTunnel: SshTunnel | null = null;
 
 export function getActiveTunnel(): SshTunnel | null { return activeTunnel; }
+export function adoptActiveTunnel(tunnel: SshTunnel): void {
+  if (activeTunnel && activeTunnel !== tunnel) {
+    activeTunnel.onDeath = undefined;
+    activeTunnel.stop().catch((err) => {
+      console.warn('[MindOS:ssh] Previous tunnel stop failed:', err instanceof Error ? err.message : err);
+    });
+  }
+  activeTunnel = tunnel;
+}
+
 export function clearActiveTunnel(): void {
   if (activeTunnel) {
     activeTunnel.onDeath = undefined; // Prevent stale callback from firing
@@ -208,23 +220,12 @@ function registerSshHandlers(
       if (!isLocal && !isHttps) {
         return { ok: false, error: 'Security warning: password would be sent in plaintext over HTTP. Use SSH tunnel or HTTPS for remote servers.' };
       }
-      try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 8000);
-        const res = await fetch(`${url}/api/auth`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password }),
-          signal: ctrl.signal,
-        });
-        clearTimeout(timer);
-        if (!res.ok) return { ok: false, error: 'Incorrect password' };
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          return { ok: false, error: 'Auth request timed out' };
-        }
-        return { ok: false, error: `Auth failed: ${err instanceof Error ? err.message : String(err)}` };
-      }
+      const auth = await authenticateRemoteWebSession({
+        serverUrl: url,
+        password,
+        cookieStore: session.defaultSession.cookies,
+      });
+      if (!auth.ok) return { ok: false, error: auth.error };
     }
 
     saveConnection({
@@ -254,23 +255,12 @@ function registerSshHandlers(
     }
 
     // Authenticate with password through the tunnel
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 8000);
-      const res = await fetch(`${tunnelUrl}/api/auth`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-        signal: ctrl.signal,
-      });
-      clearTimeout(timer);
-      if (!res.ok) return { ok: false, error: 'Incorrect password' };
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        return { ok: false, error: 'Auth request timed out' };
-      }
-      return { ok: false, error: `Auth failed: ${err instanceof Error ? err.message : String(err)}` };
-    }
+    const auth = await authenticateRemoteWebSession({
+      serverUrl: tunnelUrl,
+      password,
+      cookieStore: session.defaultSession.cookies,
+    });
+    if (!auth.ok) return { ok: false, error: auth.error };
 
     // Save connection with SSH address format
     saveConnection({
@@ -309,7 +299,7 @@ function registerSshHandlers(
       const cachedPassphrase = loadSshPassphrase(host);
       if (cachedPassphrase && isSshAgentRunning()) {
         // Try to add the default key to ssh-agent with cached passphrase
-        const home = app.getPath('home');
+        const home = getDesktopHome();
         const defaultKeys = ['id_ed25519', 'id_rsa', 'id_ecdsa'].map(k => path.join(home, '.ssh', k));
         for (const keyPath of defaultKeys) {
           if (existsSync(keyPath)) {
@@ -394,7 +384,7 @@ function registerSshHandlers(
   safeHandle('connect:ssh-add-key', async (_: unknown, host: string, remotePort: number, passphrase: string, remember: boolean) => {
     try {
       // Find the SSH key for this host
-      const home = app.getPath('home');
+      const home = getDesktopHome();
       const defaultKeys = ['id_ed25519', 'id_rsa', 'id_ecdsa'].map(k => path.join(home, '.ssh', k));
       let keyAdded = false;
 

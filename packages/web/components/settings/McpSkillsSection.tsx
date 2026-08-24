@@ -10,11 +10,12 @@ import { apiFetch } from '@/lib/api';
 import { useMcpDataOptional } from '@/lib/stores/mcp-store';
 import { ConfirmDialog } from '@/components/agents/AgentsPrimitives';
 import { copyToClipboard } from '@/lib/clipboard';
-import type { SkillInfo, McpSkillsSectionProps } from './types';
+import type { SkillInfo, SkillMatrix, McpSkillsSectionProps, SettingsMcpMessages } from './types';
 import SkillRow from './McpSkillRow';
 import SkillCreateForm from './McpSkillCreateForm';
 import CustomSelect from '@/components/CustomSelect';
 import type { SelectItem } from '@/components/CustomSelect';
+import { saveSettingsPatch } from './settings-save';
 
 /* ── Skills Section ────────────────────────────────────────────── */
 
@@ -38,6 +39,8 @@ export default function SkillsSection({ t }: McpSkillsSectionProps) {
   const [loadErrors, setLoadErrors] = useState<Record<string, string>>({});
   const [switchingLang, setSwitchingLang] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [matrix, setMatrix] = useState<SkillMatrix | null>(null);
+  const [linkingCell, setLinkingCell] = useState<string | null>(null);
 
   const fetchSkills = useCallback(async () => {
     try {
@@ -52,7 +55,18 @@ export default function SkillsSection({ t }: McpSkillsSectionProps) {
     setLoading(false);
   }, []);
 
+  const refreshMatrix = useCallback(async () => {
+    try {
+      const data = await apiFetch<SkillMatrix>('/api/skills/matrix', { cache: 'no-store' });
+      setMatrix(data);
+    } catch (err) {
+      console.error('refreshMatrix error:', err instanceof Error ? err.message : err);
+    }
+  }, []);
+
+  // Skills list and skill×agent matrix load in parallel (independent fetches).
   useEffect(() => { fetchSkills(); }, [fetchSkills]);
+  useEffect(() => { refreshMatrix(); }, [refreshMatrix]);
 
   // Filtered + grouped
   const filtered = useMemo(() => {
@@ -68,8 +82,13 @@ export default function SkillsSection({ t }: McpSkillsSectionProps) {
 
   const handleToggle = async (name: string, enabled: boolean) => {
     if (mcp) {
-      await mcp.toggleSkill(name, enabled);
-      setSkills(prev => prev.map(s => s.name === name ? { ...s, enabled } : s));
+      const ok = await mcp.toggleSkill(name, enabled);
+      if (ok) {
+        setSkills(prev => prev.map(s => s.name === name ? { ...s, enabled } : s));
+        setLoadErrors(prev => { const next = { ...prev }; delete next[name]; return next; });
+      } else {
+        setLoadErrors(prev => ({ ...prev, [name]: 'Failed to toggle skill' }));
+      }
       return;
     }
     try {
@@ -84,6 +103,32 @@ export default function SkillsSection({ t }: McpSkillsSectionProps) {
       const msg = err instanceof Error ? err.message : 'Failed to toggle skill';
       console.error('handleToggle error:', msg);
       setLoadErrors(prev => ({ ...prev, [name]: msg }));
+    }
+  };
+
+  /** Apply a per-agent cell action (link/unlink/disable/enable) — the matrix is the single source of truth. */
+  const handleAgentLink = async (name: string, agentKey: string, action: 'link' | 'unlink' | 'disable-native' | 'enable-native') => {
+    setLinkingCell(`${name}:${agentKey}`);
+    try {
+      await apiFetch('/api/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, name, agentKey }),
+      });
+      setLoadErrors(prev => { const next = { ...prev }; delete next[name]; return next; });
+      await refreshMatrix();
+      const agent = matrix?.agents.find(a => a.key === agentKey);
+      if (agent?.mode === 'additional') {
+        toast.success(m?.skillLinkRestartHint
+          ? m.skillLinkRestartHint(agent.name)
+          : `Takes effect the next time ${agent.name} starts`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : (m?.skillLinkFailed ?? 'Failed to update skill link');
+      console.error('handleAgentLink error:', msg);
+      setLoadErrors(prev => ({ ...prev, [name]: msg }));
+    } finally {
+      setLinkingCell(null);
     }
   };
 
@@ -298,6 +343,9 @@ export default function SkillsSection({ t }: McpSkillsSectionProps) {
                 fullContent={fullContent}
                 loadingContent={loadingContent}
                 loadErrors={loadErrors}
+                matrix={matrix}
+                linkingCell={linkingCell}
+                onAgentLink={handleAgentLink}
                 m={m}
               />
             ))}
@@ -336,6 +384,9 @@ export default function SkillsSection({ t }: McpSkillsSectionProps) {
                   fullContent={fullContent}
                   loadingContent={loadingContent}
                   loadErrors={loadErrors}
+                  matrix={matrix}
+                  linkingCell={linkingCell}
+                  onAgentLink={handleAgentLink}
                   m={m}
                 />
               ))}
@@ -400,7 +451,7 @@ function SkillSearchPathsSection({
   m,
   onChanged,
 }: {
-  m: Record<string, any> | undefined;
+  m: SettingsMcpMessages | undefined;
   onChanged: () => void | Promise<void>;
 }) {
   const [enableAgentsDir, setEnableAgentsDir] = useState(true);
@@ -426,11 +477,7 @@ function SkillSearchPathsSection({
     setSavingPaths(true);
     setPathMessage(null);
     try {
-      await apiFetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ skillPaths: { enableAgentsDir: agentsDir, custom: paths } }),
-      });
+      await saveSettingsPatch({ skillPaths: { enableAgentsDir: agentsDir, custom: paths } });
       await onChanged();
       window.dispatchEvent(new Event('mindos:skills-changed'));
       setPathMessage({ type: 'success', text: m?.skillPathSaved ?? 'Skill paths saved' });
@@ -548,7 +595,7 @@ function SkillSearchPathsSection({
 function SkillCliHint({ agents, skillName, m }: {
   agents: { key: string; name: string; present?: boolean; installed?: boolean }[];
   skillName: string;
-  m: Record<string, any> | undefined;
+  m: SettingsMcpMessages | undefined;
 }) {
   const [selectedAgent, setSelectedAgent] = useState('claude-code');
   const cmd = `npx skills add GeminiLight/MindOS --skill ${skillName} -a ${selectedAgent} -g -y`;

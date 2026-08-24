@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   defaultEchoSegment,
+  ECHO_PRIMARY_SEGMENT_ORDER,
   ECHO_SEGMENT_HREF,
   ECHO_SEGMENT_IDS,
   ECHO_SEGMENT_ORDER,
@@ -8,9 +9,10 @@ import {
 } from '@/lib/echo-segments';
 
 describe('echo-segments', () => {
-  it('lists three segments in product order', () => {
-    expect(ECHO_SEGMENT_IDS).toEqual(['imprint', 'growth', 'self']);
-    expect(ECHO_SEGMENT_ORDER).toBe(ECHO_SEGMENT_IDS);
+  it('lists overview plus the four Echo modules', () => {
+    expect(ECHO_SEGMENT_IDS).toEqual(['overview', 'imprint', 'threads', 'growth', 'practice']);
+    expect(ECHO_SEGMENT_ORDER).toEqual(['overview', 'imprint', 'threads', 'growth', 'practice']);
+    expect(ECHO_PRIMARY_SEGMENT_ORDER).toEqual(['overview', 'imprint', 'growth', 'practice']);
   });
 
   it('accepts valid segment slugs', () => {
@@ -24,6 +26,7 @@ describe('echo-segments', () => {
     expect(isEchoSegment('continued')).toBe(false);
     expect(isEchoSegment('daily')).toBe(false);
     expect(isEchoSegment('past-you')).toBe(false);
+    expect(isEchoSegment('self')).toBe(false);
   });
 
   it('rejects empty and malformed slugs', () => {
@@ -32,12 +35,12 @@ describe('echo-segments', () => {
     expect(isEchoSegment('IMPRINT')).toBe(false);
   });
 
-  it('defaultEchoSegment returns imprint', () => {
-    expect(defaultEchoSegment()).toBe('imprint');
+  it('defaultEchoSegment returns overview', () => {
+    expect(defaultEchoSegment()).toBe('overview');
   });
 
-  it('index redirect path is /echo/imprint', () => {
-    expect(`/echo/${defaultEchoSegment()}`).toBe('/echo/imprint');
+  it('index redirect path is /echo/overview', () => {
+    expect(`/echo/${defaultEchoSegment()}`).toBe('/echo/overview');
   });
 
   it('ECHO_SEGMENT_HREF covers every segment with /echo/ prefix', () => {

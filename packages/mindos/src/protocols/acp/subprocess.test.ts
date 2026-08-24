@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawn } from 'child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { killAgent, resolveTerminalSpawn, spawnAcpAgent } from './subprocess';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createMindosClient, killAgent, resolveTerminalSpawn, spawnAcpAgent } from './subprocess';
 
 vi.mock('child_process', () => ({
   spawn: vi.fn(),
@@ -54,7 +57,7 @@ describe('spawnAcpAgent', () => {
 
     expect(mockSpawn).toHaveBeenCalledWith(
       '/Users/test/bin/gemini',
-      ['--experimental-acp'],
+      ['--acp'],
       expect.objectContaining({ shell: false }),
     );
   });
@@ -181,5 +184,206 @@ describe('resolveTerminalSpawn', () => {
       command: 'C:\\Users\\test\\AppData\\Roaming\\npm\\npm.cmd',
       shell: true,
     });
+  });
+});
+
+describe('createMindosClient permission policy', () => {
+  function makeAcpProcess() {
+    return {
+      id: 'acp-test-policy',
+      agentId: 'test-agent',
+      proc: makeChildProcess(),
+      alive: true,
+    };
+  }
+
+  beforeEach(() => {
+    mockSpawn.mockReset();
+    mockSpawn.mockReturnValue(makeChildProcess());
+  });
+
+  it('selects a reject option for readonly permission requests', async () => {
+    const client = createMindosClient(makeAcpProcess(), '/tmp/mind', {}, 'readonly');
+
+    await expect(client.requestPermission({
+      sessionId: 'ses-1',
+      toolCall: { toolCallId: 'tc-1', status: 'pending' },
+      options: [
+        { optionId: 'allow', kind: 'allow_once', name: 'Allow' },
+        { optionId: 'reject', kind: 'reject_once', name: 'Reject' },
+      ],
+    })).resolves.toEqual({
+      outcome: { outcome: 'selected', optionId: 'reject' },
+    });
+  });
+
+  it('delegates ask-mode permission requests to the MindOS resolver', async () => {
+    const onPermissionRequest = vi.fn();
+    const onPermissionResolved = vi.fn();
+    const resolvePermissionRequest = vi.fn().mockResolvedValue({
+      outcome: { outcome: 'selected', optionId: 'allow' },
+    });
+    const client = createMindosClient(
+      makeAcpProcess(),
+      '/tmp/mind',
+      { onPermissionRequest, onPermissionResolved, resolvePermissionRequest },
+      'ask',
+    );
+
+    await expect(client.requestPermission({
+      sessionId: 'ses-1',
+      toolCall: { toolCallId: 'tc-1', status: 'pending' },
+      options: [
+        { optionId: 'allow', kind: 'allow_once', name: 'Allow' },
+        { optionId: 'reject', kind: 'reject_once', name: 'Reject' },
+      ],
+    })).resolves.toEqual({
+      outcome: { outcome: 'selected', optionId: 'allow' },
+    });
+
+    expect(resolvePermissionRequest).toHaveBeenCalledWith(expect.objectContaining({
+      event: expect.objectContaining({ status: 'pending', toolCallId: 'tc-1' }),
+      mode: 'ask',
+    }));
+    expect(onPermissionRequest).toHaveBeenCalledWith(expect.objectContaining({ status: 'pending' }));
+    expect(onPermissionResolved).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'resolved',
+      selectedOptionId: 'allow',
+      outcome: 'allow_once',
+    }));
+  });
+
+  it('does not silently approve ask-mode permissions without a resolver', async () => {
+    const client = createMindosClient(makeAcpProcess(), '/tmp/mind', {}, 'ask');
+
+    await expect(client.requestPermission({
+      sessionId: 'ses-1',
+      toolCall: { toolCallId: 'tc-1', status: 'pending' },
+      options: [
+        { optionId: 'allow', kind: 'allow_once', name: 'Allow' },
+        { optionId: 'reject', kind: 'reject_once', name: 'Reject' },
+      ],
+    })).resolves.toEqual({
+      outcome: { outcome: 'selected', optionId: 'reject' },
+    });
+  });
+
+  it('uses allow-once for auto permission and allow-always for full permission', async () => {
+    const options = [
+      { optionId: 'allow-once', kind: 'allow_once' as const, name: 'Allow once' },
+      { optionId: 'allow-always', kind: 'allow_always' as const, name: 'Allow always' },
+      { optionId: 'reject', kind: 'reject_once' as const, name: 'Reject' },
+    ];
+
+    await expect(createMindosClient(makeAcpProcess(), '/tmp/mind', {}, 'auto').requestPermission({
+      sessionId: 'ses-1',
+      toolCall: { toolCallId: 'tc-auto', status: 'pending' },
+      options,
+    })).resolves.toEqual({
+      outcome: { outcome: 'selected', optionId: 'allow-once' },
+    });
+
+    await expect(createMindosClient(makeAcpProcess(), '/tmp/mind', {}, 'full').requestPermission({
+      sessionId: 'ses-1',
+      toolCall: { toolCallId: 'tc-full', status: 'pending' },
+      options,
+    })).resolves.toEqual({
+      outcome: { outcome: 'selected', optionId: 'allow-always' },
+    });
+  });
+
+  it('rejects readonly writes and terminal creation', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-acp-readonly-'));
+    const client = createMindosClient(makeAcpProcess(), root, {}, 'readonly');
+
+    await expect(client.writeTextFile({ path: join(root, 'note.md'), content: 'x' }))
+      .rejects.toThrow('readonly mode');
+    await expect(client.createTerminal({ command: 'node' }))
+      .rejects.toThrow('readonly mode');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('asks before host-side writes in ask mode', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-acp-ask-write-'));
+    const resolvePermissionRequest = vi.fn().mockResolvedValue({
+      outcome: { outcome: 'selected', optionId: 'allow_once' },
+    });
+    const client = createMindosClient(makeAcpProcess(), root, { resolvePermissionRequest }, 'ask');
+
+    await client.writeTextFile({ path: 'note.md', content: 'written' });
+
+    expect(resolvePermissionRequest).toHaveBeenCalledWith(expect.objectContaining({
+      event: expect.objectContaining({
+        toolName: 'Write file',
+        options: expect.arrayContaining([
+          expect.objectContaining({ id: 'allow_once', kind: 'allow_once' }),
+        ]),
+      }),
+      mode: 'ask',
+    }));
+    expect(readFileSync(join(root, 'note.md'), 'utf-8')).toBe('written');
+  });
+
+  it('passes runtime env to ACP terminal subprocesses without overriding request env', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-acp-terminal-env-'));
+    mockExecFileSync.mockImplementation((command, args) => {
+      if (command === 'which' && Array.isArray(args) && args[0] === 'node') {
+        return '/usr/bin/node\n' as any;
+      }
+      throw new Error(`unexpected command: ${String(command)}`);
+    });
+    mockSpawn.mockReturnValue({
+      ...makeChildProcess(),
+      stdout: { on: vi.fn() },
+      stderr: { on: vi.fn() },
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn(),
+    } as any);
+    const client = createMindosClient(
+      makeAcpProcess(),
+      root,
+      {},
+      'agent',
+      { GEMINI_API_KEY: 'runtime-key', SHARED_KEY: 'runtime-shared' },
+    );
+
+    await expect(client.createTerminal({
+      command: 'node',
+      args: ['-v'],
+      env: [{ name: 'SHARED_KEY', value: 'request-shared' }],
+    })).resolves.toEqual({ terminalId: expect.stringMatching(/^term-/) });
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      '/usr/bin/node',
+      ['-v'],
+      expect.objectContaining({
+        env: expect.objectContaining({
+          GEMINI_API_KEY: 'runtime-key',
+          SHARED_KEY: 'request-shared',
+        }),
+        shell: false,
+      }),
+    );
+  });
+
+  it('resolves relative file paths against the ACP working directory', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-acp-paths-'));
+    writeFileSync(join(root, 'note.md'), 'hello', 'utf-8');
+    const client = createMindosClient(makeAcpProcess(), root, {}, 'agent');
+
+    await expect(client.readTextFile({ path: 'note.md' })).resolves.toEqual({ content: 'hello' });
+    await client.writeTextFile({ path: 'nested/out.md', content: 'written' });
+    expect(readFileSync(join(root, 'nested/out.md'), 'utf-8')).toBe('written');
+  });
+
+  it('denies reads outside the ACP working directory', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-acp-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mindos-acp-outside-'));
+    writeFileSync(join(outside, 'secret.md'), 'secret', 'utf-8');
+    const client = createMindosClient(makeAcpProcess(), root, {}, 'agent');
+
+    await expect(client.readTextFile({ path: join(outside, 'secret.md') }))
+      .rejects.toThrow('outside the working directory');
   });
 });

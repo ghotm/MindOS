@@ -1,68 +1,116 @@
 'use client';
 
-import { useRef, useCallback, useState, useEffect, useTransition } from 'react';
+import {
+  useRef,
+  useCallback,
+  useState,
+  useEffect,
+  useTransition,
+  type CSSProperties,
+  type MouseEvent,
+  type MouseEventHandler,
+  type ReactNode,
+  type Ref,
+} from 'react';
+import { createPortal } from 'react-dom';
+import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { FolderTree, Search, Settings, RefreshCw, Bot, Compass, ChevronLeft, ChevronRight, Radio, Zap, Inbox } from 'lucide-react';
+import { Brain, Settings, RefreshCw, Bot, Compass, ChevronLeft, ChevronRight, Radio, Zap, Inbox, Puzzle, DraftingCompass } from 'lucide-react';
 import { useLocale } from '@/lib/stores/locale-store';
 import { DOT_COLORS, getStatusLevel } from './SyncStatusBar';
 import type { SyncStatus } from './settings/types';
+import { useSharedSyncing } from '@/lib/sync-status-store';
 import Logo from './Logo';
-import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
+import { FLOATING_SURFACE_CLASS, useDismissableFloatingLayer } from '@/components/shared/FloatingSurface';
+import {
+  ROUTE_PANEL_HREF,
+  getRailActivePanel,
+  getRailPanelClickDecision,
+  isContentRouteForPanel,
+  type PanelId,
+  type RoutePanelId,
+} from '@/lib/navigation-panel';
+import { ACTIVITY_BAR } from '@/lib/config/panel-sizes';
+import { shouldHandleSmoothNavigation, useSmoothRouterPush } from '@/hooks/useSmoothRouterPush';
+import { useRailPreferences } from '@/lib/rail-preferences';
 
-export type PanelId = 'files' | 'capture' | 'search' | 'echo' | 'agents' | 'discover' | 'workflows';
-
-export const RAIL_WIDTH_COLLAPSED = 48;
-export const RAIL_WIDTH_EXPANDED = 180;
+export const RAIL_WIDTH_COLLAPSED = ACTIVITY_BAR.WIDTH_COLLAPSED;
+export const RAIL_WIDTH_EXPANDED = ACTIVITY_BAR.WIDTH_EXPANDED;
 
 interface ActivityBarProps {
   activePanel: PanelId | null;
+  suppressRouteActive?: boolean;
   onPanelChange: (id: PanelId | null) => void;
-  onEchoClick?: () => void;
-  onAgentsClick?: () => void;
-  onDiscoverClick?: () => void;
-  onWorkflowsClick?: () => void;
-  onSpacesClick?: () => void;
+  onCaptureClick?: MouseEventHandler<HTMLAnchorElement | HTMLButtonElement>;
+  onEchoClick?: MouseEventHandler<HTMLAnchorElement | HTMLButtonElement>;
+  onAgentsClick?: MouseEventHandler<HTMLAnchorElement | HTMLButtonElement>;
+  onDiscoverClick?: MouseEventHandler<HTMLAnchorElement | HTMLButtonElement>;
+  onStudioClick?: MouseEventHandler<HTMLAnchorElement | HTMLButtonElement>;
+  onWorkflowsClick?: MouseEventHandler<HTMLAnchorElement | HTMLButtonElement>;
+  onSpacesClick?: MouseEventHandler<HTMLAnchorElement | HTMLButtonElement>;
+  onHomeClick?: MouseEventHandler<HTMLAnchorElement>;
   syncStatus: SyncStatus | null;
+  syncStale?: boolean;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
   onSettingsClick: () => void;
+  onPluginEntriesClick?: () => void;
+  pluginEntriesAvailable?: boolean;
   onSyncClick: (rect: DOMRect) => void;
+  syncPopoverOpen?: boolean;
+  syncPopoverId?: string;
 }
 
 interface RailButtonProps {
-  icon: React.ReactNode;
+  icon: ReactNode;
   label: string;
   shortcut?: string;
   active?: boolean;
+  current?: boolean;
   expanded: boolean;
-  onClick: () => void;
-  buttonRef?: React.Ref<HTMLButtonElement>;
+  href?: string;
+  onClick: MouseEventHandler<HTMLAnchorElement | HTMLButtonElement>;
+  onNavigate?: (event: { preventDefault: () => void }) => void;
+  buttonRef?: Ref<HTMLButtonElement>;
+  pressed?: boolean;
+  ariaControls?: string;
+  ariaExpanded?: boolean;
+  ariaHaspopup?: 'dialog' | 'menu';
   /** Optional overlay badge (e.g. status dot) rendered inside the button */
-  badge?: React.ReactNode;
+  badge?: ReactNode;
   /** Optional data-walkthrough attribute for interactive walkthrough targeting */
   walkthroughId?: string;
 }
 
-function RailButton({ icon, label, shortcut, active = false, expanded, onClick, buttonRef, badge, walkthroughId }: RailButtonProps) {
+function RailButton({
+  icon,
+  label,
+  shortcut,
+  active = false,
+  current = false,
+  expanded,
+  href,
+  onClick,
+  onNavigate,
+  buttonRef,
+  pressed,
+  ariaControls,
+  ariaExpanded,
+  ariaHaspopup,
+  badge,
+  walkthroughId,
+}: RailButtonProps) {
   const tooltipText = shortcut ? `${label} (${shortcut})` : label;
-
-  const button = (
-    <button
-      ref={buttonRef}
-      onClick={onClick}
-      aria-pressed={active}
-      aria-label={label}
-      title={undefined}
-      data-walkthrough={walkthroughId}
-      className={`
-        relative flex items-center ${expanded ? 'justify-start px-3 w-full' : 'justify-center w-10'} h-10 rounded-md transition-colors
-        ${active
-          ? 'text-[var(--amber)] bg-[var(--amber-dim)]'
-          : 'text-muted-foreground hover:text-foreground hover:bg-muted'
-        }
-        focus-visible:ring-2 focus-visible:ring-ring
-      `}
-    >
+  const buttonClassName = `
+    hit-target-box relative flex items-center ${expanded ? 'justify-start px-3 w-full' : 'justify-center w-10'} h-10 transition-colors [--hit-target-hover-bg:var(--muted)] [--hit-target-active-bg:var(--amber-dim)] [--hit-target-radius:var(--radius-md)]
+    ${active
+      ? 'text-[var(--amber)]'
+      : 'text-muted-foreground hover:text-foreground'
+    }
+    focus-visible:ring-2 focus-visible:ring-ring
+  `;
+  const buttonContent = (
+    <>
       {active && (
         <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-[18px] rounded-r-full bg-[var(--amber)]" />
       )}
@@ -76,44 +124,119 @@ function RailButton({ icon, label, shortcut, active = false, expanded, onClick, 
           )}
         </>
       )}
-    </button>
+    </>
   );
 
-  if (expanded) return button;
+  const handleLinkClick: MouseEventHandler<HTMLAnchorElement> = (event) => {
+    onClick(event);
+  };
+
+  const commonProps = {
+    'aria-label': label,
+    title: expanded ? undefined : tooltipText,
+    'data-walkthrough': walkthroughId,
+    'data-hit-active': active ? 'true' : undefined,
+    className: buttonClassName,
+  };
+
+  if (href) {
+    return (
+      <Link
+        href={href}
+        onClick={handleLinkClick}
+        onNavigate={onNavigate}
+        aria-current={current ? 'page' : undefined}
+        {...commonProps}
+      >
+        {buttonContent}
+      </Link>
+    );
+  }
 
   return (
-    <Tooltip>
-      <TooltipTrigger render={button} />
-      <TooltipContent side="right" sideOffset={8}>
-        {tooltipText}
-      </TooltipContent>
-    </Tooltip>
+    <button
+      type="button"
+      ref={buttonRef}
+      onClick={onClick}
+      aria-pressed={pressed}
+      aria-controls={ariaControls}
+      aria-expanded={ariaExpanded}
+      aria-haspopup={ariaHaspopup}
+      {...commonProps}
+    >
+      {buttonContent}
+    </button>
+  );
+}
+
+function UserAvatar({ badgeLevel }: { badgeLevel?: keyof typeof DOT_COLORS | null }) {
+  return (
+    <span
+      className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[var(--amber)]/30 bg-[var(--amber)]/10 text-xs font-semibold text-[var(--amber)]"
+      aria-hidden="true"
+      data-rail-user-avatar
+    >
+      U
+      {badgeLevel ? (
+        <span
+          className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-background ${DOT_COLORS[badgeLevel]} ${badgeLevel === 'error' || badgeLevel === 'conflicts' ? 'animate-pulse' : ''}`}
+        />
+      ) : null}
+    </span>
   );
 }
 
 export default function ActivityBar({
   activePanel,
+  suppressRouteActive = false,
   onPanelChange,
+  onCaptureClick,
   onEchoClick,
   onAgentsClick,
   onDiscoverClick,
+  onStudioClick,
   onWorkflowsClick,
   onSpacesClick,
+  onHomeClick,
   syncStatus,
+  syncStale,
   expanded,
   onExpandedChange,
   onSettingsClick,
+  onPluginEntriesClick,
+  pluginEntriesAvailable = false,
   onSyncClick,
+  syncPopoverOpen = false,
+  syncPopoverId = 'sync-popover',
 }: ActivityBarProps) {
-  const lastClickRef = useRef(0);
+  const lastClickRef = useRef<{ key: string; at: number }>({ key: '', at: 0 });
   const syncBtnRef = useRef<HTMLButtonElement>(null);
+  const userBtnRef = useRef<HTMLButtonElement>(null);
+  const userMenuRef = useRef<HTMLDivElement>(null);
   const { t } = useLocale();
   const pathname = usePathname();
   const [, startTransition] = useTransition();
   const router = useRouter();
+  const smoothPush = useSmoothRouterPush();
   const isHome = pathname === '/';
-  const isCapture = pathname === '/capture' || pathname?.startsWith('/capture/');
-  const isFilesRoute = pathname === '/wiki' || pathname?.startsWith('/wiki/') || pathname?.startsWith('/view/');
+  const railPreferences = useRailPreferences();
+  const syncing = useSharedSyncing();
+  const userLabel = t.sidebar?.userLabel ?? 'User';
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [userAnchorRect, setUserAnchorRect] = useState<DOMRect | null>(null);
+  const activeDestination = suppressRouteActive ? activePanel : getRailActivePanel(pathname, activePanel);
+  const isCurrentRouteForPanel = useCallback((panel: RoutePanelId) => (
+    !suppressRouteActive && isContentRouteForPanel(pathname, panel)
+  ), [pathname, suppressRouteActive]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'production') return;
+    const timer = window.setTimeout(() => {
+      router.prefetch('/capture');
+      router.prefetch('/wiki');
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [router]);
 
   // Update badge: Desktop → electron-updater IPC; Browser → npm registry check
   const [hasUpdate, setHasUpdate] = useState(false);
@@ -166,72 +289,180 @@ export default function ActivityBar({
     };
   }, []);
 
-  // Labs feature flags (Echo, Workflows) — always start false to match SSR, hydrate from localStorage in effect
-  const [labsEcho, setLabsEcho] = useState(false);
-  const [labsWorkflows, setLabsWorkflows] = useState(false);
-  useEffect(() => {
-    setLabsEcho(localStorage.getItem('mindos:labs-echo') === '1');
-    setLabsWorkflows(localStorage.getItem('mindos:labs-workflows') === '1');
-    const sync = () => {
-      setLabsEcho(localStorage.getItem('mindos:labs-echo') === '1');
-      setLabsWorkflows(localStorage.getItem('mindos:labs-workflows') === '1');
-    };
-    window.addEventListener('mindos:labs-changed', sync);
-    return () => window.removeEventListener('mindos:labs-changed', sync);
+  // Echo is a first-class content surface. Studio is visible by default; Flow
+  // remains an experimental rail item controlled from Settings / Experiments.
+
+  /** Debounce repeated clicks on the same rail target without swallowing destination changes. */
+  const debounced = useCallback((key: string, fn: () => void): boolean => {
+    const now = Date.now();
+    if (lastClickRef.current.key === key && now - lastClickRef.current.at < 300) return false;
+    lastClickRef.current = { key, at: now };
+    fn();
+    return true;
   }, []);
 
-  /** Debounce rapid clicks (300ms) — shared across all Rail buttons */
-  const debounced = useCallback((fn: () => void) => {
-    const now = Date.now();
-    if (now - lastClickRef.current < 300) return;
-    lastClickRef.current = now;
-    fn();
-  }, []);
+  const debouncedRailClick = useCallback((
+    event: MouseEvent<HTMLAnchorElement | HTMLButtonElement>,
+    key: string,
+    fn: () => void,
+  ) => {
+    if (!debounced(key, fn)) event.preventDefault();
+  }, [debounced]);
 
   const toggle = useCallback((id: PanelId) => {
-    debounced(() => onPanelChange(activePanel === id ? null : id));
+    debounced(`panel:${id}`, () => onPanelChange(activePanel === id ? null : id));
   }, [activePanel, onPanelChange, debounced]);
 
-  const syncLevel = getStatusLevel(syncStatus, false);
+  const closeUserMenu = useCallback(() => setUserMenuOpen(false), []);
+
+  useDismissableFloatingLayer({
+    enabled: userMenuOpen,
+    refs: [userMenuRef, userBtnRef],
+    onClose: closeUserMenu,
+    delayMouseDown: true,
+  });
+
+  const handleRouteRailClick = useCallback((
+    event: MouseEvent<HTMLAnchorElement | HTMLButtonElement>,
+    targetPanel: RoutePanelId,
+    onRouteClick?: MouseEventHandler<HTMLAnchorElement | HTMLButtonElement>,
+  ) => {
+    debouncedRailClick(event, `panel:${targetPanel}`, () => {
+      if (onRouteClick) {
+        onRouteClick(event);
+        return;
+      }
+      const decision = getRailPanelClickDecision(pathname, activePanel, targetPanel);
+      if (decision.preventDefault) event.preventDefault();
+      onPanelChange(decision.nextPanel);
+    });
+  }, [activePanel, debouncedRailClick, onPanelChange, pathname]);
+
+  useEffect(() => {
+    if (syncPopoverOpen) setUserMenuOpen(false);
+  }, [syncPopoverOpen]);
+
+  const syncLevel = syncStale && syncStatus ? 'error' : getStatusLevel(syncStatus, syncing);
   const showSyncDot = syncLevel !== 'off' && syncLevel !== 'synced';
 
   const railWidth = expanded ? RAIL_WIDTH_EXPANDED : RAIL_WIDTH_COLLAPSED;
 
-  // Sync dot badge — positioned differently in collapsed vs expanded
+  // Sync dot badge — attached to the icon instead of rendering status text.
   const syncBadge = showSyncDot ? (
-    <span className={`absolute ${expanded ? 'left-[26px] top-1.5' : 'top-1.5 right-1.5'} w-2 h-2 rounded-full ${DOT_COLORS[syncLevel]} ${syncLevel === 'error' || syncLevel === 'conflicts' ? 'animate-pulse' : ''}`} />
+    <span className={`absolute right-1.5 top-1.5 h-2 w-2 rounded-full ${DOT_COLORS[syncLevel]} ${syncLevel === 'error' || syncLevel === 'conflicts' ? 'animate-pulse' : ''}`} />
   ) : undefined;
 
-  return (
-    <TooltipProvider delay={2000}>
-    <aside
-      className="group hidden md:flex fixed top-0 left-0 h-screen z-[31] flex-col bg-background border-r border-border transition-[width] duration-200 ease-out"
-      style={{ width: `${railWidth}px` }}
-      role="toolbar"
-      aria-label="Navigation"
-      aria-orientation="vertical"
-    >
-      {/* Content wrapper — overflow-hidden prevents text flash during width transitions */}
-      <div className="flex flex-col h-full w-full overflow-hidden">
-        {/* ── Top: Logo — h-[45px] aligns divider with PanelHeader h-[46px] border-b (both at y=45) ── */}
+  const collapsedUserBadgeLevel = !expanded
+    ? hasUpdate ? 'error' : showSyncDot ? syncLevel : null
+    : null;
+  const userMenuPosition = userAnchorRect
+    ? (() => {
+      const viewportWidth = typeof window === 'undefined' ? railWidth + 260 : window.innerWidth;
+      const viewportHeight = typeof window === 'undefined' ? 720 : window.innerHeight;
+      const width = 220;
+      const height = 144;
+      return {
+        left: Math.min(Math.max(8, railWidth + 8), viewportWidth - width - 8),
+        top: Math.max(8, Math.min(userAnchorRect.bottom - height, viewportHeight - height - 8)),
+      };
+    })()
+    : null;
+
+  const toggleUserMenu = useCallback(() => {
+    const rect = userBtnRef.current?.getBoundingClientRect();
+    if (rect) setUserAnchorRect(rect);
+    setUserMenuOpen((open) => !open);
+  }, []);
+
+  const openSyncFromUser = useCallback(() => {
+    const rect = (syncBtnRef.current ?? userBtnRef.current)?.getBoundingClientRect();
+    setUserMenuOpen(false);
+    if (rect) onSyncClick(rect);
+  }, [onSyncClick]);
+
+  const openSettingsFromUser = useCallback(() => {
+    setUserMenuOpen(false);
+    debounced('action:settings', onSettingsClick);
+  }, [debounced, onSettingsClick]);
+
+  const userMenu = userMenuOpen && userMenuPosition && typeof document !== 'undefined'
+    ? createPortal(
+      <div
+        ref={userMenuRef}
+        role="menu"
+        aria-label={userLabel}
+        data-rail-user-menu
+        className={`${FLOATING_SURFACE_CLASS} w-[220px] p-1.5 shadow-xl shadow-foreground/10 animate-in fade-in slide-in-from-left-2 duration-150`}
+        style={userMenuPosition}
+      >
+        <div className="flex items-center gap-2 border-b border-border px-2 py-2">
+          <UserAvatar badgeLevel={collapsedUserBadgeLevel} />
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-foreground">{userLabel}</div>
+          </div>
+        </div>
         <button
           type="button"
-          onClick={() => {
+          role="menuitem"
+          onClick={openSyncFromUser}
+          className="hit-target-box relative mt-1 flex min-h-9 w-full items-center gap-2 px-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-md)]"
+        >
+          <RefreshCw size={14} className={syncing ? 'animate-spin text-[var(--amber)]' : ''} />
+          <span className="truncate">{t.sidebar.syncLabel}</span>
+          {syncBadge}
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          onClick={openSettingsFromUser}
+          className="hit-target-box relative flex min-h-9 w-full items-center gap-2 px-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-md)]"
+        >
+          <Settings size={14} />
+          <span className="truncate">{t.sidebar.settingsTitle}</span>
+          {hasUpdate ? <span className="ml-auto h-2 w-2 rounded-full bg-error" aria-hidden="true" /> : null}
+        </button>
+      </div>,
+      document.body,
+    )
+    : null;
+
+  return (
+    <aside
+      className="group hidden md:flex fixed top-0 left-0 h-screen z-app-rail flex-col bg-background transition-[width] duration-200 ease-out after:absolute after:top-[var(--rail-titlebar-offset)] after:right-0 after:bottom-0 after:w-px after:bg-border after:pointer-events-none after:content-['']"
+      style={{ width: `${railWidth}px` }}
+      role="navigation"
+      aria-label="Navigation"
+    >
+      {/* Content wrapper — overflow-hidden prevents text flash during width transitions */}
+      <div className="relative z-10 flex flex-col h-full w-full overflow-hidden">
+        {/* macOS titlebar row: draggable spacer pushes the logo below the traffic-light row (0px elsewhere) */}
+        <div
+          className="w-full shrink-0 h-[var(--rail-titlebar-offset)]"
+          style={{ WebkitAppRegion: 'drag' } as CSSProperties}
+        />
+        {/* ── Top: Logo — mirrors the titlebar height so rail and panel start on the same line. ── */}
+        <Link
+          href="/"
+          style={{ WebkitAppRegion: 'no-drag' } as CSSProperties}
+          onClick={(event) => {
+            if (!shouldHandleSmoothNavigation(event)) return;
+            if (onHomeClick) {
+              event.preventDefault();
+              onHomeClick(event);
+              return;
+            }
+            event.preventDefault();
             startTransition(() => {
-              if (isHome) {
-                onPanelChange(activePanel === 'files' ? null : 'files');
-              } else {
-                onPanelChange('files');
-                router.push('/');
-              }
+              onPanelChange(null);
             });
+            if (!isHome) smoothPush('/');
           }}
-          className={`flex items-center ${expanded ? 'px-3 gap-2' : 'justify-center'} w-full h-[46px] shrink-0 transition-opacity cursor-pointer ${isHome ? 'opacity-100' : 'opacity-50 hover:opacity-80'}`}
+          className={`relative z-10 flex items-center ${expanded ? 'px-3 gap-2' : 'justify-center'} w-full h-[var(--app-titlebar-h)] shrink-0 transition-opacity cursor-pointer ${isHome ? 'opacity-100' : 'opacity-50 hover:opacity-80'}`}
           aria-label="MindOS Home"
         >
           <Logo id="rail" className="w-7 h-3.5 shrink-0" />
           {expanded && <span className="text-sm text-foreground font-brand whitespace-nowrap">MindOS</span>}
-        </button>
+        </Link>
 
         <div className={`${expanded ? 'mx-3' : 'mx-2'} border-t border-border`} />
 
@@ -240,79 +471,180 @@ export default function ActivityBar({
           <RailButton
             icon={<Inbox size={18} />}
             label={t.sidebar.capture}
-            active={isCapture}
+            active={activeDestination === 'capture'}
+            current={isCurrentRouteForPanel('capture')}
             expanded={expanded}
-            onClick={() => debounced(() => {
-              onPanelChange('capture');
-              router.push('/capture');
-            })}
+            href={ROUTE_PANEL_HREF.capture}
+            onClick={(event) => handleRouteRailClick(event, 'capture', onCaptureClick)}
             walkthroughId="capture-page"
           />
-          <RailButton icon={<FolderTree size={18} />} label={t.sidebar.files} active={isFilesRoute && activePanel === 'files'} expanded={expanded} onClick={() => onSpacesClick ? debounced(onSpacesClick) : toggle('files')} walkthroughId="files-panel" />
-          {labsEcho && <RailButton icon={<Radio size={18} />} label={t.sidebar.echo} active={activePanel === 'echo'} expanded={expanded} onClick={() => onEchoClick ? debounced(onEchoClick) : toggle('echo')} walkthroughId="echo-panel" />}
-          <RailButton icon={<Search size={18} />} label={t.sidebar.searchTitle} shortcut="⌘K" active={activePanel === 'search'} expanded={expanded} onClick={() => toggle('search')} />
           <RailButton
-            icon={<Bot size={18} />}
-            label={t.sidebar.agents}
-            active={activePanel === 'agents'}
+            icon={<Brain size={18} />}
+            label={t.sidebar.files}
+            active={activeDestination === 'files'}
+            current={isCurrentRouteForPanel('files')}
             expanded={expanded}
-            onClick={() => onAgentsClick ? debounced(onAgentsClick) : toggle('agents')}
-            walkthroughId="agents-panel"
+            href={ROUTE_PANEL_HREF.files}
+            onClick={(event) => handleRouteRailClick(event, 'files', onSpacesClick)}
+            walkthroughId="files-panel"
           />
-          {labsWorkflows && <RailButton icon={<Zap size={18} />} label={t.sidebar.workflows ?? 'Flows'} active={activePanel === 'workflows'} expanded={expanded} onClick={() => onWorkflowsClick ? debounced(onWorkflowsClick) : toggle('workflows')} />}
+          {railPreferences.studio && (
+            <RailButton
+              icon={<DraftingCompass size={18} />}
+              label={t.sidebar.studio ?? 'Studio'}
+              active={activeDestination === 'studio'}
+              current={isCurrentRouteForPanel('studio')}
+              expanded={expanded}
+              href={ROUTE_PANEL_HREF.studio}
+              onClick={(event) => handleRouteRailClick(event, 'studio', onStudioClick)}
+              walkthroughId="studio-page"
+            />
+          )}
+          <RailButton
+            icon={<Radio size={18} />}
+            label={t.sidebar.echo}
+            active={activeDestination === 'echo'}
+            current={isCurrentRouteForPanel('echo')}
+            expanded={expanded}
+            href={ROUTE_PANEL_HREF.echo}
+            onClick={(event) => handleRouteRailClick(event, 'echo', onEchoClick)}
+            walkthroughId="echo-panel"
+          />
+          {railPreferences.flow && (
+            <RailButton
+              icon={<Zap size={18} />}
+              label={t.sidebar.workflows ?? 'Flows'}
+              active={activePanel === 'workflows'}
+              pressed={activePanel === 'workflows'}
+              expanded={expanded}
+              onClick={(event) => (
+                onWorkflowsClick
+                  ? debouncedRailClick(event, 'panel:workflows', () => onWorkflowsClick(event))
+                  : toggle('workflows')
+              )}
+            />
+          )}
         </div>
 
         {/* ── Spacer ── */}
         <div className="flex-1" />
 
-        {/* ── Secondary: Explore ── */}
+        {/* ── Secondary: Capabilities / Explore ── */}
         <div className={`${expanded ? 'mx-3' : 'mx-2'} border-t border-border`} />
         <div className={`flex flex-col ${expanded ? 'px-1.5' : 'items-center'} gap-1 py-2`}>
-          <RailButton icon={<Compass size={18} />} label={t.sidebar.discover} active={activePanel === 'discover'} expanded={expanded} onClick={() => onDiscoverClick ? debounced(onDiscoverClick) : toggle('discover')} />
+          <RailButton
+            icon={<Bot size={18} />}
+            label={t.sidebar.agents}
+            active={activeDestination === 'agents'}
+            current={isCurrentRouteForPanel('agents')}
+            expanded={expanded}
+            href={ROUTE_PANEL_HREF.agents}
+            onClick={(event) => handleRouteRailClick(event, 'agents', onAgentsClick)}
+            walkthroughId="agents-panel"
+          />
+          <RailButton
+            icon={<Compass size={18} />}
+            label={t.sidebar.discover}
+            active={activeDestination === 'discover'}
+            current={isCurrentRouteForPanel('discover')}
+            expanded={expanded}
+            href={ROUTE_PANEL_HREF.discover}
+            onClick={(event) => handleRouteRailClick(event, 'discover', onDiscoverClick)}
+          />
         </div>
 
-        {/* ── Bottom: Action buttons (not panel toggles) ── */}
+        {/* ── Bottom: user area + compact actions ── */}
         <div className={`${expanded ? 'mx-3' : 'mx-2'} border-t border-border`} />
-        <div className={`flex flex-col ${expanded ? 'px-1.5' : 'items-center'} gap-1 py-2`}>
-          <RailButton
-            icon={<Settings size={18} />}
-            label={t.sidebar.settingsTitle}
-            shortcut="⌘,"
-            expanded={expanded}
-            onClick={() => debounced(onSettingsClick)}
-            badge={hasUpdate ? (
-              <span className={`absolute ${expanded ? 'left-[26px] top-1.5' : 'top-1.5 right-1.5'} w-2 h-2 rounded-full bg-error`} />
-            ) : undefined}
-          />
-          {syncStatus?.enabled && syncStatus?.remote && syncStatus.remote !== '(not configured)' && (
-          <RailButton
-            icon={<RefreshCw size={18} />}
-            label={t.sidebar.syncLabel}
-            expanded={expanded}
-            buttonRef={syncBtnRef}
-            badge={syncBadge}
-            onClick={() => debounced(() => {
-              const rect = syncBtnRef.current?.getBoundingClientRect();
-              if (rect) onSyncClick(rect);
-            })}
-          />
+        <div className={`flex flex-col ${expanded ? 'px-2' : 'items-center'} gap-1 py-2`}>
+          {pluginEntriesAvailable && onPluginEntriesClick && (
+            <RailButton
+              icon={<Puzzle size={18} />}
+              label="Plugin Entries"
+              expanded={expanded}
+              onClick={() => debounced('action:plugin-entries', onPluginEntriesClick)}
+              badge={(
+                <span className={`absolute ${expanded ? 'left-[26px] top-1.5' : 'top-1.5 right-1.5'} h-1.5 w-1.5 rounded-full bg-success`} />
+              )}
+            />
           )}
+          <div
+            className={`
+              ${expanded
+                ? 'flex h-11 w-full items-center gap-1 rounded-lg border border-transparent px-1 transition-colors hover:border-border/60 hover:bg-muted/25'
+                : 'flex w-10 justify-center'
+              }
+            `}
+            data-rail-user-footer
+          >
+            <button
+              type="button"
+              ref={userBtnRef}
+              onClick={toggleUserMenu}
+              aria-label={userLabel}
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
+              className={`
+                hit-target-box relative flex min-w-0 items-center text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-md)]
+                ${expanded ? 'h-9 flex-1 gap-2 px-1.5' : 'h-10 w-10 justify-center'}
+              `}
+              title={expanded ? undefined : userLabel}
+            >
+              <UserAvatar badgeLevel={collapsedUserBadgeLevel} />
+              {expanded ? (
+                <span className="min-w-0 truncate text-sm font-medium text-foreground/90">{userLabel}</span>
+              ) : null}
+            </button>
+            {expanded ? (
+              <div className="flex shrink-0 items-center gap-0.5">
+                <button
+                  type="button"
+                  ref={syncBtnRef}
+                  onClick={() => debounced('action:sync', () => {
+                    setUserMenuOpen(false);
+                    const rect = syncBtnRef.current?.getBoundingClientRect();
+                    if (rect) onSyncClick(rect);
+                  })}
+                  aria-label={t.sidebar.syncLabel}
+                  aria-haspopup="dialog"
+                  aria-expanded={syncPopoverOpen}
+                  aria-controls={syncPopoverOpen ? syncPopoverId : undefined}
+                  title={t.sidebar.syncLabel}
+                  className="hit-target-box relative inline-flex h-8 w-8 items-center justify-center text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-md)]"
+                >
+                  <RefreshCw size={15} className={syncing ? 'animate-spin text-[var(--amber)]' : ''} />
+                  {syncBadge}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => debounced('action:settings', onSettingsClick)}
+                  aria-label={t.sidebar.settingsTitle}
+                  title={t.sidebar.settingsTitle}
+                  className="hit-target-box relative inline-flex h-8 w-8 items-center justify-center text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-md)]"
+                >
+                  <Settings size={15} />
+                  {hasUpdate ? <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-error" aria-hidden="true" /> : null}
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
 
+      {userMenu}
+
       {/* ── Hover expand/collapse button — vertically centered on right edge ── */}
-      {/* z-[32] ensures it paints above Panel (z-30). Shows on Rail hover OR self-hover. */}
+      {/* Paints above Panel (z-30). Shows on Rail hover OR self-hover. */}
       <button
         onClick={() => onExpandedChange(!expanded)}
         className="
-          absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2 z-[32]
-          w-5 h-5 rounded-full
-          bg-card border border-border shadow-sm
-          flex items-center justify-center
+          absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2 z-app-rail-affordance
+          flex h-6 w-6 items-center justify-center rounded-full
+          border border-border bg-card shadow-sm
           opacity-0 group-hover:opacity-100 hover:!opacity-100
-          transition-opacity duration-200
-          text-muted-foreground hover:text-foreground hover:bg-muted
-          focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring
+          transition-[opacity,background-color,border-color,color,box-shadow] duration-200
+          text-muted-foreground hover:text-foreground
+          hover:bg-muted hover:shadow-md
+          focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
         "
         aria-label={expanded ? 'Collapse sidebar' : 'Expand sidebar'}
         title={expanded ? 'Collapse' : 'Expand'}
@@ -320,6 +652,5 @@ export default function ActivityBar({
         {expanded ? <ChevronLeft size={10} /> : <ChevronRight size={10} />}
       </button>
     </aside>
-    </TooltipProvider>
   );
 }

@@ -9,6 +9,7 @@ import type { AgentBuckets, AgentStatusFilter, AgentTransportFilter } from './ag
 import {
   ActionButton,
   AddAvatarButton,
+  AgentSectionHeading,
   AgentAvatar,
   AgentPickerPopover,
   BulkMessage,
@@ -20,6 +21,7 @@ import {
 } from './AgentsPrimitives';
 import {
   aggregateCrossAgentMcpServers,
+  createMcpReconnectPlan,
 
   filterAgentsForMcpWorkspace,
   resolveAgentStatus,
@@ -48,7 +50,7 @@ export default function AgentsMcpSection({
     riskMcpStopped: string;
     bulkReconnectFiltered: string;
     bulkRunning: string;
-    bulkSummary: (ok: number, failed: number) => string;
+    bulkSummary: (ok: number, failed: number, skipped: number) => string;
     installMindos: string;
     mcpServerLabel: string;
     searchServersPlaceholder: string;
@@ -62,6 +64,8 @@ export default function AgentsMcpSection({
     manualRemoveHint: string;
     removeSuccess: string;
     removeFailed: string;
+    copyServerSuccess: (server: string, agent: string) => string;
+    copyServerFailed: (server: string, agent: string) => string;
     reconnectAllInServer: string;
     reconnectAllRunning: string;
     reconnectAllDone: (ok: number, failed: number) => string;
@@ -125,19 +129,54 @@ export default function AgentsMcpSection({
 
   async function handleBulkReconnect() {
     if (busyAction !== null || filteredAgents.length === 0) return;
+    const plan = createMcpReconnectPlan(filteredAgents);
+    if (plan.targets.length === 0) {
+      const summary = summarizeMcpBulkReconnectResults([], plan.skipped.length);
+      setBulkMessage(copy.bulkSummary(summary.succeeded, summary.failed, summary.skipped));
+      return;
+    }
     setBusyAction('bulk');
     setBulkMessage(copy.bulkRunning);
     const results: Array<{ agentKey: string; ok: boolean }> = [];
-    for (const agent of filteredAgents) {
+    for (const agent of plan.targets) {
       const scope = agent.scope === 'project' ? 'project' : 'global';
       const transport = agent.transport === 'http' ? 'http' : 'stdio';
       const ok = await mcp.installAgent(agent.key, { scope, transport });
       results.push({ agentKey: agent.key, ok });
     }
     await mcp.refresh({ force: true });
-    const summary = summarizeMcpBulkReconnectResults(results);
-    setBulkMessage(copy.bulkSummary(summary.succeeded, summary.failed));
+    const summary = summarizeMcpBulkReconnectResults(results, plan.skipped.length);
+    setBulkMessage(copy.bulkSummary(summary.succeeded, summary.failed, summary.skipped));
     setBusyAction(null);
+  }
+
+  async function handleCopyServer(serverName: string, sourceAgentKey: string, targetAgentKey: string) {
+    const busyKey = `copy-server:${serverName}:${targetAgentKey}`;
+    setBusyAction(busyKey);
+    try {
+      const target = mcp.agents.find((agent) => agent.key === targetAgentKey);
+      const res = await apiFetch<{ results: Array<{ agent?: string; status?: string; ok?: boolean; error?: string; message?: string }> }>('/api/mcp/copy-server', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          serverName,
+          sourceAgentKey,
+          targets: [{
+            key: targetAgentKey,
+            scope: target?.scope === 'project' ? 'project' : 'global',
+          }],
+        }),
+      });
+      const first = res.results?.[0];
+      const ok = first?.ok === true || first?.status === 'ok';
+      if (ok) await mcp.refresh({ force: true });
+      return ok;
+    } catch (err) {
+      console.error('[mcp] copy server failed', err);
+      return false;
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   const isRefreshing = busyAction === 'refresh';
@@ -147,12 +186,11 @@ export default function AgentsMcpSection({
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5">
-          <h2 className="text-sm font-semibold text-foreground flex items-center gap-2">
-            <div className="w-6 h-6 rounded-md bg-[var(--amber-subtle)] flex items-center justify-center">
-              <Server size={13} className="text-[var(--amber)]" aria-hidden="true" />
-            </div>
-            {copy.title}
-          </h2>
+          <AgentSectionHeading
+            icon={<Server size={13} aria-hidden="true" />}
+            title={copy.title}
+            titleClassName="text-sm"
+          />
           <button
             type="button"
             onClick={() => { setBusyAction('refresh'); void mcp.refresh({ force: true }).finally(() => setBusyAction(null)); }}
@@ -171,7 +209,7 @@ export default function AgentsMcpSection({
       </div>
 
       {/* Compact status strip + risk alerts */}
-      <div className="rounded-xl border border-border/60 bg-gradient-to-r from-card to-card/80 p-3.5">
+      <div className="space-y-2 px-0.5">
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs">
           <StatusDot tone="ok" label={copy.filters.connected} count={buckets.connected.length} />
           <StatusDot tone="warn" label={copy.filters.detected} count={buckets.detected.length} />
@@ -182,12 +220,10 @@ export default function AgentsMcpSection({
           <StatusDot tone={mcp.status?.running ? 'ok' : 'neutral'} label={copy.mcpServerLabel} count={mcp.status?.running ? 1 : 0} />
         </div>
         {!mcp.status?.running && (
-          <div className="mt-2 pt-2 border-t border-border/60" role="alert">
-            <p className="text-xs text-destructive flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-destructive shrink-0" aria-hidden="true" />
-              {copy.riskMcpStopped}
-            </p>
-          </div>
+          <p className="flex items-center gap-1.5 text-xs text-destructive" role="alert">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-destructive" aria-hidden="true" />
+            {copy.riskMcpStopped}
+          </p>
         )}
       </div>
 
@@ -222,7 +258,7 @@ export default function AgentsMcpSection({
           servers={filteredServers}
           allAgents={sortedAgents}
           busyAction={busyAction}
-          onInstallMindos={handleInstallMindos}
+          onCopyServer={handleCopyServer}
           onReconnect={handleReconnect}
         />
       )}
@@ -344,9 +380,6 @@ function ByAgentView({
                         variant="primary"
                       />
                     )}
-                    {!agent.installed && (
-                      <span className="text-2xs text-muted-foreground/60">or CLI Skill</span>
-                    )}
                   </div>
                 </div>
 
@@ -377,14 +410,14 @@ function ByServerView({
   servers,
   allAgents,
   busyAction,
-  onInstallMindos,
+  onCopyServer,
   onReconnect,
 }: {
   copy: Parameters<typeof AgentsMcpSection>[0]['copy'];
   servers: ReturnType<typeof aggregateCrossAgentMcpServers>;
   allAgents: ReturnType<typeof sortAgentsByStatus>;
   busyAction: string | null;
-  onInstallMindos: (agentKey: string) => Promise<void>;
+  onCopyServer: (serverName: string, sourceAgentKey: string, targetAgentKey: string) => Promise<boolean>;
   onReconnect: (agent: ReturnType<typeof sortAgentsByStatus>[number]) => Promise<void>;
 }) {
   const [pickerServer, setPickerServer] = useState<string | null>(null);
@@ -393,14 +426,24 @@ function ByServerView({
   const [reconnectingServer, setReconnectingServer] = useState<string | null>(null);
   const [reconnectMsg, setReconnectMsg] = useState<Record<string, string>>({});
   const agentsByName = useMemo(() => new Map(allAgents.map((agent) => [agent.name, agent])), [allAgents]);
-  const allAgentPickerOptions = useMemo(() => allAgents.map((agent) => ({ key: agent.key, name: agent.name })), [allAgents]);
+  const allAgentPickerOptions = useMemo(
+    () => allAgents
+      .filter((agent) => agent.key !== 'mindos' && agent.present)
+      .map((agent) => ({ key: agent.key, name: agent.name })),
+    [allAgents],
+  );
 
   const handleAddAgent = useCallback(
-    async (agentKey: string) => {
+    async (serverName: string, sourceAgentKey: string, targetAgentKey: string) => {
       setPickerServer(null);
-      await onInstallMindos(agentKey);
+      const target = allAgents.find((agent) => agent.key === targetAgentKey);
+      const ok = await onCopyServer(serverName, sourceAgentKey, targetAgentKey);
+      setHintMessage(ok
+        ? copy.copyServerSuccess(serverName, target?.name ?? targetAgentKey)
+        : copy.copyServerFailed(serverName, target?.name ?? targetAgentKey));
+      setTimeout(() => setHintMessage(null), 4000);
     },
-    [onInstallMindos],
+    [allAgents, copy, onCopyServer],
   );
 
   const handleConfirmRemove = useCallback(async () => {
@@ -416,7 +459,7 @@ function ByServerView({
       await apiFetch('/api/mcp/uninstall', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agents: [{ key: agentKey, scope }] }),
+        body: JSON.stringify({ agents: [{ key: agentKey, scope, serverName: confirmState.serverName }] }),
       });
       setHintMessage(copy.removeSuccess ?? 'Removed. Restart your agent to apply.');
     } catch {
@@ -452,14 +495,7 @@ function ByServerView({
 
   return (
     <>
-      <div className="relative overflow-hidden rounded-xl border border-border/70 bg-muted/20 p-3 pl-8">
-        <div className="pointer-events-none absolute left-5 top-8 bottom-8 w-px bg-border" aria-hidden="true" />
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <p className="text-2xs font-medium uppercase tracking-wider text-muted-foreground">
-            {copy.connectionGraph}
-          </p>
-          <p className="text-2xs text-muted-foreground tabular-nums">{copy.resultCount(servers.length)}</p>
-        </div>
+      <div className="h-[calc(100vh-340px)] min-h-[220px] space-y-2 overflow-y-auto pr-1">
         {hintMessage && (
           <div role="status" aria-live="polite" className="mb-3 rounded-md border border-border bg-background/80 px-3 py-2 text-xs text-muted-foreground animate-in fade-in duration-200">
             {hintMessage}
@@ -469,33 +505,29 @@ function ByServerView({
           const agentDetails = srv.agents
             .map((name) => agentsByName.get(name))
             .filter(Boolean) as typeof allAgents;
+          const presentAgentDetails = agentDetails.filter((agent) => agent.present);
+          const sourceAgent = presentAgentDetails.find((agent) => agent.configuredMcpServers?.includes(srv.serverName)) ?? presentAgentDetails[0];
           const serverAgentNames = new Set(srv.agents);
           const orphanNames = srv.agents.filter((name) => !agentsByName.has(name));
           const availableToAdd = allAgentPickerOptions.filter((a) => !serverAgentNames.has(a.name));
 
-          const connectedCount = agentDetails.filter((a) => resolveAgentStatus(a) === 'connected').length;
-          const detectedCount = agentDetails.filter((a) => resolveAgentStatus(a) === 'detected').length;
-          const notFoundCount = agentDetails.length - connectedCount - detectedCount + orphanNames.length;
-
           return (
-            <div key={srv.serverName} className="relative mb-3 last:mb-0 rounded-lg border border-border/70 bg-card/90 p-4 shadow-sm transition-all duration-200 hover:border-[var(--amber)]/35 hover:bg-card hover:shadow-md">
-              <span className="absolute -left-[1.08rem] top-5 h-3 w-3 rounded-full border-2 border-background bg-[var(--amber)] shadow-[0_0_0_3px_var(--background)]" aria-hidden="true" />
+            <div key={srv.serverName} className="rounded-lg border border-border/60 bg-background/55 px-3 py-3 transition-colors duration-150 hover:border-[var(--amber)]/30 hover:bg-muted/25">
               {/* Server header */}
-              <div className="flex items-start justify-between gap-3 mb-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5 min-w-0">
-                  <div className="w-8 h-8 rounded-md bg-[var(--amber-subtle)] border border-[var(--amber)]/15 flex items-center justify-center shrink-0">
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--amber)]/15 bg-[var(--amber-subtle)]">
                     <Server size={13} className="text-[var(--amber)]" aria-hidden="true" />
                   </div>
                   <div className="min-w-0">
                     <span className="block text-sm font-semibold text-foreground truncate">{srv.serverName}</span>
-                    <span className="mt-0.5 block text-2xs text-muted-foreground tabular-nums">{copy.serverAgentCount(srv.agents.length)}</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
                   {agentDetails.length > 0 && (
                     <ActionButton
-                      onClick={() => void handleReconnectAllInServer(srv.serverName, agentDetails)}
-                      disabled={reconnectingServer !== null || busyAction !== null}
+                      onClick={() => void handleReconnectAllInServer(srv.serverName, presentAgentDetails)}
+                      disabled={reconnectingServer !== null || busyAction !== null || presentAgentDetails.length === 0}
                       busy={reconnectingServer === srv.serverName}
                       label={copy.reconnectAllInServer}
                       busyLabel={copy.reconnectAllRunning}
@@ -509,35 +541,13 @@ function ByServerView({
                     />
                     <AgentPickerPopover
                       open={pickerServer === srv.serverName}
-                      agents={availableToAdd}
+                      agents={sourceAgent ? availableToAdd : []}
                       emptyLabel={copy.noAvailableAgents}
-                      onSelect={(key) => void handleAddAgent(key)}
+                      onSelect={(key) => sourceAgent ? void handleAddAgent(srv.serverName, sourceAgent.key, key) : undefined}
                       onClose={() => setPickerServer(null)}
                     />
                   </div>
                 </div>
-              </div>
-
-              {/* Agent status breakdown */}
-              <div className="flex flex-wrap items-center gap-1.5 text-2xs text-muted-foreground mb-3">
-                {connectedCount > 0 && (
-                  <span className="inline-flex min-h-[22px] items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--success)]" aria-hidden="true" />
-                    {connectedCount}
-                  </span>
-                )}
-                {detectedCount > 0 && (
-                  <span className="inline-flex min-h-[22px] items-center gap-1 rounded-full border border-[var(--amber)]/20 bg-[var(--amber-dim)] px-2 text-[var(--amber-text)]">
-                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--amber)]" aria-hidden="true" />
-                    {detectedCount}
-                  </span>
-                )}
-                {notFoundCount > 0 && (
-                  <span className="inline-flex min-h-[22px] items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground" aria-hidden="true" />
-                    {notFoundCount}
-                  </span>
-                )}
               </div>
 
               {reconnectMsg[srv.serverName] && (

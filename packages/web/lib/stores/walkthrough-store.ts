@@ -21,7 +21,25 @@ export interface WalkthroughStoreState {
 
 /* ── Helpers ── */
 
-const LS_KEY = 'mindos_walkthrough_done';
+export const WALKTHROUGH_DONE_STORAGE_KEY = 'mindos_walkthrough_done';
+
+function getLocalCompletionStorageKey(): string {
+  const mindRootId = typeof document !== 'undefined'
+    ? document.documentElement.dataset.mindRootId
+    : undefined;
+  return mindRootId ? `${WALKTHROUGH_DONE_STORAGE_KEY}:${mindRootId}` : WALKTHROUGH_DONE_STORAGE_KEY;
+}
+
+function setLocallyDone(): void {
+  try { localStorage.setItem(getLocalCompletionStorageKey(), '1'); } catch {}
+}
+
+function clearLocallyDone(): void {
+  try {
+    localStorage.removeItem(getLocalCompletionStorageKey());
+    localStorage.removeItem(WALKTHROUGH_DONE_STORAGE_KEY);
+  } catch {}
+}
 
 /**
  * Persist walkthrough state to server AND localStorage.
@@ -32,7 +50,7 @@ const LS_KEY = 'mindos_walkthrough_done';
 function persistStep(step: number, dismissed: boolean) {
   // Local safety net — instant, survives server outage
   if (step >= walkthroughSteps.length || dismissed) {
-    try { localStorage.setItem(LS_KEY, '1'); } catch {}
+    setLocallyDone();
   }
   // Server persist — fire-and-forget (localStorage is the safety net)
   fetch('/api/setup', {
@@ -46,7 +64,30 @@ function persistStep(step: number, dismissed: boolean) {
 
 /** Check if walkthrough was completed/dismissed (fast, sync, local) */
 function isLocallyDone(): boolean {
-  try { return localStorage.getItem(LS_KEY) === '1'; } catch { return false; }
+  try { return localStorage.getItem(getLocalCompletionStorageKey()) === '1'; } catch { return false; }
+}
+
+export async function restartWalkthrough(): Promise<void> {
+  clearLocallyDone();
+
+  const res = await fetch('/api/setup', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      guideState: {
+        active: true,
+        dismissed: false,
+        walkthroughStep: 0,
+        walkthroughDismissed: false,
+      },
+    }),
+  });
+  if (!res.ok) throw new Error(`Failed to restart walkthrough (${res.status})`);
+
+  useWalkthroughStore.setState({ status: 'active', currentStep: 0 });
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('guide-state-updated'));
+  }
 }
 
 /* ── Store ── */
@@ -60,6 +101,7 @@ export const useWalkthroughStore = create<WalkthroughStoreState>((set, get) => {
     totalSteps,
 
     start: () => {
+      clearLocallyDone();
       set({ currentStep: 0, status: 'active' });
       persistStep(0, false);
     },
@@ -96,38 +138,49 @@ export const useWalkthroughStore = create<WalkthroughStoreState>((set, get) => {
         const url = new URL(window.location.href);
         url.searchParams.delete('welcome');
         window.history.replaceState({}, '', url.pathname + (url.search || ''));
+        clearLocallyDone();
         window.dispatchEvent(new Event('mindos:first-visit'));
+        set({ status: 'active', currentStep: 0 });
+        persistStep(0, false);
+        return () => {};
       }
 
-      // Only auto-start on desktop
+      // Only auto-resume on desktop; explicit welcome=1 is handled above.
       if (window.innerWidth < 768) return () => {};
+
+      const locallyDone = isLocallyDone();
 
       // Fast local check: if walkthrough was completed/dismissed, never reactivate.
       // This prevents the "stuck overlay" bug where server persist failed during
       // update restart but localStorage recorded the completion.
-      if (isLocallyDone()) return () => {};
+      if (locallyDone && !isWelcome) return () => {};
 
+      let cancelled = false;
       fetch('/api/setup')
         .then(r => r.json())
         .then(data => {
+          if (cancelled) return;
           const gs = data.guideState;
           if (!gs) return;
           if (gs.walkthroughDismissed) {
-            try { localStorage.setItem(LS_KEY, '1'); } catch {} // sync local
+            setLocallyDone(); // sync local
             return;
           }
 
           // If server says completed (step >= totalSteps), mark locally done
           if (typeof gs.walkthroughStep === 'number' && gs.walkthroughStep >= totalSteps) {
-            try { localStorage.setItem(LS_KEY, '1'); } catch {};
+            setLocallyDone();
             return;
           }
 
           if (gs.active && !gs.dismissed && gs.walkthroughStep === undefined) {
             if (isWelcome) {
               set({ status: 'active', currentStep: 0 });
+              persistStep(0, false);
             }
           } else if (
+            gs.active &&
+            !gs.dismissed &&
             typeof gs.walkthroughStep === 'number' &&
             gs.walkthroughStep >= 0 &&
             gs.walkthroughStep < totalSteps &&
@@ -138,7 +191,7 @@ export const useWalkthroughStore = create<WalkthroughStoreState>((set, get) => {
         })
         .catch((err) => { console.warn('[walkthrough-store] guideState read failed:', err); });
 
-      return () => {};
+      return () => { cancelled = true; };
     },
   };
 });

@@ -1,5 +1,5 @@
 /**
- * ChatInput — Message input field with send button, mode selector, and file attachments.
+ * ChatInput — Message input field with send button, intent selector, and file attachments.
  */
 
 import { useRef, useState } from 'react';
@@ -12,7 +12,8 @@ import {
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import type { AskMode } from '@/lib/types';
+import { colors, hairlineWidth, radius, spacing, typography } from '@/lib/theme';
+import type { ComposerIntent } from '@/lib/types';
 
 interface ChatInputProps {
   value: string;
@@ -21,8 +22,11 @@ interface ChatInputProps {
   onCancel?: () => void;
   isLoading?: boolean;
   canSend?: boolean;
-  mode?: AskMode;
-  onModeChange?: (mode: AskMode) => void;
+  composerIntent?: ComposerIntent;
+  onComposerIntentChange?: (intent: ComposerIntent) => void;
+  hostActionsEnabled?: boolean;
+  placeholder?: string;
+  modeHint?: string;
   attachedPaths?: string[];
   onOpenAttachmentPicker?: () => void;
   onRemoveAttachment?: (path: string) => void;
@@ -35,8 +39,11 @@ export default function ChatInput({
   onCancel,
   isLoading = false,
   canSend = true,
-  mode = 'chat',
-  onModeChange,
+  composerIntent = 'chat',
+  onComposerIntentChange,
+  hostActionsEnabled = false,
+  placeholder = 'Ask MindOS...',
+  modeHint,
   attachedPaths = [],
   onOpenAttachmentPicker,
   onRemoveAttachment,
@@ -56,26 +63,39 @@ export default function ChatInput({
 
   return (
     <View>
-      {/* Mode selector */}
-      <View style={styles.modeRow}>
-        {(['chat', 'agent'] as const).map((m) => (
-          <Pressable
-            key={m}
-            style={[styles.modeButton, mode === m && styles.modeButtonActive]}
-            onPress={() => onModeChange?.(m)}
-            disabled={isLoading}
-          >
-            <Ionicons
-              name={m === 'chat' ? 'chatbubble-outline' : 'flash-outline'}
-              size={14}
-              color={mode === m ? '#c8873a' : '#78716c'}
-            />
-            <Text style={[styles.modeText, mode === m && styles.modeTextActive]}>
-              {m === 'chat' ? 'Chat' : 'Agent'}
+      {hostActionsEnabled ? (
+        <View style={styles.modePanel}>
+          <View style={styles.modeRow}>
+            {(['chat', 'act'] as const).map((intent) => {
+              const selected = composerIntent === intent;
+              return (
+                <Pressable
+                  key={intent}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected, disabled: isLoading }}
+                  style={[styles.modeButton, selected && styles.modeButtonActive]}
+                  onPress={() => onComposerIntentChange?.(intent)}
+                  disabled={isLoading}
+                >
+                  <Ionicons
+                    name={intent === 'chat' ? 'chatbubble-outline' : 'flash-outline'}
+                    size={14}
+                    color={selected ? colors.amber : colors.textSubtle}
+                  />
+                  <Text style={[styles.modeText, selected && styles.modeTextActive]}>
+                    {intent === 'chat' ? 'Chat' : 'Act'}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          {modeHint ? (
+            <Text style={styles.modeHint} numberOfLines={2}>
+              {modeHint}
             </Text>
-          </Pressable>
-        ))}
-      </View>
+          ) : null}
+        </View>
+      ) : null}
 
       {/* Attachment chips */}
       {attachedPaths.length > 0 && (
@@ -102,7 +122,7 @@ export default function ChatInput({
           disabled={attachDisabled}
           hitSlop={6}
         >
-          <Ionicons name="attach-outline" size={18} color={attachDisabled ? '#78716c' : '#c8873a'} />
+          <Ionicons name="attach-outline" size={18} color={attachDisabled ? colors.textSubtle : colors.amber} />
         </Pressable>
 
         <TextInput
@@ -110,8 +130,8 @@ export default function ChatInput({
           style={styles.input}
           value={value}
           onChangeText={onChangeText}
-          placeholder="Ask MindOS..."
-          placeholderTextColor="#78716c"
+          placeholder={placeholder}
+          placeholderTextColor={colors.textSubtle}
           multiline
           maxLength={4000}
           editable={!isLoading && canSend}
@@ -122,7 +142,7 @@ export default function ChatInput({
 
         {isLoading ? (
           <Pressable style={styles.cancelButton} onPress={onCancel}>
-            <Ionicons name="stop-circle" size={20} color="#ef4444" />
+            <Ionicons name="stop-circle" size={20} color={colors.error} />
           </Pressable>
         ) : (
           <Pressable
@@ -130,7 +150,7 @@ export default function ChatInput({
             onPress={handleSend}
             disabled={!canSubmit}
           >
-            <Ionicons name="send" size={16} color="#fff" />
+            <Ionicons name="send" size={16} color={colors.white} />
           </Pressable>
         )}
       </View>
@@ -139,74 +159,92 @@ export default function ChatInput({
 }
 
 const styles = StyleSheet.create({
+  modePanel: {
+    gap: spacing.xs,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.sm,
+    borderTopWidth: hairlineWidth,
+    borderTopColor: colors.borderSubtle,
+    backgroundColor: colors.background,
+  },
   modeRow: {
     flexDirection: 'row',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    gap: spacing.xs,
+    alignSelf: 'flex-start',
+    padding: 3,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.borderSubtle,
+    backgroundColor: colors.surfaceMuted,
   },
   modeButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 16,
-    backgroundColor: '#292524',
+    gap: spacing.xs,
+    minHeight: 30,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 5,
+    borderRadius: radius.md,
   },
   modeButtonActive: {
-    backgroundColor: 'rgba(200, 135, 58, 0.2)',
+    backgroundColor: colors.amberSoft,
   },
   modeText: {
-    fontSize: 12,
-    color: '#78716c',
+    fontSize: typography.caption,
+    color: colors.textSubtle,
     fontWeight: '500',
   },
   modeTextActive: {
-    color: '#c8873a',
+    color: colors.amber,
+  },
+  modeHint: {
+    fontSize: typography.caption,
+    lineHeight: 17,
+    color: colors.textSubtle,
   },
   attachmentRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingBottom: 8,
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
   },
   attachmentChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
     maxWidth: '100%',
-    backgroundColor: '#292524',
+    backgroundColor: colors.surface,
     borderRadius: 16,
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderWidth: 1,
-    borderColor: '#44403c',
+    borderColor: colors.border,
   },
   attachmentText: {
     maxWidth: 160,
-    fontSize: 12,
-    color: '#d6d3d1',
+    fontSize: typography.caption,
+    color: colors.textMuted,
   },
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#292524',
-    backgroundColor: '#1a1917',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderTopWidth: hairlineWidth,
+    borderTopColor: colors.borderSubtle,
+    backgroundColor: colors.background,
   },
   inputContainerFocused: {
-    borderTopColor: '#44403c',
+    borderTopColor: colors.border,
   },
   attachButton: {
     width: 40,
     height: 40,
-    borderRadius: 8,
-    backgroundColor: '#292524',
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -215,19 +253,19 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    backgroundColor: '#292524',
-    borderRadius: 10,
-    paddingHorizontal: 12,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
     paddingVertical: 10,
-    color: '#fafaf9',
-    fontSize: 14,
+    color: colors.text,
+    fontSize: typography.body,
     maxHeight: 100,
   },
   sendButton: {
     width: 40,
     height: 40,
-    borderRadius: 8,
-    backgroundColor: '#c8873a',
+    borderRadius: radius.md,
+    backgroundColor: colors.amber,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -237,8 +275,8 @@ const styles = StyleSheet.create({
   cancelButton: {
     width: 40,
     height: 40,
-    borderRadius: 8,
-    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+    borderRadius: radius.md,
+    backgroundColor: colors.errorSoft,
     justifyContent: 'center',
     alignItems: 'center',
   },

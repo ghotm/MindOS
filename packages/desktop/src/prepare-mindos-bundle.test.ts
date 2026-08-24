@@ -2,7 +2,16 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from 'os';
 import path from 'path';
 import { describe, expect, it, afterEach } from 'vitest';
-import { copyAppForBundledRuntime, materializeStandaloneAssets } from '../scripts/prepare-mindos-bundle.mjs';
+import {
+  BUILTIN_AGENT_EXTENSION_RUNTIME_DEPENDENCY_SEEDS,
+  IM_RUNTIME_DEPENDENCY_SEEDS,
+  MINDOS_WEB_RUNTIME_EXTENSION_SOURCE_ENTRIES,
+  PI_SCHEDULE_PROMPT_STALE_RUNTIME_DEPENDENCIES,
+  copyAppForBundledRuntime,
+  materializeStandaloneAssets,
+  pruneClaudeAgentSdkNativePackages,
+  RUNTIME_DEPENDENCY_SEEDS,
+} from '../scripts/prepare-mindos-bundle.mjs';
 import { getStandaloneAppRequiredEntries } from '../scripts/runtime-health-contract.mjs';
 
 function writeStandaloneApp(appDir: string, omit: string[] = []) {
@@ -14,6 +23,16 @@ function writeStandaloneApp(appDir: string, omit: string[] = []) {
     } else {
       mkdirSync(path.dirname(target), { recursive: true });
       writeFileSync(target, `// ${entry.path}`);
+    }
+    if (entry.path.startsWith('.next/standalone/lib/')) {
+      const sourceRel = entry.path.slice('.next/standalone/'.length);
+      const source = path.join(appDir, sourceRel);
+      if (entry.type === 'directory') {
+        mkdirSync(source, { recursive: true });
+      } else {
+        mkdirSync(path.dirname(source), { recursive: true });
+        writeFileSync(source, `// source ${sourceRel}`);
+      }
     }
   }
 }
@@ -98,6 +117,37 @@ describe('materializeStandaloneAssets', () => {
     expect(readFileSync(path.join(standalonePackage, 'dist', 'index.js'), 'utf-8')).toBe('ok');
   });
 
+  it('does not dereference pnpm virtual-store self links into nested standalone builds', () => {
+    const appDir = makeTemp('mindos-app-pnpm-self-link-');
+    writeStandaloneApp(appDir);
+
+    const packageStore = path.join(makeTemp('mindos-pnpm-store-'), 'runtime-package');
+    mkdirSync(path.join(packageStore, 'node_modules', '.pnpm', 'node_modules', '@mindos'), { recursive: true });
+    writeFileSync(path.join(packageStore, 'package.json'), JSON.stringify({
+      name: 'runtime-package',
+      version: '1.0.0',
+    }));
+    writeFileSync(path.join(packageStore, 'index.js'), 'module.exports = {};');
+    symlinkSync(appDir, path.join(packageStore, 'node_modules', '.pnpm', 'node_modules', '@mindos', 'web'));
+
+    const standaloneNodeModules = path.join(appDir, '.next', 'standalone', 'node_modules');
+    const standalonePackage = path.join(standaloneNodeModules, 'runtime-package');
+    mkdirSync(path.dirname(standalonePackage), { recursive: true });
+    symlinkSync(packageStore, standalonePackage);
+
+    const rootVirtualStoreSelfLink = path.join(standaloneNodeModules, '.pnpm', 'node_modules', '@mindos', 'web');
+    mkdirSync(path.dirname(rootVirtualStoreSelfLink), { recursive: true });
+    symlinkSync(appDir, rootVirtualStoreSelfLink);
+
+    materializeStandaloneAssets(appDir);
+
+    expect(lstatSync(standalonePackage).isSymbolicLink()).toBe(false);
+    expect(readFileSync(path.join(standalonePackage, 'index.js'), 'utf-8')).toBe('module.exports = {};');
+    expect(existsSync(path.join(standalonePackage, 'node_modules', '.pnpm'))).toBe(false);
+    expect(existsSync(path.join(standaloneNodeModules, '.pnpm'))).toBe(false);
+    expect(existsSync(path.join(standalonePackage, '.next', 'standalone', 'server.js'))).toBe(false);
+  });
+
   it('materializes dependencies of external standalone packages', () => {
     const appDir = makeTemp('mindos-app-standalone-deps-');
     writeStandaloneApp(appDir);
@@ -122,6 +172,419 @@ describe('materializeStandaloneAssets', () => {
     const materializedDependency = path.join(appDir, '.next', 'standalone', 'node_modules', '@sinclair', 'typebox');
     expect(existsSync(materializedDependency)).toBe(true);
     expect(readFileSync(path.join(materializedDependency, 'build', 'index.mjs'), 'utf-8')).toBe('export const Type = {};');
+  });
+
+  it('materializes missing parent package dependencies at the top level by default', () => {
+    const appDir = makeTemp('mindos-app-standalone-top-level-deps-');
+    writeStandaloneApp(appDir);
+
+    const externalPackage = path.join(appDir, '.next', 'standalone', 'node_modules', '@earendil-works', 'pi-ai');
+    mkdirSync(externalPackage, { recursive: true });
+    writeFileSync(path.join(externalPackage, 'package.json'), JSON.stringify({
+      name: '@earendil-works/pi-ai',
+      dependencies: { '@aws-sdk/client-bedrock-runtime': '3.1048.0' },
+    }));
+
+    const fallbackDependency = path.join(appDir, 'node_modules', '@aws-sdk', 'client-bedrock-runtime');
+    mkdirSync(path.join(fallbackDependency, 'dist-cjs'), { recursive: true });
+    writeFileSync(path.join(fallbackDependency, 'package.json'), JSON.stringify({
+      name: '@aws-sdk/client-bedrock-runtime',
+      version: '3.1048.0',
+    }));
+    writeFileSync(path.join(fallbackDependency, 'dist-cjs', 'index.js'), 'module.exports = {};');
+
+    materializeStandaloneAssets(appDir);
+
+    expect(existsSync(path.join(
+      appDir,
+      '.next',
+      'standalone',
+      'node_modules',
+      '@aws-sdk',
+      'client-bedrock-runtime',
+      'dist-cjs',
+      'index.js',
+    ))).toBe(true);
+    expect(existsSync(path.join(
+      externalPackage,
+      'node_modules',
+      '@aws-sdk',
+      'client-bedrock-runtime',
+    ))).toBe(false);
+  });
+
+  it('materializes explicit runtime dependency seeds even when Next did not trace them', () => {
+    const appDir = makeTemp('mindos-app-runtime-seeds-');
+    writeStandaloneApp(appDir);
+
+    const tracedDependency = path.join(appDir, '.next', 'standalone', 'node_modules', '@sinclair', 'typebox');
+    rmSync(tracedDependency, { recursive: true, force: true });
+
+    const fallbackDependency = path.join(appDir, 'node_modules', '@sinclair', 'typebox');
+    mkdirSync(path.join(fallbackDependency, 'build'), { recursive: true });
+    writeFileSync(path.join(fallbackDependency, 'package.json'), JSON.stringify({
+      name: '@sinclair/typebox',
+      version: '0.34.41',
+    }));
+    writeFileSync(path.join(fallbackDependency, 'build', 'index.mjs'), 'export const Type = {};');
+
+    materializeStandaloneAssets(appDir, {
+      runtimeDependencySeeds: ['@sinclair/typebox'],
+    });
+
+    expect(existsSync(path.join(tracedDependency, 'package.json'))).toBe(true);
+    expect(readFileSync(path.join(tracedDependency, 'build', 'index.mjs'), 'utf-8')).toBe('export const Type = {};');
+  });
+
+  it('seeds every built-in PI agent extension package into runtime bundles', () => {
+    expect(BUILTIN_AGENT_EXTENSION_RUNTIME_DEPENDENCY_SEEDS).toEqual([
+      '@juicesharp/rpiv-ask-user-question',
+      'pi-mcp-adapter',
+      'pi-schedule-prompt',
+      'pi-subagents',
+      'pi-web-access',
+    ]);
+    expect(RUNTIME_DEPENDENCY_SEEDS).toEqual(expect.arrayContaining(BUILTIN_AGENT_EXTENSION_RUNTIME_DEPENDENCY_SEEDS));
+  });
+
+  it('seeds IM adapter SDK packages loaded dynamically by channel tools', () => {
+    expect(IM_RUNTIME_DEPENDENCY_SEEDS).toEqual([
+      '@larksuiteoapi/node-sdk',
+      '@slack/web-api',
+      'discord.js',
+      'grammy',
+    ]);
+    expect(RUNTIME_DEPENDENCY_SEEDS).toEqual(expect.arrayContaining(IM_RUNTIME_DEPENDENCY_SEEDS));
+  });
+
+  it('seeds the current PI coding agent package into runtime bundles', () => {
+    expect(RUNTIME_DEPENDENCY_SEEDS).toContain('@earendil-works/pi-coding-agent');
+    expect(RUNTIME_DEPENDENCY_SEEDS).not.toContain('@mariozechner/pi-coding-agent');
+    expect(BUILTIN_AGENT_EXTENSION_RUNTIME_DEPENDENCY_SEEDS).not.toContain('@mariozechner/pi-coding-agent');
+  });
+
+  it('tracks stale pi-schedule-prompt runtime dependencies without seeding them', () => {
+    expect(PI_SCHEDULE_PROMPT_STALE_RUNTIME_DEPENDENCIES).toEqual([
+      '@mariozechner/pi-coding-agent',
+    ]);
+    expect(RUNTIME_DEPENDENCY_SEEDS).not.toEqual(
+      expect.arrayContaining(PI_SCHEDULE_PROMPT_STALE_RUNTIME_DEPENDENCIES),
+    );
+  });
+
+  it('prunes stale pi-schedule-prompt dependencies from the standalone package metadata', () => {
+    const appDir = makeTemp('mindos-app-stale-schedule-prompt-deps-');
+    writeStandaloneApp(appDir);
+
+    const schedulePromptPackage = path.join(appDir, '.next', 'standalone', 'node_modules', 'pi-schedule-prompt');
+    mkdirSync(schedulePromptPackage, { recursive: true });
+    writeFileSync(path.join(schedulePromptPackage, 'package.json'), JSON.stringify({
+      name: 'pi-schedule-prompt',
+      version: '0.1.2',
+      dependencies: {
+        '@mariozechner/pi-coding-agent': 'latest',
+      },
+    }));
+
+    materializeStandaloneAssets(appDir);
+
+    const pkg = JSON.parse(readFileSync(path.join(schedulePromptPackage, 'package.json'), 'utf-8'));
+    expect(pkg.dependencies).not.toHaveProperty('@mariozechner/pi-coding-agent');
+  });
+
+  it('materializes MindOS-owned runtime extension sources into standalone bundles', () => {
+    const appDir = makeTemp('mindos-app-runtime-extension-sources-');
+    writeStandaloneApp(appDir);
+
+    const sourceFiles = [
+      'lib/acp/agent-descriptors.ts',
+      'lib/agent/ask-user-question-bridge-extension.ts',
+      'lib/agent/builtin-extension-runtime.ts',
+      'lib/agent/kb-extension.ts',
+      'lib/agent/mindos-mcp-adapter-extension.ts',
+      'lib/agent/providers.ts',
+      'lib/agent/reconnect.ts',
+      'lib/agent/subagent-ledger-extension.ts',
+      'lib/custom-endpoints.ts',
+      'lib/im/index.ts',
+      'lib/im/executor.ts',
+      'lib/im/adapters/telegram.ts',
+      'lib/im/adapters/feishu.ts',
+      'lib/im/adapters/slack.ts',
+      'lib/im/adapters/discord.ts',
+      'lib/mind-root.ts',
+      'lib/pi-integration/mcp-config.ts',
+      'lib/schedule-prompt/index.ts',
+      'lib/settings.ts',
+    ];
+
+    for (const rel of sourceFiles) {
+      const file = path.join(appDir, rel);
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, `// source ${rel}`);
+    }
+
+    materializeStandaloneAssets(appDir);
+
+    for (const rel of sourceFiles) {
+      expect(readFileSync(path.join(appDir, '.next', 'standalone', rel), 'utf-8')).toBe(`// source ${rel}`);
+    }
+    expect(MINDOS_WEB_RUNTIME_EXTENSION_SOURCE_ENTRIES).toContain('lib/im');
+  });
+
+  it('materializes TS-only built-in extension packages when Next did not trace them', () => {
+    const appDir = makeTemp('mindos-app-runtime-extension-seeds-');
+    writeStandaloneApp(appDir, [
+      '.next/standalone/node_modules/pi-web-access/index.ts',
+    ]);
+
+    const tracedExtension = path.join(appDir, '.next', 'standalone', 'node_modules', 'pi-web-access');
+    rmSync(tracedExtension, { recursive: true, force: true });
+
+    const sourceExtension = path.join(appDir, 'node_modules', 'pi-web-access');
+    mkdirSync(sourceExtension, { recursive: true });
+    writeFileSync(path.join(sourceExtension, 'package.json'), JSON.stringify({
+      name: 'pi-web-access',
+      version: '0.10.7',
+    }));
+    writeFileSync(path.join(sourceExtension, 'index.ts'), 'export default function webAccess() {}');
+
+    materializeStandaloneAssets(appDir, {
+      runtimeDependencySeeds: ['pi-web-access'],
+    });
+
+    expect(existsSync(path.join(tracedExtension, 'package.json'))).toBe(true);
+    expect(readFileSync(path.join(tracedExtension, 'index.ts'), 'utf-8')).toBe('export default function webAccess() {}');
+  });
+
+  it('prunes pi-web-access demo media from standalone runtime bundles', () => {
+    const appDir = makeTemp('mindos-app-runtime-extension-assets-');
+    writeStandaloneApp(appDir);
+
+    const webAccessPackage = path.join(appDir, '.next', 'standalone', 'node_modules', 'pi-web-access');
+    mkdirSync(webAccessPackage, { recursive: true });
+    writeFileSync(path.join(webAccessPackage, 'package.json'), JSON.stringify({
+      name: 'pi-web-access',
+      version: '0.10.7',
+    }));
+    writeFileSync(path.join(webAccessPackage, 'index.ts'), 'export default function webAccess() {}');
+    writeFileSync(path.join(webAccessPackage, 'pi-web-fetch-demo.mp4'), 'demo-video');
+    writeFileSync(path.join(webAccessPackage, 'banner.png'), 'demo-banner');
+
+    materializeStandaloneAssets(appDir);
+
+    expect(existsSync(path.join(webAccessPackage, 'package.json'))).toBe(true);
+    expect(readFileSync(path.join(webAccessPackage, 'index.ts'), 'utf-8')).toBe('export default function webAccess() {}');
+    expect(existsSync(path.join(webAccessPackage, 'pi-web-fetch-demo.mp4'))).toBe(false);
+    expect(existsSync(path.join(webAccessPackage, 'banner.png'))).toBe(false);
+  });
+
+  it('does not copy package-internal publish artifacts when materializing runtime seeds', () => {
+    const appDir = makeTemp('mindos-app-runtime-seed-artifacts-');
+    writeStandaloneApp(appDir);
+
+    const sourcePackage = path.join(appDir, 'node_modules', '@geminilight', 'mindos');
+    mkdirSync(path.join(sourcePackage, 'dist'), { recursive: true });
+    mkdirSync(path.join(sourcePackage, '_standalone'), { recursive: true });
+    mkdirSync(path.join(sourcePackage, '__node_modules', 'huge-runtime'), { recursive: true });
+    mkdirSync(path.join(sourcePackage, '__next'), { recursive: true });
+    mkdirSync(path.join(sourcePackage, '.turbo'), { recursive: true });
+    mkdirSync(path.join(sourcePackage, 'node_modules', 'nested-runtime'), { recursive: true });
+    writeFileSync(path.join(sourcePackage, 'package.json'), JSON.stringify({
+      name: '@geminilight/mindos',
+      version: '1.1.36',
+    }));
+    writeFileSync(path.join(sourcePackage, 'dist', 'index.js'), 'export {};');
+    writeFileSync(path.join(sourcePackage, '_standalone', 'server.js'), 'standalone');
+    writeFileSync(path.join(sourcePackage, '__node_modules', 'huge-runtime', 'index.js'), 'huge');
+    writeFileSync(path.join(sourcePackage, '__next', 'server.js'), 'next');
+    writeFileSync(path.join(sourcePackage, '.turbo', 'cache.bin'), 'cache');
+    writeFileSync(path.join(sourcePackage, 'node_modules', 'nested-runtime', 'index.js'), 'nested');
+
+    materializeStandaloneAssets(appDir, {
+      runtimeDependencySeeds: ['@geminilight/mindos'],
+    });
+
+    const bundledPackage = path.join(appDir, '.next', 'standalone', 'node_modules', '@geminilight', 'mindos');
+    expect(existsSync(path.join(bundledPackage, 'package.json'))).toBe(true);
+    expect(existsSync(path.join(bundledPackage, 'dist', 'index.js'))).toBe(true);
+    expect(existsSync(path.join(bundledPackage, '_standalone'))).toBe(false);
+    expect(existsSync(path.join(bundledPackage, '__node_modules'))).toBe(false);
+    expect(existsSync(path.join(bundledPackage, '__next'))).toBe(false);
+    expect(existsSync(path.join(bundledPackage, '.turbo'))).toBe(false);
+    expect(existsSync(path.join(bundledPackage, 'node_modules'))).toBe(false);
+  });
+
+  it('materializes declared dependencies without copying their nested node_modules payloads', () => {
+    const appDir = makeTemp('mindos-app-runtime-seed-node-modules-');
+    writeStandaloneApp(appDir);
+
+    const sourceParent = path.join(appDir, 'node_modules', '@earendil-works', 'pi-ai');
+    const sourceDependency = path.join(sourceParent, 'node_modules', '@aws-sdk', 'client-bedrock-runtime');
+    mkdirSync(path.join(sourceParent, 'dist'), { recursive: true });
+    mkdirSync(path.join(sourceDependency, 'dist-cjs'), { recursive: true });
+    mkdirSync(path.join(sourceDependency, 'node_modules', 'duplicated-sdk-tree'), { recursive: true });
+    writeFileSync(path.join(sourceParent, 'package.json'), JSON.stringify({
+      name: '@earendil-works/pi-ai',
+      version: '0.78.1',
+      dependencies: { '@aws-sdk/client-bedrock-runtime': '3.1048.0' },
+    }));
+    writeFileSync(path.join(sourceParent, 'dist', 'index.js'), 'export {};');
+    writeFileSync(path.join(sourceDependency, 'package.json'), JSON.stringify({
+      name: '@aws-sdk/client-bedrock-runtime',
+      version: '3.1048.0',
+    }));
+    writeFileSync(path.join(sourceDependency, 'dist-cjs', 'index.js'), 'module.exports = {};');
+    writeFileSync(path.join(sourceDependency, 'node_modules', 'duplicated-sdk-tree', 'huge.js'), 'huge');
+
+    materializeStandaloneAssets(appDir, {
+      runtimeDependencySeeds: ['@earendil-works/pi-ai'],
+    });
+
+    const bundledParent = path.join(appDir, '.next', 'standalone', 'node_modules', '@earendil-works', 'pi-ai');
+    const bundledDependency = path.join(
+      appDir,
+      '.next',
+      'standalone',
+      'node_modules',
+      '@aws-sdk',
+      'client-bedrock-runtime',
+    );
+    expect(existsSync(path.join(bundledParent, 'dist', 'index.js'))).toBe(true);
+    expect(existsSync(path.join(bundledDependency, 'dist-cjs', 'index.js'))).toBe(true);
+    expect(existsSync(path.join(bundledDependency, 'node_modules'))).toBe(false);
+    expect(existsSync(path.join(
+      bundledParent,
+      'node_modules',
+      '@aws-sdk',
+      'client-bedrock-runtime',
+    ))).toBe(false);
+  });
+
+  it('prunes direct development tooling before dependency closure checks', () => {
+    const appDir = makeTemp('mindos-app-dev-tooling-prune-');
+    writeStandaloneApp(appDir);
+
+    const standaloneNodeModules = path.join(appDir, '.next', 'standalone', 'node_modules');
+    const devPackages = {
+      eslint: { '@eslint/js': '^9.39.4' },
+      'eslint-plugin-react-hooks': { '@babel/core': '^7.24.4' },
+      tsx: { esbuild: '~0.27.0' },
+      'typescript-eslint': { '@typescript-eslint/parser': '8.59.0' },
+      vitest: { vite: '^5.0.0' },
+    };
+    for (const [packageName, dependencies] of Object.entries(devPackages)) {
+      const packageDir = path.join(standaloneNodeModules, packageName);
+      mkdirSync(packageDir, { recursive: true });
+      writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({
+        name: packageName,
+        version: '1.0.0',
+        dependencies,
+      }));
+    }
+    const eslintScope = path.join(standaloneNodeModules, '@eslint');
+    mkdirSync(path.join(eslintScope, 'config-array'), { recursive: true });
+    writeFileSync(path.join(eslintScope, 'config-array', 'package.json'), JSON.stringify({
+      name: '@eslint/config-array',
+      version: '1.0.0',
+    }));
+    const nestedVitest = path.join(standaloneNodeModules, 'runtime-package', 'node_modules', 'vitest');
+    mkdirSync(nestedVitest, { recursive: true });
+    writeFileSync(path.join(nestedVitest, 'package.json'), JSON.stringify({
+      name: 'vitest',
+      version: '2.1.9',
+      dependencies: { vite: '^5.0.0' },
+    }));
+
+    materializeStandaloneAssets(appDir);
+
+    for (const packageName of Object.keys(devPackages)) {
+      expect(existsSync(path.join(standaloneNodeModules, packageName))).toBe(false);
+    }
+    expect(existsSync(eslintScope)).toBe(false);
+    expect(existsSync(nestedVitest)).toBe(false);
+  });
+
+  it('does not require runtime @types packages when production packages declare them as dependencies', () => {
+    const appDir = makeTemp('mindos-app-runtime-types-');
+    writeStandaloneApp(appDir);
+
+    const standaloneNodeModules = path.join(appDir, '.next', 'standalone', 'node_modules');
+    const runtimePackage = path.join(standaloneNodeModules, '@discordjs', 'ws');
+    mkdirSync(runtimePackage, { recursive: true });
+    writeFileSync(path.join(runtimePackage, 'package.json'), JSON.stringify({
+      name: '@discordjs/ws',
+      version: '1.2.3',
+      dependencies: { '@types/ws': '^8.5.10' },
+    }));
+
+    const sourceTypes = path.join(appDir, 'node_modules', '@types', 'ws');
+    mkdirSync(sourceTypes, { recursive: true });
+    writeFileSync(path.join(sourceTypes, 'package.json'), JSON.stringify({
+      name: '@types/ws',
+      version: '8.5.10',
+    }));
+
+    materializeStandaloneAssets(appDir);
+
+    expect(existsSync(path.join(standaloneNodeModules, '@types', 'ws', 'package.json'))).toBe(false);
+  });
+
+  it('does not copy the repo root when resolving package names that also exist as Node builtins', () => {
+    const repoRoot = makeTemp('mindos-repo-root-');
+    const appDir = path.join(repoRoot, 'packages', 'web');
+    mkdirSync(appDir, { recursive: true });
+    writeStandaloneApp(appDir);
+    writeFileSync(path.join(repoRoot, 'package.json'), JSON.stringify({
+      name: 'mindos-dev',
+      version: '1.1.3',
+    }));
+
+    const parentPackage = path.join(appDir, '.next', 'standalone', 'node_modules', 'readable-stream');
+    mkdirSync(parentPackage, { recursive: true });
+    writeFileSync(path.join(parentPackage, 'package.json'), JSON.stringify({
+      name: 'readable-stream',
+      version: '2.3.8',
+      dependencies: { string_decoder: '~1.1.1' },
+    }));
+
+    const sourceStringDecoder = path.join(
+      repoRoot,
+      'node_modules',
+      '.pnpm',
+      'string_decoder@1.1.1',
+      'node_modules',
+      'string_decoder',
+    );
+    mkdirSync(path.join(sourceStringDecoder, 'lib'), { recursive: true });
+    writeFileSync(path.join(sourceStringDecoder, 'package.json'), JSON.stringify({
+      name: 'string_decoder',
+      version: '1.1.1',
+      dependencies: { 'safe-buffer': '~5.1.0' },
+    }));
+    writeFileSync(path.join(sourceStringDecoder, 'lib', 'string_decoder.js'), 'exports.StringDecoder = function() {};');
+
+    const sourceSafeBuffer = path.join(
+      repoRoot,
+      'node_modules',
+      '.pnpm',
+      'safe-buffer@5.1.2',
+      'node_modules',
+      'safe-buffer',
+    );
+    mkdirSync(sourceSafeBuffer, { recursive: true });
+    writeFileSync(path.join(sourceSafeBuffer, 'package.json'), JSON.stringify({
+      name: 'safe-buffer',
+      version: '5.1.2',
+    }));
+    writeFileSync(path.join(sourceSafeBuffer, 'index.js'), 'module.exports = Buffer;');
+
+    materializeStandaloneAssets(appDir);
+
+    const bundledStringDecoder = path.join(appDir, '.next', 'standalone', 'node_modules', 'string_decoder');
+    expect(JSON.parse(readFileSync(path.join(bundledStringDecoder, 'package.json'), 'utf-8')).name).toBe('string_decoder');
+    expect(existsSync(path.join(bundledStringDecoder, 'packages'))).toBe(false);
+    expect(existsSync(path.join(bundledStringDecoder, 'lib', 'string_decoder.js'))).toBe(true);
   });
 
   it('materializes transitive dependencies introduced by Next runtime packages', () => {
@@ -161,6 +624,35 @@ describe('materializeStandaloneAssets', () => {
     const nanoidPackage = path.join(appDir, '.next', 'standalone', 'node_modules', 'nanoid', 'package.json');
     expect(JSON.parse(readFileSync(postcssPackage, 'utf-8')).version).toBe('8.4.31');
     expect(JSON.parse(readFileSync(nanoidPackage, 'utf-8')).version).toBe('3.3.8');
+  });
+
+  it('does not materialize optional Next peer dependencies into the runtime', () => {
+    const appDir = makeTemp('mindos-app-next-optional-peer-deps-');
+    writeStandaloneApp(appDir);
+
+    const sourceNext = path.join(appDir, 'node_modules', 'next');
+    const standaloneNext = path.join(appDir, '.next', 'standalone', 'node_modules', 'next');
+    for (const packageDir of [sourceNext, standaloneNext]) {
+      mkdirSync(packageDir, { recursive: true });
+      writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({
+        name: 'next',
+        version: '16.1.6',
+        peerDependencies: { '@playwright/test': '^1.51.1' },
+        peerDependenciesMeta: { '@playwright/test': { optional: true } },
+      }));
+      writeFileSync(path.join(packageDir, 'index.js'), 'module.exports = {};');
+    }
+
+    const sourcePlaywright = path.join(appDir, 'node_modules', '@playwright', 'test');
+    mkdirSync(sourcePlaywright, { recursive: true });
+    writeFileSync(path.join(sourcePlaywright, 'package.json'), JSON.stringify({
+      name: '@playwright/test',
+      version: '1.51.1',
+    }));
+
+    materializeStandaloneAssets(appDir);
+
+    expect(existsSync(path.join(appDir, '.next', 'standalone', 'node_modules', '@playwright', 'test'))).toBe(false);
   });
 
   it('fails when an external standalone package dependency cannot be materialized', () => {
@@ -385,6 +877,40 @@ describe('materializeStandaloneAssets', () => {
     }
   });
 
+  it('does not bundle Claude Agent SDK native platform packages', () => {
+    const appDir = makeTemp('mindos-app-claude-sdk-native-prune-');
+    writeStandaloneApp(appDir);
+
+    const nativePackage = path.join(
+      appDir,
+      '.next',
+      'standalone',
+      'node_modules',
+      '@anthropic-ai',
+      'claude-agent-sdk-darwin-arm64',
+    );
+    mkdirSync(nativePackage, { recursive: true });
+    writeFileSync(path.join(nativePackage, 'package.json'), JSON.stringify({
+      name: '@anthropic-ai/claude-agent-sdk-darwin-arm64',
+      version: '0.3.170',
+    }));
+    writeFileSync(path.join(nativePackage, 'claude'), 'native-binary-placeholder');
+
+    materializeStandaloneAssets(appDir);
+
+    expect(existsSync(nativePackage)).toBe(false);
+  });
+
+  it('prunes pnpm-layout Claude Agent SDK native package directories', () => {
+    const root = makeTemp('mindos-claude-sdk-native-pnpm-prune-');
+    const nativePackage = path.join(root, 'node_modules', '.pnpm', '@anthropic-ai+claude-agent-sdk-darwin-arm64@0.3.170');
+    mkdirSync(nativePackage, { recursive: true });
+    writeFileSync(path.join(nativePackage, 'package.json'), '{}');
+
+    expect(pruneClaudeAgentSdkNativePackages(root)).toBe(1);
+    expect(existsSync(nativePackage)).toBe(false);
+  });
+
   it('keeps optional local embedding runtime packages when explicitly requested', () => {
     const appDir = makeTemp('mindos-app-optional-embedding-keep-');
     writeStandaloneApp(appDir);
@@ -472,5 +998,52 @@ describe('copyAppForBundledRuntime', () => {
     const copiedPackage = path.join(dest, '.next', 'standalone', 'node_modules', '@huggingface', 'transformers');
     expect(lstatSync(copiedPackage).isSymbolicLink()).toBe(false);
     expect(readFileSync(path.join(copiedPackage, 'dist', 'index.js'), 'utf-8')).toBe('module.exports = {};');
+  });
+
+  it('materializes Turbopack hashed externals as real directories (not symlinks)', () => {
+    const src = makeTemp('mindos-src-hashed-');
+    const dest = path.join(makeTemp('mindos-dest-hashed-'), 'app');
+    const hashed = '@mariozechner/pi-agent-core-805d1afb58d9a138';
+    const originalDir = path.join(src, '.next', 'standalone', 'node_modules', '@mariozechner', 'pi-agent-core');
+    const chunksDir = path.join(src, '.next', 'standalone', '.next', 'server', 'chunks');
+
+    mkdirSync(path.join(originalDir, 'dist'), { recursive: true });
+    writeFileSync(path.join(originalDir, 'package.json'), '{"name":"@mariozechner/pi-agent-core","main":"dist/index.js"}');
+    writeFileSync(path.join(originalDir, 'dist', 'index.js'), 'module.exports = 1;');
+    mkdirSync(chunksDir, { recursive: true });
+    writeFileSync(path.join(chunksDir, 'page.js'), `module.exports = require("${hashed}");`);
+
+    copyAppForBundledRuntime(src, dest);
+
+    const hashedDir = path.join(dest, '.next', 'standalone', 'node_modules', '@mariozechner', 'pi-agent-core-805d1afb58d9a138');
+    // Real directory copy: survives the desktop symlink sweep, works on Windows,
+    // and keeps subpath requires (pkg-<hash>/dist/x) resolvable
+    expect(lstatSync(hashedDir).isDirectory()).toBe(true);
+    expect(lstatSync(hashedDir).isSymbolicLink()).toBe(false);
+    expect(readFileSync(path.join(hashedDir, 'dist', 'index.js'), 'utf-8')).toBe('module.exports = 1;');
+    expect(readFileSync(path.join(hashedDir, 'package.json'), 'utf-8')).toContain('pi-agent-core');
+  });
+
+  it('prunes pi-web-access demo media from bundled runtime copies', () => {
+    const src = makeTemp('mindos-src-runtime-assets-');
+    const dest = path.join(makeTemp('mindos-dest-runtime-assets-'), 'app');
+    const webAccessPackage = path.join(src, '.next', 'standalone', 'node_modules', 'pi-web-access');
+
+    mkdirSync(webAccessPackage, { recursive: true });
+    writeFileSync(path.join(webAccessPackage, 'package.json'), JSON.stringify({
+      name: 'pi-web-access',
+      version: '0.10.7',
+    }));
+    writeFileSync(path.join(webAccessPackage, 'index.ts'), 'export default function webAccess() {}');
+    writeFileSync(path.join(webAccessPackage, 'pi-web-fetch-demo.mp4'), 'demo-video');
+    writeFileSync(path.join(webAccessPackage, 'banner.png'), 'demo-banner');
+
+    copyAppForBundledRuntime(src, dest);
+
+    const copiedPackage = path.join(dest, '.next', 'standalone', 'node_modules', 'pi-web-access');
+    expect(existsSync(path.join(copiedPackage, 'package.json'))).toBe(true);
+    expect(readFileSync(path.join(copiedPackage, 'index.ts'), 'utf-8')).toBe('export default function webAccess() {}');
+    expect(existsSync(path.join(copiedPackage, 'pi-web-fetch-demo.mp4'))).toBe(false);
+    expect(existsSync(path.join(copiedPackage, 'banner.png'))).toBe(false);
   });
 });

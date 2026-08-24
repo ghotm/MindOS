@@ -4,24 +4,17 @@ import { NextRequest } from 'next/server';
 import {
   handleMcpInstallPost,
   type MindosMcpAgentDef,
-  type MindosSkillAgentRegistration,
 } from '@geminilight/mindos/server';
-import { MCP_AGENTS, SKILL_AGENT_REGISTRY, resolveSkillWorkspaceProfile } from '@/lib/mcp-agents';
-import { readSettings, recordSkillInstall } from '@/lib/settings';
-import { copyDir, dirExists } from '@/lib/file-ops';
-import { getProjectRoot } from '@/lib/project-root';
+import { MCP_AGENTS, detectAgentPresence } from '@/lib/mcp-agents';
+import { readSettings } from '@/lib/settings';
 import { toNextResponse } from '../../_mindos-adapter';
 
 export async function POST(req: NextRequest) {
   return toNextResponse(await handleMcpInstallPost(await req.json(), {
     agents: MCP_AGENTS as unknown as Record<string, MindosMcpAgentDef>,
-    skillAgentRegistry: SKILL_AGENT_REGISTRY as unknown as Record<string, MindosSkillAgentRegistration>,
+    requireAgentPresence: true,
+    detectAgentPresence,
     readSettings,
-    recordSkillInstall,
-    resolveSkillWorkspaceProfile,
-    copyDirectory: copyDir,
-    directoryExists: dirExists,
-    projectRoot: getProjectRoot(),
     env: process.env,
   }));
 }

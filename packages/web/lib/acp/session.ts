@@ -3,7 +3,9 @@ export {
   closeAllSessions,
   closeSession,
   getActiveSessions,
+  getActiveSessionSnapshots,
   getSession,
+  getSessionSnapshot,
   listSessions,
   prompt,
   promptStream,
@@ -19,27 +21,58 @@ export type {
 import {
   createSession as createSessionCore,
   createSessionFromEntry as createSessionFromEntryCore,
+  listSessionsForAgent as listSessionsForAgentCore,
   loadSession as loadSessionCore,
+  findUserOverride,
   type AcpRegistryEntry,
   type AcpSessionOptions,
 } from '@geminilight/mindos/protocols/acp';
+import { resolveAgentRuntimeEnvOverlay } from '@geminilight/mindos/agent/runtime/runtime-env';
 import { readSettings } from '@/lib/settings';
+import { readMcpConfig } from '@/lib/pi-integration/mcp-config';
 
-function withAcpOverrides(options?: AcpSessionOptions): AcpSessionOptions {
+function withAcpOverrides(agentId: string, options?: AcpSessionOptions): AcpSessionOptions {
+  const settings = readSettings();
+  const overrideEnv = findUserOverride(agentId, options?.overrides ?? settings.acpAgents)?.env ?? {};
+  const runtimeEnvOverlay = omitEnvKeys(
+    resolveAgentRuntimeEnvOverlay({ settings: settings.agentRuntimeEnv }).overlay,
+    overrideEnv,
+  );
   return {
     ...options,
-    overrides: options?.overrides ?? readSettings().acpAgents,
+    env: { ...runtimeEnvOverlay, ...(options?.env ?? {}) },
+    overrides: options?.overrides ?? settings.acpAgents,
+    mcpConfig: options?.mcpConfig ?? readMcpConfig(),
+    inheritMcpServers: options?.inheritMcpServers ?? true,
   };
 }
 
 export function createSession(agentId: string, options?: AcpSessionOptions) {
-  return createSessionCore(agentId, withAcpOverrides(options));
+  return createSessionCore(agentId, withAcpOverrides(agentId, options));
 }
 
 export function createSessionFromEntry(entry: AcpRegistryEntry, options?: AcpSessionOptions) {
-  return createSessionFromEntryCore(entry, withAcpOverrides(options));
+  return createSessionFromEntryCore(entry, withAcpOverrides(entry.id, options));
 }
 
 export function loadSession(agentId: string, existingSessionId: string, options?: AcpSessionOptions) {
-  return loadSessionCore(agentId, existingSessionId, withAcpOverrides(options));
+  return loadSessionCore(agentId, existingSessionId, withAcpOverrides(agentId, options));
+}
+
+export function listSessionsForAgent(
+  agentId: string,
+  options?: AcpSessionOptions & { cursor?: string; cwd?: string },
+) {
+  return listSessionsForAgentCore(agentId, withAcpOverrides(agentId, options));
+}
+
+function omitEnvKeys(
+  env: Record<string, string>,
+  reserved: Record<string, string>,
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!(key in reserved)) next[key] = value;
+  }
+  return next;
 }

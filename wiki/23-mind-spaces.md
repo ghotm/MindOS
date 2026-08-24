@@ -2,19 +2,19 @@
 
 ## 定义
 
-> **心智空间是用户心智模型的具象化分区，每个空间有独立的 Agent 行为规则，让 AI 在不同认知语境下自动切换工作模式。**
+> **心智空间是带有 `INSTRUCTION.md` 的本地目录：它仍然是用户可读可改的文件夹，但额外给 Agent 提供了进入这个目录时应遵守的行为规则。**
 
-Space ≠ 文件夹。文件夹是被动容器，Space 是 **Agent 执行上下文**。
+Space 不是隐藏平台对象，也不依赖全局 registry。目录和 `INSTRUCTION.md` 是主源；frontmatter 只保存轻量来源信息，正文定义 Agent 规则。
 
 ## Space 与文件夹的本质区别
 
 | 维度 | 文件夹 (Finder/Obsidian) | 心智空间 (MindOS Space) |
 |------|------------------------|----------------------|
-| **本质** | 被动容器，存放文件 | Agent 执行上下文——AI 进入时切换行为模式 |
+| **本质** | 被动容器，存放文件 | 带 Agent 规则的本地目录 |
 | **智能** | 没有 | 有 INSTRUCTION.md，定义"在这里 Agent 该怎么做" |
 | **边界** | 纯物理分区 | 认知边界——"这是我的身份信息" vs "这是我的工作流" |
 | **交互** | 打开 → 看到文件列表 | 进入 → Agent 理解上下文 → 按规则执行 |
-| **结构** | 无约束 | 推荐 Schema（如 Profile 有 Identity/Focus/Preferences） |
+| **结构** | 无约束 | 可选推荐结构，目录本身仍可自由组织 |
 | **关联** | 无语义关联 | 跨空间引用（Workflows 引用 Profile 数据） |
 
 ## Space 的六个维度
@@ -28,7 +28,41 @@ Space ≠ 文件夹。文件夹是被动容器，Space 是 **Agent 执行上下�
 | **Cross-ref** | 空间之间可以互相引用 | Markdown 链接 + backlinks |
 | **Health** | 空间有活跃度、完整度 | 首页 Space 卡片展示文件数 |
 
-## 预置的 6 个心智空间
+## Mind System 空间
+
+MindOS 的 `道 / 法 / 术 / 器` 是系统内置的四个 Space。它们不是隐藏配置里的模块账本，而是真实目录加 `INSTRUCTION.md` frontmatter：
+
+```text
+内置语义槽位 -> 用户本地目录
+
+dao -> MIND_DAO/
+fa  -> MIND_FA/
+shu -> MIND_SHU/
+qi  -> MIND_QI/
+```
+
+实现原则：
+
+- 可见目录是用户拥有的 Markdown 内容，保持顶层可见、可读、可改。
+- 每个目录的 `INSTRUCTION.md` 写入统一 `mindSpace` frontmatter：
+
+  ```yaml
+  mindSpace:
+    id: dao
+    type: system
+    source: builtin
+    version: 1
+    locale: zh
+    order: 10
+  ```
+
+- UI 通过 `mindSpace.id/type/source/order` 识别和排序这些系统 Space。
+- 没有 `.mindos/modules/mind-system.json`，也不再用隐藏配置表达启用、禁用或绑定路径。
+- 老用户打开 App 时，系统会非破坏性补齐缺失的 `MIND_DAO/MIND_FA/MIND_SHU/MIND_QI` scaffold；已有文件不会被移动或覆盖。
+- `05 势`、`99 验` 只作为普通文件夹存在，不进入 Mind System 特殊槽位。
+- Agent routing 应识别稳定 `mindSpace.id`（如 `dao`），再使用该目录作为当前 Space 上下文。
+
+## 工作型空间模板
 
 | Space | 认知职能 | Agent 在这里做什么 | 描述 |
 |-------|---------|------------------|------|
@@ -78,8 +112,11 @@ AI 不只是处理内容，还**理解内容属于哪个认知空间**，并提�
 
 ## 技术实现
 
-- 后端自动脚手架：`app/lib/core/space-scaffold.ts`
-- 首页数据层：`app/app/page.tsx` → `getTopLevelDirs()`
-- 首页视图层：`app/components/HomeContent.tsx` → Section 2: Spaces
+- 显式 Space 模板：`packages/web/lib/core/space-scaffold.ts`
+- Space 创建入口：`packages/web/lib/core/create-space.ts`
+- Space 转换入口：`packages/web/lib/core/fs-ops.ts` → `convertToSpace()`
+- 首页数据层：`packages/web/lib/space-records.ts`
+- 首页视图层：`packages/web/components/WikiHomeContent.tsx`
 - Space 描述提取：从 `{space}/README.md` 读取标题后第一段非空文本
-- Spec：`wiki/specs/spec-space-auto-scaffolding.md`
+
+普通文件夹不会因为在其中创建文件而被自动升级成 Space；只有用户显式创建 Space 或把目录转换为 Space 时，系统才会补 `INSTRUCTION.md` / `README.md`。

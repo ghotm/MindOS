@@ -1,10 +1,12 @@
 'use client';
 
-import { useState } from 'react';
 import { ChevronDown, ChevronRight, Trash2, Pencil, Loader2, AlertCircle } from 'lucide-react';
 import { Toggle } from './Primitives';
 import dynamic from 'next/dynamic';
-import type { SkillInfo } from './types';
+import { isAgentOwnedSkillOrigin, type SkillInfo, type SkillMatrix, type SettingsMcpMessages } from './types';
+import { isBuiltinSkillOrigin, skillSourceFolder } from '@/lib/skill-source';
+import SkillAgentChips from './McpSkillAgentChips';
+import { Button } from '@/components/ui/button';
 
 const MarkdownView = dynamic(() => import('@/components/MarkdownView'), { ssr: false });
 
@@ -33,15 +35,21 @@ interface SkillRowProps {
   fullContent: Record<string, string>;
   loadingContent: string | null;
   loadErrors: Record<string, string>;
-  m: Record<string, any> | undefined;
+  matrix: SkillMatrix | null;
+  linkingCell: string | null;
+  onAgentLink: (name: string, agentKey: string, action: 'link' | 'unlink' | 'disable-native' | 'enable-native') => void;
+  m: SettingsMcpMessages | undefined;
 }
 
 export default function SkillRow({
   skill, expanded, onExpand, onToggle, onDelete,
   onEditStart, onEditSave, onEditCancel,
   editing, editContent, setEditContent, editError, saving,
-  fullContent, loadingContent, loadErrors, m,
+  fullContent, loadingContent, loadErrors,
+  matrix, linkingCell, onAgentLink, m,
 }: SkillRowProps) {
+  const rowError = loadErrors[skill.name];
+
   return (
     <div className="border border-border rounded-lg overflow-hidden">
       <div
@@ -53,15 +61,39 @@ export default function SkillRow({
         <span className={`text-2xs px-1.5 py-0.5 rounded ${
           skill.source === 'builtin' ? 'bg-muted text-muted-foreground' : 'bg-[var(--amber-subtle)] text-[var(--amber-text)]'
         }`}>
-          {skill.source === 'builtin' ? (m?.skillBuiltin ?? 'Built-in') : (m?.skillUser ?? 'Custom')}
+          {isAgentOwnedSkillOrigin(skill.origin)
+            ? (m?.skillAgentOwned ?? 'Agent-owned')
+            : skill.source === 'builtin' ? (m?.skillBuiltin ?? 'Built-in') : (m?.skillUser ?? 'Custom')}
         </span>
+        {!isBuiltinSkillOrigin(skill.origin) && skill.path && (
+          <span className="text-2xs font-mono text-muted-foreground/70 truncate max-w-[180px] shrink-0" title={skill.path}>
+            {skillSourceFolder(skill.path, skill.name)}
+          </span>
+        )}
         <Toggle size="sm" checked={skill.enabled} onClick={(e: React.MouseEvent) => { e.stopPropagation(); onToggle(skill.name, !skill.enabled); }} />
       </div>
+
+      {rowError && (
+        <div className="px-3 pb-2 text-2xs text-destructive flex items-center gap-1">
+          <AlertCircle size={10} />
+          <span>{rowError}</span>
+        </div>
+      )}
 
       {expanded && (
         <div className="px-3 py-2 border-t border-border text-xs space-y-2 bg-muted/20">
           <p className="text-muted-foreground">{skill.description || 'No description'}</p>
           <p className="text-muted-foreground font-mono text-2xs">{skill.path}</p>
+
+          {matrix && (
+            <SkillAgentChips
+              skillName={skill.name}
+              matrix={matrix}
+              linkingCell={linkingCell}
+              onAgentLink={onAgentLink}
+              m={m}
+            />
+          )}
 
           {loadingContent === skill.name ? (
             <div className="flex items-center gap-1.5 text-muted-foreground">
@@ -103,14 +135,16 @@ export default function SkillRow({
                     className="w-full px-2.5 py-1.5 text-xs rounded-md border border-border bg-background text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y font-mono"
                   />
                   <div className="flex items-center gap-2">
-                    <button
+                    <Button
+                      variant="amber"
+                      size="xs"
                       onClick={() => onEditSave(skill.name)}
                       disabled={saving}
-                      className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-md disabled:opacity-40 disabled:cursor-not-allowed transition-colors bg-[var(--amber)] text-[var(--amber-foreground)]"
+                      className="gap-1 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       {saving && <Loader2 size={10} className="animate-spin" />}
                       {m?.saveSkill ?? 'Save'}
-                    </button>
+                    </Button>
                     <button
                       onClick={onEditCancel}
                       className="px-2.5 py-1 text-xs rounded-md border border-border text-muted-foreground hover:text-foreground transition-colors"
@@ -131,11 +165,6 @@ export default function SkillRow({
                 </div>
               )}
             </div>
-          ) : loadErrors[skill.name] ? (
-            <p className="text-2xs text-destructive flex items-center gap-1">
-              <AlertCircle size={10} />
-              {loadErrors[skill.name]}
-            </p>
           ) : null}
         </div>
       )}

@@ -110,7 +110,9 @@ ACP  → IDE 集成（VS Code、Cursor 内调用 MindOS）
 
 ```bash
 # Layer 1: Shortcuts（人类/Agent 友好）
-mindos ask "总结今天的笔记"
+mindos
+mindos "总结今天的笔记"
+mindos -p "总结今天的笔记"
 mindos organize ~/Downloads/paper.pdf
 mindos search "RAG 实现方案"
 
@@ -122,7 +124,7 @@ mindos space create "项目文档"
 
 # Layer 3: Raw API（开发者/高级 Agent）
 mindos api GET /api/files
-mindos api POST /api/ask --body '{"question":"..."}'
+mindos api POST /api/agent/sessions/cli-demo/turns --body '{"messages":[{"role":"user","content":"..."}],"agentMode":"default","permissionMode":"ask"}'
 ```
 
 ### 核心命令（短期 1-2 周）
@@ -130,8 +132,9 @@ mindos api POST /api/ask --body '{"question":"..."}'
 ```
 mindos file [create|read|delete|rename|move|list|search]
 mindos space [create|list|delete]
-mindos ask <question>
-mindos agent [list|run|inspect]
+mindos [task]
+mindos agent [-p <task>]
+mindos agent [list|info|stats]
 mindos config [get|set]
 mindos status
 ```

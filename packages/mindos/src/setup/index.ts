@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { homedir, platform } from 'node:os';
 import path from 'node:path';
 import { json, type MindosServerResponse } from '../server/response.js';
@@ -25,9 +26,22 @@ export type MindosSetupGuideState = {
   template: 'en' | 'zh' | 'empty';
   step1Done: boolean;
   askedAI: boolean;
+  agentPromptDone: boolean;
   nextStepIndex: number;
   walkthroughStep?: number;
   walkthroughDismissed?: boolean;
+};
+
+export const INITIAL_SPACE_IDS = ['life', 'social', 'learning', 'content', 'product', 'research'] as const;
+
+export type MindosSetupInitialSpaceId = typeof INITIAL_SPACE_IDS[number];
+export type MindosSetupInitialSpaceLocale = 'en' | 'zh';
+
+export type MindosSetupInitialSpaceInstallResult = {
+  id: MindosSetupInitialSpaceId;
+  locale: MindosSetupInitialSpaceLocale;
+  copied: string[];
+  skipped: string[];
 };
 
 export type MindosSetupSettings = {
@@ -37,6 +51,7 @@ export type MindosSetupSettings = {
   mcpPort?: number;
   authToken?: string;
   webPassword?: string;
+  webSessionSecret?: string;
   startMode?: 'dev' | 'start' | 'daemon';
   setupPending?: boolean;
   setupPort?: number;
@@ -57,9 +72,15 @@ export type MindosSetupServices = {
   homeDir?: () => string;
   platform?: () => NodeJS.Platform | string;
   pathSep?: () => string;
+  env?: () => Record<string, string | undefined>;
   existsSync?: (target: string) => boolean;
   mkdirSync?: (target: string) => void;
   applyTemplate?: (template: string, mindRoot: string) => { ok: true } | { error: string; status?: number };
+  applyInitialSpaces?: (
+    initialSpaces: MindosSetupInitialSpaceId[],
+    mindRoot: string,
+    locale: MindosSetupInitialSpaceLocale,
+  ) => { ok: true; installed: MindosSetupInitialSpaceInstallResult[] } | { error: string; status?: number };
   expandPathHome?: (input: string) => string;
   validateMindRootPath?: (absPath: string) => PathValidationResult;
   isProviderId?: (value: string) => boolean;
@@ -80,6 +101,14 @@ export type MindosSetupStatePayload = {
   guideState: MindosSetupGuideState | null;
 };
 
+export type MindosSetupApplyPayload = {
+  ok: true;
+  portChanged: boolean;
+  needsRestart: boolean;
+  newPort: number;
+  installedInitialSpaces?: MindosSetupInitialSpaceInstallResult[];
+};
+
 const DEFAULT_PROVIDER_PRESETS: Record<string, MindosSetupProviderPreset> = {
   anthropic: { name: 'Anthropic', defaultModel: 'claude-sonnet-4-6' },
   openai: { name: 'OpenAI', defaultModel: 'gpt-5.4' },
@@ -97,13 +126,23 @@ const DEFAULT_PROVIDER_PRESETS: Record<string, MindosSetupProviderPreset> = {
   vllm: { name: 'vLLM', defaultModel: '' },
 };
 
+function resolveWebSessionSecret(current: MindosSetupSettings, webPassword: string): string | undefined {
+  if (!webPassword) return current.webSessionSecret;
+  if (typeof current.webSessionSecret === 'string' && current.webSessionSecret.trim()) {
+    return current.webSessionSecret;
+  }
+  if (typeof current.webPassword === 'string' && current.webPassword) {
+    return current.webPassword;
+  }
+  return randomBytes(32).toString('base64url');
+}
+
 export function buildMindosSetupState(
   services: MindosSetupServices,
 ): MindosServerResponse<MindosSetupStatePayload> {
   const settings = normalizeSetupSettings(services.readSettings());
   const home = getHomeDir(services);
-  const sep = services.pathSep?.() ?? path.sep;
-  const defaultMindRoot = settings.mindRoot || [home, 'MindOS', 'mind'].join(sep);
+  const defaultMindRoot = settings.mindRoot || toHomeRelativePath(resolveDefaultMindRoot(services), home, services);
   const providerConfigs = settings.ai.providers.map((provider) => ({
     id: provider.id,
     name: provider.name,
@@ -130,7 +169,7 @@ export function buildMindosSetupState(
 export function applyMindosSetupConfig(
   body: unknown,
   services: MindosSetupServices,
-): MindosServerResponse<{ ok: true; portChanged: boolean; needsRestart: boolean; newPort: number } | { error: string; errorZh?: string; unsafePath?: true }> {
+): MindosServerResponse<MindosSetupApplyPayload | { error: string; errorZh?: string; unsafePath?: true }> {
   const payload = body && typeof body === 'object' ? body as Record<string, unknown> : {};
   const mindRoot = typeof payload.mindRoot === 'string' ? payload.mindRoot : '';
   if (!mindRoot) {
@@ -157,6 +196,11 @@ export function applyMindosSetupConfig(
   }
 
   const template = typeof payload.template === 'string' ? payload.template : undefined;
+  const selectedInitialSpaces = normalizeInitialSpaceSelection(payload.initialSpaces, payload.spaceKits);
+  if ('error' in selectedInitialSpaces) {
+    return json({ error: selectedInitialSpaces.error }, { status: 400 });
+  }
+  const initialSpaceLocale = normalizeInitialSpaceLocale(payload.initialSpaceLocale ?? payload.spaceKitLocale, template);
   const exists = (services.existsSync ?? existsSync)(resolvedRoot);
   if (template) {
     const result = applyTemplate(template, resolvedRoot, services);
@@ -165,6 +209,15 @@ export function applyMindosSetupConfig(
     }
   } else if (!exists) {
     (services.mkdirSync ?? ((target: string) => mkdirSync(target, { recursive: true })))(resolvedRoot);
+  }
+
+  let installedInitialSpaces: MindosSetupInitialSpaceInstallResult[] | undefined;
+  if (selectedInitialSpaces.ids.length > 0) {
+    const result = applyInitialSpaces(selectedInitialSpaces.ids, resolvedRoot, initialSpaceLocale, services);
+    if ('error' in result) {
+      return json({ error: result.error }, { status: result.status ?? 500 });
+    }
+    installedInitialSpaces = result.installed;
   }
 
   const current = normalizeSetupSettings(services.readSettings());
@@ -190,11 +243,12 @@ export function applyMindosSetupConfig(
     mcpPort,
     authToken: authToken ?? current.authToken,
     webPassword: webPassword ?? '',
+    webSessionSecret: resolveWebSessionSecret(current, resolvedWebPassword),
     startMode: current.startMode,
     setupPending: false,
     setupPort: undefined,
     disabledSkills: template === 'zh' ? ['mindos'] : ['mindos-zh'],
-    guideState: createGuideState(template),
+    guideState: current.guideState ?? createGuideState(template),
     connectionMode: resolveConnectionMode(current.connectionMode, payload.connectionMode),
   };
 
@@ -204,6 +258,7 @@ export function applyMindosSetupConfig(
     portChanged: webPort !== currentPort,
     needsRestart,
     newPort: webPort,
+    installedInitialSpaces,
   });
 }
 
@@ -224,6 +279,7 @@ export function patchMindosSetupGuideState(
     template: 'en' as const,
     step1Done: false,
     askedAI: false,
+    agentPromptDone: false,
     nextStepIndex: 0,
   };
   const patchRecord = patch as Record<string, unknown>;
@@ -231,6 +287,7 @@ export function patchMindosSetupGuideState(
   if (typeof patchRecord.dismissed === 'boolean') updated.dismissed = patchRecord.dismissed;
   if (typeof patchRecord.step1Done === 'boolean') updated.step1Done = patchRecord.step1Done;
   if (typeof patchRecord.askedAI === 'boolean') updated.askedAI = patchRecord.askedAI;
+  if (typeof patchRecord.agentPromptDone === 'boolean') updated.agentPromptDone = patchRecord.agentPromptDone;
   if (typeof patchRecord.nextStepIndex === 'number' && patchRecord.nextStepIndex >= 0) updated.nextStepIndex = patchRecord.nextStepIndex;
   if (typeof patchRecord.active === 'boolean') updated.active = patchRecord.active;
   if (typeof patchRecord.walkthroughStep === 'number' && patchRecord.walkthroughStep >= 0) updated.walkthroughStep = patchRecord.walkthroughStep;
@@ -268,6 +325,72 @@ function getHomeDir(services: MindosSetupServices): string {
   return services.homeDir?.() ?? homedir();
 }
 
+export function resolveDefaultMindRoot(services: MindosSetupServices): string {
+  const home = getHomeDir(services);
+  const sep = services.pathSep?.() ?? path.sep;
+  const currentPlatform = services.platform?.() ?? platform();
+  const env = services.env?.() ?? process.env;
+  const docsDir = resolveDocumentsDir(home, sep, currentPlatform, env);
+  if (docsDir && shouldUseDocumentsDir(docsDir, currentPlatform, services)) {
+    return [docsDir, 'MindOS', 'mind'].join(sep);
+  }
+  return [home, 'MindOS', 'mind'].join(sep);
+}
+
+function toHomeRelativePath(target: string, home: string, services: MindosSetupServices): string {
+  if (!target || !home) return target;
+  const sep = services.pathSep?.() ?? path.sep;
+  const normalizedHome = stripTrailingSeparators(home, sep);
+  const normalizedTarget = stripTrailingSeparators(target, sep);
+  const lowerHome = normalizedHome.toLowerCase();
+  const lowerTarget = normalizedTarget.toLowerCase();
+  if (lowerTarget === lowerHome) return '~';
+  const homeWithSep = `${normalizedHome}${sep}`;
+  if (lowerTarget.startsWith(homeWithSep.toLowerCase())) {
+    return `~${sep}${normalizedTarget.slice(homeWithSep.length)}`;
+  }
+  return target;
+}
+
+function stripTrailingSeparators(value: string, sep: string): string {
+  let current = value;
+  while (current.length > 1 && (current.endsWith('/') || current.endsWith('\\') || current.endsWith(sep))) {
+    current = current.slice(0, -1);
+  }
+  return current;
+}
+
+function resolveDocumentsDir(
+  home: string,
+  sep: string,
+  currentPlatform: NodeJS.Platform | string,
+  env: Record<string, string | undefined>,
+): string {
+  if (currentPlatform === 'win32') return [home, 'Documents'].join(sep);
+  if (currentPlatform === 'linux' && env.XDG_DOCUMENTS_DIR?.trim()) {
+    return expandEnvHome(env.XDG_DOCUMENTS_DIR.trim(), home);
+  }
+  return [home, 'Documents'].join(sep);
+}
+
+function expandEnvHome(value: string, home: string): string {
+  if (value === '$HOME') return home;
+  if (value.startsWith('$HOME/')) return path.join(home, value.slice('$HOME/'.length));
+  if (value === '~') return home;
+  if (value.startsWith('~/') || value.startsWith('~\\')) return path.join(home, value.slice(2));
+  return value;
+}
+
+function shouldUseDocumentsDir(
+  docsDir: string,
+  currentPlatform: NodeJS.Platform | string,
+  services: MindosSetupServices,
+): boolean {
+  if (currentPlatform === 'darwin' || currentPlatform === 'win32') return true;
+  const exists = services.existsSync ?? existsSync;
+  return exists(docsDir);
+}
+
 function applyTemplate(template: string, mindRoot: string, services: MindosSetupServices): { ok: true } | { error: string; status?: number } {
   if (services.applyTemplate) return services.applyTemplate(template, mindRoot);
   const response = handleInitPost({ template }, { mindRoot });
@@ -277,6 +400,18 @@ function applyTemplate(template: string, mindRoot: string, services: MindosSetup
   return { ok: true };
 }
 
+function applyInitialSpaces(
+  initialSpaces: MindosSetupInitialSpaceId[],
+  mindRoot: string,
+  locale: MindosSetupInitialSpaceLocale,
+  services: MindosSetupServices,
+): { ok: true; installed: MindosSetupInitialSpaceInstallResult[] } | { error: string; status?: number } {
+  if (!services.applyInitialSpaces) {
+    return { error: 'Initial Space installer is not available in this runtime', status: 501 };
+  }
+  return services.applyInitialSpaces(initialSpaces, mindRoot, locale);
+}
+
 function createGuideState(template: string | undefined): MindosSetupGuideState {
   return {
     active: true,
@@ -284,7 +419,10 @@ function createGuideState(template: string | undefined): MindosSetupGuideState {
     template: template === 'zh' ? 'zh' : template === 'empty' ? 'empty' : 'en',
     step1Done: false,
     askedAI: false,
+    agentPromptDone: false,
     nextStepIndex: 0,
+    walkthroughStep: 0,
+    walkthroughDismissed: false,
   };
 }
 
@@ -297,6 +435,31 @@ function resolveConnectionMode(current: MindosSetupSettings['connectionMode'], i
     }
   }
   return fallback;
+}
+
+function normalizeInitialSpaceSelection(
+  input: unknown,
+  legacyInput: unknown,
+): { ids: MindosSetupInitialSpaceId[] } | { error: string } {
+  const source = input === undefined ? legacyInput : input;
+  const fieldName = input === undefined && legacyInput !== undefined ? 'spaceKits' : 'initialSpaces';
+  if (source === undefined) return { ids: [] };
+  if (!Array.isArray(source)) return { error: `${fieldName} must be an array` };
+  const seen = new Set<MindosSetupInitialSpaceId>();
+  for (const item of source) {
+    if (!isInitialSpaceId(item)) return { error: `Invalid initial space: ${String(item)}` };
+    seen.add(item);
+  }
+  return { ids: [...seen] };
+}
+
+function normalizeInitialSpaceLocale(input: unknown, template: string | undefined): MindosSetupInitialSpaceLocale {
+  if (input === 'zh' || input === 'en') return input;
+  return template === 'zh' ? 'zh' : 'en';
+}
+
+function isInitialSpaceId(value: unknown): value is MindosSetupInitialSpaceId {
+  return typeof value === 'string' && (INITIAL_SPACE_IDS as readonly string[]).includes(value);
 }
 
 function mergeSetupAiConfig(

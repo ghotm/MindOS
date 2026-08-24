@@ -12,18 +12,23 @@ import { bold, dim, cyan, green, red, yellow } from '../lib/colors.js';
 import { isPortInUse } from '../lib/port.js';
 import { EXIT } from '../lib/command.js';
 import { stripBom } from '../lib/jsonc.js';
+import { hasProviderEnvKey, isProviderMissingRequiredKey, providerEnvKeys, resolveAiConfig } from '../lib/ai-config.js';
+import { MCP_AGENTS } from '../lib/mcp-agents.js';
+import { inspectAgentReadiness, inspectAllAgentReadiness } from '../lib/agent-readiness.js';
 
 export const meta = {
   name: 'doctor',
   group: 'Config',
   summary: 'Check installation health',
-  usage: 'mindos doctor',
+  usage: 'mindos doctor [agents [agent-key]]',
   flags: {
     '--json': 'Output as JSON',
   },
   examples: [
     'mindos doctor',
     'mindos doctor --json',
+    'mindos doctor agents',
+    'mindos doctor agents codex --json',
   ],
 };
 
@@ -37,7 +42,81 @@ export function getShimExecutablePath(platform = process.platform, homeDir = hom
   return resolve(homeDir, '.mindos', 'bin', platform === 'win32' ? 'mindos.cmd' : 'mindos');
 }
 
-export const run = async (_args, flags) => {
+function agentStatusLabel(result) {
+  if (result.ready) return green('ready');
+  if (result.status === 'missing-mcp') return yellow('missing MCP');
+  if (result.status === 'missing-skill') return yellow('missing Skill');
+  if (result.status === 'missing-command') return yellow('missing command');
+  if (result.status === 'invalid-mcp') return red('invalid MCP');
+  return yellow(result.status);
+}
+
+function printAgentReadiness(result) {
+  console.log(`  ${bold(result.name)} ${dim(`(${result.key})`)}  ${agentStatusLabel(result)}`);
+  console.log(`    Agent:   ${result.present ? green('detected') : yellow('not detected')}`);
+  if (result.mcp.configured) {
+    console.log(`    MCP:     ${result.mcp.valid ? green('configured') : red('invalid')} ${dim(`${result.mcp.transport || 'unknown'} · ${result.mcp.configPath}`)}`);
+  } else {
+    console.log(`    MCP:     ${yellow('missing')}`);
+  }
+  if (result.command.required) {
+    console.log(`    Command: ${result.command.ok ? green('reachable') : red('missing')} ${dim(result.command.source || '')}`);
+  }
+  console.log(`    Skill:   ${result.skill.installed ? green('installed') : red('missing')} ${dim(`${result.skill.skillName} · ${result.skill.workspacePath}`)}`);
+  if (result.actions.length > 0) {
+    console.log(`    Fix:     ${cyan(result.actions[0])}`);
+  }
+  if (result.issues.length > 0) {
+    console.log(`    Note:    ${dim(result.issues[0])}`);
+  }
+}
+
+async function runAgentDoctor(args, flags) {
+  const jsonMode = flags.json === true;
+  const targetKey = args[0];
+  if (targetKey && !MCP_AGENTS[targetKey]) {
+    if (jsonMode) {
+      console.log(JSON.stringify({ ok: false, error: `Unknown agent: ${targetKey}` }, null, 2));
+    } else {
+      console.error(red(`Unknown agent: ${targetKey}`));
+      console.error(dim(`Available: ${Object.keys(MCP_AGENTS).join(', ')}`));
+    }
+    process.exit(EXIT.NOT_FOUND);
+  }
+
+  const results = targetKey
+    ? [inspectAgentReadiness(targetKey)]
+    : inspectAllAgentReadiness().filter((result) => (
+        result.present || result.mcp.configured || result.skill.installed
+      ));
+  const ok = results.length > 0 && results.every((result) => result.ready);
+
+  if (jsonMode) {
+    console.log(JSON.stringify({ ok, count: results.length, agents: results }, null, 2));
+  } else {
+    console.log(`\n${bold('MindOS Agent Doctor')}\n`);
+    if (results.length === 0) {
+      console.log(`  ${yellow('!')} No installed or configured agents detected.`);
+      console.log(`  ${dim('Run `mindos mcp install <agent-key> -g -y` to connect one.')}\n`);
+    } else {
+      for (const result of results) {
+        printAgentReadiness(result);
+        console.log('');
+      }
+      console.log(ok
+        ? `${green('All configured agents are ready.')}\n`
+        : `${yellow('Some agents need repair.')} Run ${cyan('mindos mcp install <agent-key> -g -y')} and verify again.\n`);
+    }
+  }
+
+  if (!ok) process.exit(EXIT.ERROR);
+}
+
+export const run = async (args, flags) => {
+  if (args[0] === 'agents' || args[0] === 'agent') {
+    return runAgentDoctor(args.slice(1), flags);
+  }
+
   const jsonMode = flags.json === true;
   const checks = [];
   const ok = (msg, key) => { checks.push({ status: 'ok', key, msg }); if (!jsonMode) console.log(`  ${green('✔')} ${msg}`); };
@@ -78,20 +157,17 @@ export const run = async (_args, flags) => {
 
   // 3. AI config
   if (config) {
-    const provider = config.ai?.provider;
-    const providers = config.ai?.providers;
-    const hasAnthropic = providers?.anthropic?.apiKey || config.ai?.anthropicApiKey;
-    const hasOpenai = providers?.openai?.apiKey || config.ai?.openaiApiKey;
-    if (!provider) {
+    const ai = resolveAiConfig(config.ai);
+    if (!ai.activeProvider || ai.activeProvider === 'skip' || ai.providers.length === 0) {
       warn('AI provider not configured (run `mindos onboard` to set up)');
-    } else if (provider === 'anthropic' && !hasAnthropic) {
-      err('AI provider is "anthropic" but no API key found');
-      hasError = true;
-    } else if (provider === 'openai' && !hasOpenai) {
-      err('AI provider is "openai" but no API key found');
+    } else if (isProviderMissingRequiredKey(ai.activeEntry) && !hasProviderEnvKey(ai.activeEntry)) {
+      const envHint = providerEnvKeys(ai.activeEntry).length
+        ? ` or env ${providerEnvKeys(ai.activeEntry).join('/')}`
+        : '';
+      err(`AI provider "${ai.activeEntry.protocol}" has no API key${envHint}`);
       hasError = true;
     } else {
-      ok(`AI provider configured  ${dim(provider)}`);
+      ok(`AI provider configured  ${dim(ai.activeEntry.protocol)}`);
     }
   }
 

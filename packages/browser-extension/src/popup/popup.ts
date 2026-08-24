@@ -2,11 +2,18 @@
 
 import TurndownService from 'turndown';
 import { loadConfig, saveConfig, isConfigured } from '../lib/storage';
-import { testConnection, listDirs, saveToInbox, createFile } from '../lib/api';
+import { testConnection, listDirs, saveToInbox, createFile, normalizeMindosUrl } from '../lib/api';
 import { toClipDocument } from '../lib/markdown';
 import type { ClipperConfig, PageContent } from '../lib/types';
-
-const INBOX_VALUE = '__inbox__';
+import {
+  buildDirectoryIndex,
+  getChildDirectoryEntries,
+  formatDirLabel,
+  getBreadcrumbSegments,
+  INBOX_VALUE,
+  type DirectoryIndex,
+} from './dir-picker';
+import { extractContentFromActiveTab } from './tab-extraction';
 
 /* ── DOM refs ── */
 
@@ -25,10 +32,13 @@ const btnConnect = $<HTMLButtonElement>('btn-connect');
 
 // Clip
 const clipTitle = $<HTMLInputElement>('clip-title');
+const clipSourceLabel = $<HTMLParagraphElement>('clip-source-label');
 const clipSiteBadge = $<HTMLSpanElement>('clip-site');
 const clipSiteText = $<HTMLSpanElement>('clip-site-text');
 const clipWordsBadge = $<HTMLSpanElement>('clip-words');
 const clipWordsText = $<HTMLSpanElement>('clip-words-text');
+const clipStatus = $<HTMLSpanElement>('clip-status');
+const btnRefresh = $<HTMLButtonElement>('btn-refresh');
 const dirTrigger = $<HTMLButtonElement>('dir-trigger');
 const dirLabel = $<HTMLSpanElement>('dir-label');
 const dirPanel = $<HTMLDivElement>('dir-panel');
@@ -48,9 +58,12 @@ const btnClipAnother = $<HTMLButtonElement>('btn-clip-another');
 
 let config: ClipperConfig;
 let extractedContent: PageContent | null = null;
-let allDirs: string[] = [];
+let dirIndex: DirectoryIndex = buildDirectoryIndex([]);
 let selectedPath = INBOX_VALUE;  // '__inbox__' or a dir path
 let browsingPath = '';           // current level being viewed in picker
+let isConnecting = false;
+let isLoadingClipContext = false;
+let isSaving = false;
 
 /* ── View switching ── */
 
@@ -67,6 +80,16 @@ function setButtonLoading(btn: HTMLButtonElement, loading: boolean) {
   if (text) text.hidden = loading;
   if (spinner) spinner.hidden = !loading;
   btn.disabled = loading;
+  btn.toggleAttribute('aria-busy', loading);
+}
+
+function setClipBusy(busy: boolean) {
+  clipTitle.disabled = busy;
+  dirTrigger.disabled = busy;
+  dirConfirm.disabled = busy;
+  btnRefresh.disabled = busy;
+  btnSettings.disabled = busy;
+  dirPanel.toggleAttribute('aria-busy', busy);
 }
 
 /* ── Turndown instance ── */
@@ -89,46 +112,42 @@ turndown.addRule('pre-code', {
   },
 });
 
-/* ── Extract content from active tab ── */
+async function loadClipContext() {
+  const [contentResult, dirsResult] = await Promise.allSettled([
+    extractContentFromActiveTab(),
+    listDirs(config),
+  ]);
 
-async function extractContent(): Promise<PageContent> {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error('No active tab');
+  const content = contentResult.status === 'fulfilled' ? contentResult.value : null;
+  const dirs = dirsResult.status === 'fulfilled' ? dirsResult.value : [];
+  const dirsErrorMsg = dirsResult.status === 'rejected'
+    ? 'Could not load spaces. Saving to Inbox is still available.'
+    : undefined;
+  const errorMsg = contentResult.status === 'rejected'
+    ? (contentResult.reason instanceof Error ? contentResult.reason.message : 'Cannot read this page')
+    : undefined;
 
-  // Content scripts can't run on chrome://, edge://, about:, or extension pages
-  const url = tab.url ?? '';
-  if (url.startsWith('chrome') || url.startsWith('edge') || url.startsWith('about:') || url.startsWith('moz-extension')) {
-    throw new Error('Cannot clip browser internal pages');
-  }
+  return { content, dirs, errorMsg, dirsErrorMsg };
+}
 
-  // Inject content script on demand (not always-on — saves memory on every page)
-  // Step 1: inject Readability + extractor (IIFE, sets window.__mindosClipResult)
+function setDirectories(dirs: string[]) {
+  dirIndex = buildDirectoryIndex(dirs);
+}
+
+async function refreshClipContext() {
+  if (isLoadingClipContext) return;
+  isLoadingClipContext = true;
+  setClipBusy(true);
+  showView(viewLoading);
+
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ['content/extractor.js'],
-    });
-  } catch {
-    throw new Error('Cannot read this page — try refreshing first');
+    const context = await loadClipContext();
+    extractedContent = context.content;
+    setDirectories(context.dirs);
+    showClipView(context.errorMsg, context.dirsErrorMsg);
+  } finally {
+    isLoadingClipContext = false;
   }
-
-  // Step 2: read the result back (executeScript with func can return values)
-  let results: chrome.scripting.InjectionResult[];
-  try {
-    results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => (window as any).__mindosClipResult,
-    });
-  } catch {
-    throw new Error('Cannot read extraction result');
-  }
-
-  const result = results?.[0]?.result;
-  if (!result || typeof result !== 'object') {
-    throw new Error('Content extraction returned empty result');
-  }
-
-  return result as PageContent;
 }
 
 /* ── Init ── */
@@ -143,50 +162,50 @@ async function init() {
   }
 
   // Configured — extract content
-  showView(viewLoading);
-
-  let extractionError = '';
-
-  try {
-    [extractedContent, allDirs] = await Promise.all([
-      extractContent(),
-      listDirs(config),
-    ]);
-  } catch (err) {
-    extractionError = err instanceof Error ? err.message : 'Cannot read this page';
-    extractedContent = null;
-    allDirs = await listDirs(config).catch(() => []);
-  }
-
-  showClipView(extractionError);
+  await refreshClipContext();
 }
 
-function showClipView(errorMsg?: string) {
+function showClipView(errorMsg?: string, dirsErrorMsg?: string) {
   showView(viewClip);
 
-  if (errorMsg) {
-    showError(clipError, errorMsg);
+  const hasContent = !!extractedContent;
+  const displayError = errorMsg ?? dirsErrorMsg;
+
+  if (displayError && !hasContent) {
+    showError(clipError, displayError);
     btnSave.disabled = true;
+    setClipStatus('Read failed', 'status-chip-error');
   } else {
-    hideError(clipError);
-    btnSave.disabled = false;
+    if (displayError) {
+      showError(clipError, displayError);
+    } else {
+      hideError(clipError);
+    }
+    btnSave.disabled = !hasContent;
+    setClipStatus(hasContent ? 'Ready' : 'Read failed', hasContent ? 'status-chip-success' : 'status-chip-error');
   }
 
   if (extractedContent) {
     clipTitle.value = extractedContent.title;
+    clipSourceLabel.textContent = extractedContent.captureType === 'ai-conversation'
+      ? 'AI conversation'
+      : 'Current page';
 
     try {
       const host = new URL(extractedContent.url).hostname.replace(/^www\./, '');
-      clipSiteText.textContent = host;
+      clipSiteText.textContent = extractedContent.sourcePlatformLabel || host;
       clipSiteBadge.style.display = '';
     } catch {
       clipSiteBadge.style.display = 'none';
     }
 
-    clipWordsText.textContent = `${extractedContent.wordCount.toLocaleString()} words`;
+    clipWordsText.textContent = extractedContent.captureType === 'ai-conversation' && extractedContent.messageCount != null
+      ? `${extractedContent.messageCount.toLocaleString()} messages`
+      : `${extractedContent.wordCount.toLocaleString()} words`;
     clipWordsBadge.style.display = '';
   } else {
     clipTitle.value = '';
+    clipSourceLabel.textContent = 'Current page';
     clipSiteBadge.style.display = 'none';
     clipWordsBadge.style.display = 'none';
   }
@@ -196,6 +215,7 @@ function showClipView(errorMsg?: string) {
   browsingPath = '';
   updateDirLabel();
   toggleDirPanel(false);
+  setClipBusy(false);
 }
 
 /** Render the hierarchical directory picker at the current browsing level */
@@ -228,13 +248,13 @@ function createSvgIcon(className: string, size: string, pathData?: string, polyl
 
 function renderDirPicker() {
   // Breadcrumb
-  const segments = browsingPath ? browsingPath.split('/') : [];
+  const segments = getBreadcrumbSegments(browsingPath);
   dirBreadcrumb.replaceChildren();
 
   // Root / Inbox button
   const rootBtn = document.createElement('button');
   rootBtn.type = 'button';
-  rootBtn.textContent = '/ Inbox';
+  rootBtn.textContent = 'Inbox';
   rootBtn.className = selectedPath === INBOX_VALUE && !browsingPath ? 'active' : '';
   rootBtn.addEventListener('click', () => {
     browsingPath = '';
@@ -265,50 +285,52 @@ function renderDirPicker() {
   });
 
   // Child directories at current level
-  const prefix = browsingPath ? browsingPath + '/' : '';
-  const children = allDirs
-    .filter(p => {
-      if (!p.startsWith(prefix)) return false;
-      const rest = p.slice(prefix.length);
-      return rest.length > 0 && !rest.includes('/');
-    })
-    .sort();
+  const children = getChildDirectoryEntries(dirIndex, browsingPath);
 
   dirList.replaceChildren();
-  for (const childPath of children) {
-    const childName = childPath.split('/').pop() || childPath;
-    const hasChildren = allDirs.some(p => p.startsWith(childPath + '/'));
-
+  for (const child of children) {
     const btn = document.createElement('button');
+    const childPath = child.path;
     btn.type = 'button';
     btn.className = 'dir-item';
+    if (selectedPath === childPath) {
+      btn.classList.add('active');
+    }
+    btn.setAttribute('role', 'option');
+    btn.setAttribute('aria-selected', String(selectedPath === childPath));
+    btn.setAttribute('aria-label', child.hasChildren ? `Open ${childPath}` : `Select ${childPath}`);
     btn.appendChild(createSvgIcon('dir-item-icon', '12', 'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'));
 
     const name = document.createElement('span');
     name.className = 'dir-item-name';
-    name.textContent = childName;
+    name.textContent = child.name;
     btn.appendChild(name);
 
-    if (hasChildren) {
+    if (child.hasChildren) {
       btn.appendChild(createSvgIcon('dir-item-arrow', '11', undefined, '9 18 15 12 9 6'));
     }
 
     btn.addEventListener('click', () => {
-      browsingPath = childPath;
       selectedPath = childPath;
       updateDirLabel();
-      renderDirPicker();
+      if (child.hasChildren) {
+        browsingPath = childPath;
+        renderDirPicker();
+        return;
+      }
+      toggleDirPanel(false);
     });
     dirList.appendChild(btn);
   }
 }
 
 function updateDirLabel() {
-  if (selectedPath === INBOX_VALUE) {
-    dirLabel.textContent = 'Inbox';
-  } else {
-    dirLabel.textContent = selectedPath.split('/').join(' / ');
-  }
+  dirLabel.textContent = formatDirLabel(selectedPath);
+}
+
+function setClipStatus(text: string, className: string) {
+  clipStatus.textContent = text;
+  clipStatus.className = `status-chip ${className}`;
 }
 
 function toggleDirPanel(show?: boolean) {
@@ -323,90 +345,100 @@ function toggleDirPanel(show?: boolean) {
 
 // Connect button
 btnConnect.addEventListener('click', async () => {
-  const url = setupUrl.value.trim().replace(/\/+$/, '');
+  const url = normalizeMindosUrl(setupUrl.value);
   const token = setupToken.value.trim();
 
   if (!url) { showError(setupError, 'Please enter your MindOS URL'); return; }
   if (!token) { showError(setupError, 'Please paste your auth token'); return; }
+  if (isConnecting) return;
 
+  isConnecting = true;
   hideError(setupError);
   setButtonLoading(btnConnect, true);
 
-  const testConfig: ClipperConfig = {
-    mindosUrl: url,
-    authToken: token,
-    defaultSpace: 'Inbox',
-    connected: false,
-  };
-
-  const result = await testConnection(testConfig);
-
-  if (!result.ok) {
-    setButtonLoading(btnConnect, false);
-    showError(setupError, result.error || 'Connection failed');
-    return;
-  }
-
-  // Save and proceed
-  config = await saveConfig({ ...testConfig, connected: true });
-  setButtonLoading(btnConnect, false);
-
-  // Now extract content
-  showView(viewLoading);
-
   try {
-    [extractedContent, allDirs] = await Promise.all([
-      extractContent(),
-      listDirs(config),
-    ]);
-  } catch (err) {
-    extractedContent = null;
-    allDirs = [];
-    showClipView(err instanceof Error ? err.message : 'Cannot read this page');
-    return;
-  }
+    const testConfig: ClipperConfig = {
+      mindosUrl: url,
+      authToken: token,
+    };
 
-  showClipView();
+    const result = await testConnection(testConfig);
+    if (!result.ok) {
+      showError(setupError, result.error || 'Connection failed');
+      return;
+    }
+
+    // Save and proceed
+    config = await saveConfig(testConfig);
+
+    await refreshClipContext();
+  } catch {
+    showError(setupError, 'Could not save connection settings');
+  } finally {
+    isConnecting = false;
+    setButtonLoading(btnConnect, false);
+  }
 });
+
+for (const field of [setupUrl, setupToken]) {
+  field.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    btnConnect.click();
+  });
+}
 
 // Save button
 btnSave.addEventListener('click', async () => {
+  if (isSaving) return;
   if (!extractedContent) {
     showError(clipError, 'No content extracted from this page');
     return;
   }
 
+  isSaving = true;
   hideError(clipError);
+  setClipStatus('Saving…', 'status-chip-loading');
   setButtonLoading(btnSave, true);
+  setClipBusy(true);
 
-  // Override title if user edited
-  const content = { ...extractedContent, title: clipTitle.value.trim() || extractedContent.title };
-  const isInbox = selectedPath === INBOX_VALUE;
+  try {
+    // Override title if user edited
+    const content = { ...extractedContent, title: clipTitle.value.trim() || extractedContent.title };
+    const isInbox = selectedPath === INBOX_VALUE;
 
-  const doc = toClipDocument(content, isInbox ? '' : selectedPath, (html) => turndown.turndown(html));
+    const doc = toClipDocument(content, isInbox ? '' : selectedPath, (html) => turndown.turndown(html));
 
-  // Route to Inbox API or File API based on user choice
-  const result = isInbox
-    ? await saveToInbox(config, doc.fileName, doc.markdown)
-    : await createFile(config, selectedPath, doc.fileName, doc.markdown);
+    // Route to Inbox API or File API based on user choice
+    const result = isInbox
+      ? await saveToInbox(config, doc.fileName, doc.markdown, doc.source)
+      : await createFile(config, selectedPath, doc.fileName, doc.markdown, doc.source);
 
-  setButtonLoading(btnSave, false);
+    if (result.error) {
+      showError(clipError, result.error);
+      setClipStatus('Save failed', 'status-chip-error');
+      return;
+    }
 
-  if (result.error) {
-    showError(clipError, result.error);
-    return;
+    // Success!
+    const displayPath = isInbox ? `Inbox/${doc.fileName}` : `${selectedPath}/${doc.fileName}`;
+    successDetail.textContent = displayPath;
+    showView(viewSuccess);
+  } catch {
+    showError(clipError, 'Save failed unexpectedly');
+    setClipStatus('Save failed', 'status-chip-error');
+  } finally {
+    isSaving = false;
+    setButtonLoading(btnSave, false);
+    setClipBusy(false);
   }
-
-  // Success!
-  const displayPath = isInbox ? `Inbox/${doc.fileName}` : `${selectedPath}/${doc.fileName}`;
-  successDetail.textContent = displayPath;
-  showView(viewSuccess);
 });
 
 // Settings button — go back to setup
 btnSettings.addEventListener('click', () => {
   setupUrl.value = config.mindosUrl;
   setupToken.value = config.authToken;
+  toggleDirPanel(false);
   showView(viewSetup);
 });
 
@@ -415,16 +447,25 @@ btnDone.addEventListener('click', () => {
   window.close();
 });
 
-// Clip Again — go back to clip view for same page
+// Refresh — re-read current tab without closing the popup
+btnRefresh.addEventListener('click', () => {
+  void refreshClipContext();
+});
+
+// Clip Again — read current tab again after a successful save
 btnClipAnother.addEventListener('click', () => {
-  showClipView();
+  void refreshClipContext();
 });
 
 // DirPicker — toggle panel
 dirTrigger.addEventListener('click', () => toggleDirPanel());
 
 // DirPicker — confirm selection
-dirConfirm.addEventListener('click', () => toggleDirPanel(false));
+dirConfirm.addEventListener('click', () => {
+  selectedPath = browsingPath || INBOX_VALUE;
+  updateDirLabel();
+  toggleDirPanel(false);
+});
 
 // DirPicker — Esc to close panel
 document.addEventListener('keydown', (e) => {
@@ -432,6 +473,14 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     toggleDirPanel(false);
   }
+});
+
+document.addEventListener('click', (e) => {
+  if (dirPanel.hidden) return;
+  const target = e.target as Node | null;
+  if (!target) return;
+  if (dirPanel.contains(target) || dirTrigger.contains(target)) return;
+  toggleDirPanel(false);
 });
 
 /* ── Error display helpers ── */

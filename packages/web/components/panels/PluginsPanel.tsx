@@ -1,11 +1,12 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useRouter } from 'next/navigation';
 import { getPluginRenderers, isRendererEnabled, setRendererEnabled, loadDisabledState } from '@/lib/renderers/registry';
+import { fetchAllFilePaths } from '@/lib/client-cache';
 import { Toggle } from '../settings/Primitives';
 import PanelHeader from './PanelHeader';
 import { useLocale } from '@/lib/stores/locale-store';
+import { useSmoothRouterPush } from '@/hooks/useSmoothRouterPush';
 
 interface PluginsPanelProps {
   active: boolean;
@@ -17,7 +18,7 @@ export default function PluginsPanel({ active, maximized, onMaximize }: PluginsP
   const [mounted, setMounted] = useState(false);
   const [, forceUpdate] = useState(0);
   const [existingFiles, setExistingFiles] = useState<Set<string>>(new Set());
-  const router = useRouter();
+  const smoothPush = useSmoothRouterPush();
   const { t } = useLocale();
   const p = t.panels.plugins;
 
@@ -38,8 +39,8 @@ export default function PluginsPanel({ active, maximized, onMaximize }: PluginsP
     if (entryPaths.length === 0) return;
 
     // Single request: fetch all file paths and check which entry paths exist
-    fetch('/api/files')
-      .then(r => r.ok ? r.json() : [])
+    // (shared client cache — deduped with other /api/files consumers)
+    fetchAllFilePaths()
       .then((allPaths: string[]) => {
         const pathSet = new Set(allPaths);
         setExistingFiles(new Set(entryPaths.filter(p => pathSet.has(p))));
@@ -57,8 +58,8 @@ export default function PluginsPanel({ active, maximized, onMaximize }: PluginsP
   }, []);
 
   const handleOpen = useCallback((entryPath: string) => {
-    router.push(`/view/${entryPath.split('/').map(encodeURIComponent).join('/')}`);
-  }, [router]);
+    smoothPush(`/view/${entryPath.split('/').map(encodeURIComponent).join('/')}`);
+  }, [smoothPush]);
 
   return (
     <div className={`flex flex-col h-full ${active ? '' : 'hidden'}`}>
@@ -68,7 +69,7 @@ export default function PluginsPanel({ active, maximized, onMaximize }: PluginsP
       </PanelHeader>
 
       {/* Plugin list */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div className="sidebar-scroll-area flex-1 overflow-y-auto min-h-0">
         {mounted && renderers.length === 0 && (
           <p className="px-4 py-8 text-sm text-muted-foreground text-center">{p.noPlugins}</p>
         )}

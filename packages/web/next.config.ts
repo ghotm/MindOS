@@ -9,6 +9,7 @@ const projectDir = path.resolve(__dirname);
 const inNodeModules = projectDir.includes('node_modules');
 
 const nextConfig: NextConfig = {
+  devIndicators: false,
   transpilePackages: [
     'github-slugger',
     // Self-reference: ensures the SWC loader compiles our own TypeScript
@@ -17,7 +18,7 @@ const nextConfig: NextConfig = {
   ],
   serverExternalPackages: [
     'chokidar', 'openai', 'discord.js',
-    '@mariozechner/pi-ai', '@mariozechner/pi-agent-core', '@mariozechner/pi-coding-agent', 'pi-mcp-adapter',
+    'pi-mcp-adapter',
     // Heavy packages excluded from bundle — dynamically imported at runtime.
     '@huggingface/transformers', 'onnxruntime-web',
     'sharp', '@img/sharp-linux-x64', '@img/sharp-darwin-arm64', '@img/sharp-win32-x64',
@@ -25,6 +26,10 @@ const nextConfig: NextConfig = {
     'pdfjs-dist',
     // Word extraction: extract-docx.cjs spawns outside bundler and requires these packages directly
     'mammoth', 'word-extractor',
+    // PI runtime packages use runtime dynamic import / jiti probes. If webpack
+    // bundles them, those probes become noisy context stubs during dev/build.
+    '@earendil-works/pi-ai',
+    '@earendil-works/pi-coding-agent',
   ],
   output: 'standalone',
   outputFileTracingRoot: projectDir,
@@ -35,6 +40,7 @@ const nextConfig: NextConfig = {
       './node_modules/onnxruntime-node/**',
       './node_modules/@img/**',
       './node_modules/sharp/**',
+      './node_modules/@anthropic-ai/claude-agent-sdk-*/**',
     ],
   },
   outputFileTracingIncludes: {
@@ -48,6 +54,8 @@ const nextConfig: NextConfig = {
     // extract-docx.cjs is spawned at runtime for .doc/.docx/.docm files
     '/api/extract-docx': [
       './scripts/extract-docx.cjs',
+      './node_modules/mammoth/**',
+      './node_modules/word-extractor/**',
     ],
   },
   turbopack: {
@@ -62,11 +70,22 @@ const nextConfig: NextConfig = {
     config.resolve = config.resolve ?? {};
     config.resolve.alias = config.resolve.alias ?? {};
     const alias = config.resolve.alias as Record<string, string>;
+    const existingExtensionAlias = config.resolve.extensionAlias as Record<string, string[]> | undefined;
     const existingIgnoreWarnings = Array.isArray(config.ignoreWarnings) ? config.ignoreWarnings : [];
 
     if (inNodeModules) {
       alias['@'] = projectDir;
     }
+
+    // @geminilight/mindos source uses NodeNext-style `.js` specifiers in
+    // TypeScript files. TypeScript resolves those during typecheck, but webpack
+    // needs the same alias when the web app points package imports at src.
+    config.resolve.extensionAlias = {
+      ...existingExtensionAlias,
+      '.js': ['.ts', '.tsx', '.js'],
+      '.mjs': ['.mts', '.mjs'],
+      '.cjs': ['.cts', '.cjs'],
+    };
 
     // Replace onnxruntime-node (355MB native binary) with onnxruntime-web (WASM).
     // @huggingface/transformers statically imports onnxruntime-node in its Node.js
@@ -79,7 +98,7 @@ const nextConfig: NextConfig = {
       (warning: { message?: string; module?: { resource?: string } }) => {
         const resource = warning.module?.resource ?? '';
         return warning.message === 'Critical dependency: the request of a dependency is an expression'
-          && resource.includes('@mariozechner')
+          && resource.includes('@earendil-works')
           && resource.includes('pi-ai')
           && resource.includes('openai-codex-responses');
       },

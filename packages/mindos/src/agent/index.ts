@@ -13,20 +13,62 @@ export function defineMindosAgent(descriptor: MindosAgentDescriptor): MindosAgen
 }
 
 export {
-  AGENT_SYSTEM_PROMPT,
-  CHAT_SYSTEM_PROMPT,
-  ORGANIZE_SYSTEM_PROMPT,
-} from './prompts.js';
+  MINDOS_SYSTEM_PROMPT,
+  MINDOS_AGENT_PROMPT_ASSET_PATH,
+  MINDOS_AGENT_PROMPT_ASSET_URL,
+  loadMindosAgentPrompt,
+  type LoadMindosAgentPromptOptions,
+} from './prompt/index.js';
 
 export {
-  buildMindosAskSystemPrompt,
+  MINDOS_AGENT_MANIFEST,
+  buildMindosTurnContext,
+  buildMindosContextPrompt,
+  buildMindosSystemPrompt,
   compactMindosPromptForTokenBudget,
-  formatMindosAskTimeContext,
-  type BuildMindosAskSystemPromptInput,
-  type BuildMindosAskSystemPromptServices,
+  createMindosActiveAssistantPrompt,
+  createMindosActiveAssistantPromptFromMarkdown,
+  createMindosSessionContextSignature,
+  formatMindosAgentTimeContext,
+  normalizeMindosAssistantSkillBindings,
+  parseMindosAssistantMarkdownPrompt,
+  prependMindosActiveAssistantPrompt,
+  renderMindosActiveAssistantPromptSection,
+  renderMindosActiveAssistantSectionContent,
+  renderMindosContextPrompt,
+  type BuildMindosContextPromptInput,
+  type BuildMindosContextPromptServices,
+  type BuildMindosSystemPromptInput,
   type CompactMindosPromptOptions,
-  type MindosAskActiveRecallConfig,
-  type MindosAskInitializationContext,
-  type MindosAskPromptMessage,
-  type MindosKnowledgeFile,
-} from './prompt-builder.js';
+  type CreateMindosActiveAssistantPromptInput,
+  type MindosActiveAssistantPrompt,
+  type MindosAgentManifest,
+  type MindosAgentInitializationContext,
+  type MindosAgentRecalledKnowledgeItem,
+  type MindosAssistantMarkdownPrompt,
+  type MindosAssistantSkillActivation,
+  type MindosAssistantSkillBinding,
+  type MindosContextPromptSection,
+  type MindosPromptSection,
+  type MindosSystemPromptEnvironment,
+  type MindosTurnContext,
+} from './prompt/index.js';
+
+export {
+  mindosSelectedSkillNames,
+  normalizeMindosSelectedSkills,
+  type MindosSelectedSkill,
+  type MindosSelectedSkillSource,
+} from './selected-skills.js';
+
+export * from './ledger/index.js';
+export * from './bridges/index.js';
+export * from './stream/index.js';
+export * from './subagent/index.js';
+export * from './agent-run-context.js';
+export * from './result-reducer.js';
+export * from './global-state.js';
+export * from './redaction.js';
+export * from './tool/index.js';
+export * from './mode.js';
+export * from './mode-run-events.js';

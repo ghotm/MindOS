@@ -19,6 +19,17 @@ const mockSettings = {
   authToken: '',
   webPassword: '',
   setupPending: true,
+  guideState: undefined as undefined | {
+    active: boolean;
+    dismissed: boolean;
+    template: 'en' | 'zh' | 'empty';
+    step1Done: boolean;
+    askedAI: boolean;
+    agentPromptDone: boolean;
+    nextStepIndex: number;
+    walkthroughStep?: number;
+    walkthroughDismissed?: boolean;
+  },
 };
 
 let writtenConfig: Record<string, unknown> | null = null;
@@ -27,7 +38,6 @@ let tempDir: string;
 vi.mock('@/lib/settings', () => ({
   readSettings: () => ({ ...mockSettings }),
   writeSettings: vi.fn((cfg: Record<string, unknown>) => { writtenConfig = cfg; }),
-  recordSkillInstall: vi.fn(),
   effectiveSopRoot: () => tempDir,
 }));
 
@@ -36,9 +46,18 @@ vi.mock('@/lib/template', () => ({
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(path.join(root, 'README.md'), '# Hello', 'utf-8');
   }),
+  applyInitialSpaces: vi.fn((spaces: string[], _root: string, locale: 'en' | 'zh') => ({
+    installed: spaces.map((id) => ({
+      id,
+      locale,
+      copied: [`${id}/README.md`],
+      skipped: [],
+    })),
+  })),
 }));
 
 beforeEach(() => {
+  vi.clearAllMocks();
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mindos-setup-test-'));
   writtenConfig = null;
   // Reset mockSettings for each test
@@ -48,6 +67,7 @@ beforeEach(() => {
   mockSettings.authToken = '';
   mockSettings.webPassword = '';
   mockSettings.setupPending = true;
+  mockSettings.guideState = undefined;
 });
 
 afterEach(() => {
@@ -231,6 +251,27 @@ describe('POST /api/setup — config writing', () => {
     expect(body.needsRestart).toBe(true);
   });
 
+  it('writes first-time guide state with a pending walkthrough step', async () => {
+    mockSettings.setupPending = true;
+    const { POST } = await importSetupRoute();
+    const req = new NextRequest('http://localhost/api/setup', {
+      method: 'POST',
+      body: JSON.stringify({ mindRoot: path.join(tempDir, 'first-walkthrough'), template: 'en' }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    expect(writtenConfig).not.toBeNull();
+    expect((writtenConfig as Record<string, unknown>).guideState).toMatchObject({
+      active: true,
+      dismissed: false,
+      template: 'en',
+      walkthroughStep: 0,
+      walkthroughDismissed: false,
+    });
+  });
+
   it('detects needsRestart when port changes on re-setup', async () => {
     const existingRoot = path.join(tempDir, 'existing');
     fs.mkdirSync(existingRoot, { recursive: true });
@@ -275,6 +316,118 @@ describe('POST /api/setup — config writing', () => {
     const body = await res.json();
     expect(body.needsRestart).toBe(false);
     expect(body.portChanged).toBe(false);
+  });
+
+  it('preserves existing guide state on re-setup', async () => {
+    const existingRoot = path.join(tempDir, 'stable-guide');
+    fs.mkdirSync(existingRoot, { recursive: true });
+    fs.writeFileSync(path.join(existingRoot, 'dummy.md'), 'x');
+    const existingGuideState = {
+      active: true,
+      dismissed: true,
+      template: 'zh' as const,
+      step1Done: true,
+      askedAI: true,
+      agentPromptDone: true,
+      nextStepIndex: 2,
+      walkthroughStep: 4,
+      walkthroughDismissed: false,
+    };
+    mockSettings.setupPending = false;
+    mockSettings.mindRoot = existingRoot;
+    mockSettings.guideState = existingGuideState;
+
+    const { POST } = await importSetupRoute();
+    const req = new NextRequest('http://localhost/api/setup', {
+      method: 'POST',
+      body: JSON.stringify({
+        mindRoot: existingRoot,
+        port: 3456,
+        mcpPort: 8781,
+        template: 'en',
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+    const res = await POST(req);
+
+    expect(res.status).toBe(200);
+    expect(writtenConfig).not.toBeNull();
+    expect((writtenConfig as Record<string, unknown>).guideState).toEqual(existingGuideState);
+  });
+
+  it('applies selected initial Mind Spaces with explicit locale', async () => {
+    const templateModule = await import('@/lib/template');
+    const { POST } = await importSetupRoute();
+    const mindRoot = path.join(tempDir, 'initial-spaces');
+    const req = new NextRequest('http://localhost/api/setup', {
+      method: 'POST',
+      body: JSON.stringify({
+        mindRoot,
+        template: 'empty',
+        initialSpaces: ['product', 'social', 'product'],
+        initialSpaceLocale: 'zh',
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(templateModule.applyInitialSpaces).toHaveBeenCalledWith(['product', 'social'], mindRoot, 'zh');
+    expect(body.installedInitialSpaces).toEqual([
+      { id: 'product', locale: 'zh', copied: ['product/README.md'], skipped: [] },
+      { id: 'social', locale: 'zh', copied: ['social/README.md'], skipped: [] },
+    ]);
+  });
+
+  it('accepts legacy Space Kit payload fields during transition', async () => {
+    const templateModule = await import('@/lib/template');
+    const { POST } = await importSetupRoute();
+    const mindRoot = path.join(tempDir, 'legacy-space-kits');
+    const req = new NextRequest('http://localhost/api/setup', {
+      method: 'POST',
+      body: JSON.stringify({
+        mindRoot,
+        template: 'empty',
+        spaceKits: ['life', 'learning', 'life'],
+        spaceKitLocale: 'zh',
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(templateModule.applyInitialSpaces).toHaveBeenCalledWith(['life', 'learning'], mindRoot, 'zh');
+    expect(body.installedInitialSpaces).toEqual([
+      { id: 'life', locale: 'zh', copied: ['life/README.md'], skipped: [] },
+      { id: 'learning', locale: 'zh', copied: ['learning/README.md'], skipped: [] },
+    ]);
+  });
+
+  it('rejects invalid initial Mind Spaces before copying templates or spaces', async () => {
+    const templateModule = await import('@/lib/template');
+    const { POST } = await importSetupRoute();
+    const req = new NextRequest('http://localhost/api/setup', {
+      method: 'POST',
+      body: JSON.stringify({
+        mindRoot: path.join(tempDir, 'invalid-initial-space'),
+        template: 'en',
+        initialSpaces: ['product', '../bad'],
+      }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toBe('Invalid initial space: ../bad');
+    expect(templateModule.applyTemplate).not.toHaveBeenCalled();
+    expect(templateModule.applyInitialSpaces).not.toHaveBeenCalled();
+    expect(writtenConfig).toBeNull();
   });
 });
 
@@ -411,6 +564,7 @@ describe('PATCH /api/setup — guideState', () => {
           dismissed: true,
           step1Done: true,
           askedAI: true,
+          agentPromptDone: true,
           active: true,
           nextStepIndex: 2,
         },
@@ -423,6 +577,7 @@ describe('PATCH /api/setup — guideState', () => {
     expect(body.guideState.dismissed).toBe(true);
     expect(body.guideState.step1Done).toBe(true);
     expect(body.guideState.askedAI).toBe(true);
+    expect(body.guideState.agentPromptDone).toBe(true);
     expect(body.guideState.active).toBe(true);
     expect(body.guideState.nextStepIndex).toBe(2);
   });

@@ -9,6 +9,8 @@ export interface SpacePreview {
   lastCompiled?: string;
 }
 
+export type MindSystemNodeKey = 'dao' | 'fa' | 'shu' | 'qi';
+
 export interface FileNode {
   name: string;
   path: string;
@@ -17,6 +19,10 @@ export interface FileNode {
   extension?: string;
   mtime?: number;
   isSpace?: boolean;
+  /** Built-in Mind System space; shown as a tree node but protected from rename/delete UI. */
+  isMindSystem?: boolean;
+  /** Display-only key for built-in Mind System icons. */
+  mindSystemKey?: MindSystemNodeKey;
   spacePreview?: SpacePreview;
 }
 
@@ -25,6 +31,8 @@ export interface SearchResult {
   snippet: string;
   score: number;
   occurrences: number;
+  /** Score scale used by the search result. Omitted for legacy BM25-only results. */
+  scoreKind?: 'bm25' | 'rank_fusion';
   /** True if this result came from semantic/embedding search but not keyword match. */
   semanticMatch?: boolean;
   /** Cosine similarity score (0-1) from embedding search. */

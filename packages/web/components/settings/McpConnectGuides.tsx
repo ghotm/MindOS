@@ -1,17 +1,18 @@
 'use client';
 
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import { AlertCircle, Check, CheckCircle2, ChevronDown, ChevronRight, Code2, Copy, Globe, Link2, Loader2, Monitor, Plug, RefreshCw, RotateCcw, Terminal, Users, Wifi, WifiOff } from 'lucide-react';
-import type { McpStatus, AgentInfo, McpTabProps, ConnectionMode } from './types';
-import type { Messages } from '@/lib/i18n';
+import { AlertCircle, Check, CheckCircle2, ChevronDown, ChevronRight, Copy, Globe, Link2, Loader2, Monitor, Plug, RefreshCw, RotateCcw, Terminal, Users } from 'lucide-react';
+import type { McpStatus, AgentInfo, McpTabProps, SettingsMcpMessages } from './types';
 import { toast } from '@/lib/toast';
-import { useMcpData } from '@/lib/stores/mcp-store';
 import { generateSnippet } from '@/lib/mcp-snippets';
 import { copyToClipboard } from '@/lib/clipboard';
+import { revealMcpAuthToken } from '@/lib/mcp-token';
 import CustomSelect from '@/components/CustomSelect';
 import type { SelectItem } from '@/components/CustomSelect';
 import AgentInstall from './McpAgentInstall';
 import McpPortSection from './McpPortSection';
+import { SettingCard } from './Primitives';
+import { Button } from '@/components/ui/button';
 
 export function useCopyField() {
   const [copiedField, setCopiedField] = useState<string | null>(null);
@@ -46,7 +47,7 @@ export default function ConnectCard({ mode, onModeChange, status, agents, connec
   onRefresh: () => void;
   activeSkillName: string;
   mcpEnabled: boolean;
-  m: Record<string, any> | undefined;
+  m: SettingsMcpMessages | undefined;
   t: McpTabProps['t'];
 }) {
   if (!status) return null;
@@ -55,18 +56,14 @@ export default function ConnectCard({ mode, onModeChange, status, agents, connec
   const effectiveMode = mcpEnabled ? mode : 'cli';
 
   return (
-    <div className="rounded-xl border border-border bg-card overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center gap-2.5 px-4 pt-4 pb-3">
-        <div className="w-7 h-7 rounded-lg bg-[var(--amber-subtle)] flex items-center justify-center shrink-0">
-          <Link2 size={14} className="text-[var(--amber)]" />
-        </div>
-        <h3 className="text-sm font-semibold text-foreground">{m?.connectionTitle ?? 'Connect Agents'}</h3>
-      </div>
-
+    <SettingCard
+      icon={<Link2 size={15} />}
+      title={m?.connectionTitle ?? 'Connect Agents'}
+      bodyClassName="space-y-4"
+    >
       {/* Tab switcher — only show both tabs when MCP is enabled */}
       {mcpEnabled ? (
-        <div className="grid grid-cols-2 mx-4 mb-3 rounded-lg border border-border overflow-hidden">
+        <div className="grid grid-cols-2 rounded-lg border border-border overflow-hidden">
           <button
             onClick={() => onModeChange('cli')}
             className={`flex flex-col items-start px-3 py-2.5 text-left transition-colors ${
@@ -94,7 +91,7 @@ export default function ConnectCard({ mode, onModeChange, status, agents, connec
           </button>
         </div>
       ) : (
-        <div className="mx-4 mb-3 px-3 py-2 rounded-lg border border-border bg-muted/30">
+        <div className="px-3 py-2 rounded-lg border border-border bg-muted/30">
           <span className="flex items-center gap-1.5">
             <Terminal size={12} className="text-[var(--amber)]" />
             <span className="text-xs font-semibold text-foreground">CLI</span>
@@ -104,9 +101,9 @@ export default function ConnectCard({ mode, onModeChange, status, agents, connec
       )}
 
       {/* Tab content */}
-      <div className="px-4 pb-4 space-y-4">
+      <div className="space-y-4">
         {effectiveMode === 'cli' ? (
-          <CliGuide status={status} activeSkillName={activeSkillName} agents={agents} connectedAgents={connectedAgents} detectedAgents={detectedAgents} notFoundAgents={notFoundAgents} onRefresh={onRefresh} m={m} t={t} />
+          <CliGuide status={status} activeSkillName={activeSkillName} agents={agents} connectedAgents={connectedAgents} detectedAgents={detectedAgents} onRefresh={onRefresh} m={m} t={t} />
         ) : (
           <McpGuide
             status={status} agents={agents} activeSkillName={activeSkillName}
@@ -116,23 +113,36 @@ export default function ConnectCard({ mode, onModeChange, status, agents, connec
           />
         )}
       </div>
-    </div>
+    </SettingCard>
   );
 }
 
 /* ── CLI Guide (local + remote setup) ── */
 
-function CliGuide({ status, activeSkillName, agents, connectedAgents, detectedAgents, notFoundAgents, onRefresh, m, t }: {
-  status: McpStatus; activeSkillName: string; agents: AgentInfo[]; connectedAgents: AgentInfo[]; detectedAgents: AgentInfo[]; notFoundAgents: AgentInfo[];
-  onRefresh: () => void; m: Record<string, any> | undefined; t: McpTabProps['t'];
+function CliGuide({ status, activeSkillName, agents, connectedAgents, detectedAgents, onRefresh, m, t }: {
+  status: McpStatus; activeSkillName: string; agents: AgentInfo[]; connectedAgents: AgentInfo[]; detectedAgents: AgentInfo[];
+  onRefresh: () => void; m: SettingsMcpMessages | undefined; t: McpTabProps['t'];
 }) {
   const { copiedField, handleCopy } = useCopyField();
 
-  const hasToken = status.authConfigured && !!status.authToken;
+  const hasToken = status.authConfigured;
   const remoteHost = status.localIP || 'localhost';
   const webPort = typeof window !== 'undefined' ? window.location.port || '3456' : '3456';
   const remoteUrl = `http://${remoteHost}:${webPort}`;
   const maskedAuthToken = status.maskedToken ?? '';
+
+  const handleCopyTokenCommand = useCallback(async (_text: string, field: string) => {
+    if (!hasToken) {
+      handleCopy('mindos config set authToken <token>', field);
+      return;
+    }
+    try {
+      const token = await revealMcpAuthToken();
+      handleCopy(`mindos config set authToken ${token || '<token>'}`, field);
+    } catch {
+      toast.error(m?.tokenRevealFailed ?? 'Failed to reveal token');
+    }
+  }, [handleCopy, hasToken, m?.tokenRevealFailed]);
 
   return (
     <>
@@ -158,7 +168,7 @@ function CliGuide({ status, activeSkillName, agents, connectedAgents, detectedAg
             title={m?.detectedAgentsTitle ?? 'Detected Agents'}
             badge={`${connectedAgents.length + detectedAgents.length}/${agents.length}`}
           >
-            <AgentInstall agents={agents} t={t} onRefresh={onRefresh} mode="cli" activeSkillName={activeSkillName} />
+            <AgentInstall agents={agents} t={t} onRefresh={onRefresh} mode="cli" activeSkillName={activeSkillName} status={status} />
           </InlineCollapsible>
         )}
       </div>
@@ -180,9 +190,7 @@ function CliGuide({ status, activeSkillName, agents, connectedAgents, detectedAg
             <CodeBlock code={`mindos config set url ${remoteUrl}`} onCopy={handleCopy} copiedField={copiedField} fieldId="cli-url" compact />
             <CodeBlock
               code={`mindos config set authToken ${hasToken ? maskedAuthToken : '<token>'}`}
-              onCopy={(_, field) => {
-                handleCopy(`mindos config set authToken ${status.authToken ?? '<token>'}`, field);
-              }}
+              onCopy={handleCopyTokenCommand}
               copiedField={copiedField} fieldId="cli-token" compact
               hint={hasToken ? (m?.tokenCopyFullHint ?? 'Copies full token') : undefined}
             />
@@ -214,12 +222,12 @@ function McpGuide({ status, agents, activeSkillName, connectedAgents, detectedAg
   restarting: boolean;
   onRestart: () => void;
   onRefresh: () => void;
-  m: Record<string, any> | undefined;
+  m: SettingsMcpMessages | undefined;
   t: McpTabProps['t'];
 }) {
   const { copiedField, handleCopy } = useCopyField();
 
-  const hasToken = status.authConfigured && !!status.authToken;
+  const hasToken = status.authConfigured;
   const remoteHost = status.localIP || 'localhost';
   const mcpUrl = `http://${remoteHost}:${status.port}/mcp`;
 
@@ -231,6 +239,17 @@ function McpGuide({ status, agents, activeSkillName, connectedAgents, detectedAg
     () => currentAgent ? generateSnippet(currentAgent, status, 'http') : null,
     [currentAgent, status]
   );
+  const handleCopyRemoteSnippet = useCallback(async () => {
+    if (!currentAgent || !remoteSnippet) return;
+    try {
+      const token = hasToken ? await revealMcpAuthToken() : undefined;
+      const snippet = generateSnippet(currentAgent, status, 'http', token || undefined).snippet;
+      const ok = await copyToClipboard(snippet);
+      if (ok) toast.copy();
+    } catch {
+      toast.error(m?.tokenRevealFailed ?? 'Failed to reveal token');
+    }
+  }, [currentAgent, hasToken, m?.tokenRevealFailed, remoteSnippet, status]);
 
   return (
     <>
@@ -291,7 +310,7 @@ function McpGuide({ status, agents, activeSkillName, connectedAgents, detectedAg
           title={m?.detectedAgentsTitle ?? 'Detected Agents'}
           badge={`${connectedAgents.length + detectedAgents.length}/${agents.length}`}
         >
-          <AgentInstall agents={agents} t={t} onRefresh={onRefresh} mode="mcp" activeSkillName={activeSkillName} />
+          <AgentInstall agents={agents} t={t} onRefresh={onRefresh} mode="mcp" activeSkillName={activeSkillName} status={status} />
         </InlineCollapsible>
       )}
 
@@ -319,7 +338,7 @@ function McpGuide({ status, agents, activeSkillName, connectedAgents, detectedAg
               {remoteSnippet.displaySnippet}
             </pre>
             <div className="flex items-center gap-3 text-sm">
-              <button onClick={async () => { const ok = await copyToClipboard(remoteSnippet.snippet); if (ok) toast.copy(); }}
+              <button onClick={handleCopyRemoteSnippet}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0">
                 <Copy size={14} /> {m?.copyConfig ?? 'Copy'}
               </button>
@@ -377,7 +396,7 @@ function StepBlock({ step, label, children }: { step: string; label: string; chi
 /* ── MCP Status (compact inline) ── */
 
 function McpStatusInline({ status, restarting, onRestart, onRefresh, m }: {
-  status: McpStatus; restarting: boolean; onRestart: () => void; onRefresh: () => void; m: Record<string, any> | undefined;
+  status: McpStatus; restarting: boolean; onRestart: () => void; onRefresh: () => void; m: SettingsMcpMessages | undefined;
 }) {
   return (
     <div className="flex items-center justify-between px-3 py-2 rounded-lg border border-border bg-muted/30">
@@ -394,9 +413,9 @@ function McpStatusInline({ status, restarting, onRestart, onRefresh, m }: {
       </div>
       <div className="flex items-center gap-1.5">
         {!status.running && !restarting && (
-          <button onClick={onRestart} className="flex items-center gap-1 px-2 py-1 text-2xs rounded-md font-medium text-[var(--amber-foreground)] bg-[var(--amber)] transition-colors">
+          <Button variant="amber" size="xs" onClick={onRestart} className="gap-1 text-2xs">
             <RotateCcw size={11} /> {m?.restart ?? 'Restart'}
-          </button>
+          </Button>
         )}
         <button onClick={onRefresh} className="p-1 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
           <RefreshCw size={11} />

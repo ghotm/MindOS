@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { seedFile, testMindRoot } from '../setup';
 import { GET, POST } from '../../app/api/file/route';
@@ -6,10 +6,29 @@ import { invalidateCache } from '../../lib/fs';
 import fs from 'fs';
 import path from 'path';
 
+const execFileMock = vi.hoisted(() => vi.fn());
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFile: (...args: unknown[]) => execFileMock(...args),
+  };
+});
+
 // Helper to get testMindRoot at call time (not import time)
 function root() {
   return testMindRoot;
 }
+
+beforeEach(() => {
+  execFileMock.mockReset();
+  execFileMock.mockImplementation((...args: unknown[]) => {
+    const callback = args[args.length - 1];
+    if (typeof callback === 'function') callback(null, '', '');
+    return {};
+  });
+});
 
 describe('GET /api/file', () => {
   it('returns error when path is missing', async () => {
@@ -22,6 +41,7 @@ describe('GET /api/file', () => {
 
   it('list_spaces returns top-level spaces without path param', async () => {
     seedFile('LSpace/note.md', 'x');
+    seedFile('LSpace/INSTRUCTION.md', 'Use this as a test Space.');
     seedFile('LSpace/README.md', '# L\n\nhello space');
     invalidateCache();
     const req = new NextRequest('http://localhost/api/file?op=list_spaces');
@@ -45,6 +65,7 @@ describe('GET /api/file', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.content).toBe('# Hello World');
+    expect(body.mtime).toEqual(expect.any(Number));
   });
 
   it('reads file lines (op=read_lines)', async () => {
@@ -56,6 +77,23 @@ describe('GET /api/file', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.lines).toEqual(['line0', 'line1', 'line2']);
+  });
+
+  it('opens the mind root in the native file manager', async () => {
+    const req = new NextRequest('http://localhost/api/file?op=open_in_file_manager');
+    const res = await GET(req);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock.mock.calls[0]?.[1]).toContain(root());
+  });
+
+  it('rejects file-manager opens outside the mind root', async () => {
+    const req = new NextRequest('http://localhost/api/file?op=open_in_file_manager&path=..%2Fsecret.md');
+    const res = await GET(req);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'Access denied' });
+    expect(execFileMock).not.toHaveBeenCalled();
   });
 
   it('returns 404 for non-existent file', async () => {
@@ -203,20 +241,97 @@ describe('POST /api/file', () => {
     const logPath = path.join(root(), '.mindos', 'change-log.json');
     expect(fs.existsSync(logPath)).toBe(true);
 
-    const log = JSON.parse(fs.readFileSync(logPath, 'utf-8')) as {
-      events: Array<{ op: string; path: string; after?: string }>;
-    };
-    expect(Array.isArray(log.events)).toBe(true);
-    expect(log.events.length).toBeGreaterThan(0);
-    expect(log.events[0].op).toBe('save_file');
-    expect(log.events[0].path).toBe('logged.md');
-    expect(log.events[0].after).toContain('v1');
+    // JSONL format: newest event is the last line.
+    const lines = fs.readFileSync(logPath, 'utf-8').trim().split('\n');
+    expect(lines.length).toBeGreaterThan(0);
+    const latest = JSON.parse(lines[lines.length - 1]) as { op: string; path: string; after?: string };
+    expect(latest.op).toBe('save_file');
+    expect(latest.path).toBe('logged.md');
+    expect(latest.after).toContain('v1');
+  });
+
+  it('records the agent header on agent-authored content changes', async () => {
+    const res = await POST(post(
+      { op: 'save_file', path: 'agent-logged.md', content: 'v1' },
+      { 'x-mindos-agent': 'codex' },
+    ));
+    expect(res.status).toBe(200);
+
+    const logPath = path.join(root(), '.mindos', 'change-log.json');
+    const lines = fs.readFileSync(logPath, 'utf-8').trim().split('\n');
+    const latest = JSON.parse(lines[lines.length - 1]) as { source: string; agentName?: string; path: string };
+    expect(latest.path).toBe('agent-logged.md');
+    expect(latest.source).toBe('agent');
+    expect(latest.agentName).toBe('codex');
   });
 
   it('save_file returns error if content missing', async () => {
     const res = await POST(post({ op: 'save_file', path: 'x.md' }));
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe('missing content');
+  });
+
+  it('rejects agent save_file content that contains truncation markers', async () => {
+    seedFile('large-agent.md', `# Large\n\n${'important\n'.repeat(2_000)}`);
+    invalidateCache();
+    const original = fs.readFileSync(path.join(root(), 'large-agent.md'), 'utf-8');
+
+    const res = await POST(post(
+      {
+        op: 'save_file',
+        path: 'large-agent.md',
+        content: '# Large\n\npartial\n\n[...truncated — file is 20000 chars]',
+      },
+      { 'x-mindos-agent': 'codex' },
+    ));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain('refusing to write potentially truncated content');
+    expect(fs.readFileSync(path.join(root(), 'large-agent.md'), 'utf-8')).toBe(original);
+  });
+
+  it('rejects suspicious agent save_file shrink writes unless explicitly allowed', async () => {
+    seedFile('large-shrink.md', `# Large\n\n${'evidence\n'.repeat(1_200)}`);
+    invalidateCache();
+    const original = fs.readFileSync(path.join(root(), 'large-shrink.md'), 'utf-8');
+
+    const blocked = await POST(post(
+      { op: 'save_file', path: 'large-shrink.md', content: '# Short\n' },
+      { 'x-mindos-agent': 'codex' },
+    ));
+
+    expect(blocked.status).toBe(400);
+    expect((await blocked.json()).error).toContain('refusing to shrink large-shrink.md');
+    expect(fs.readFileSync(path.join(root(), 'large-shrink.md'), 'utf-8')).toBe(original);
+
+    const allowed = await POST(post(
+      { op: 'save_file', path: 'large-shrink.md', content: '# Short\n', allow_shrink: true },
+      { 'x-mindos-agent': 'codex' },
+    ));
+
+    expect(allowed.status).toBe(200);
+    expect(fs.readFileSync(path.join(root(), 'large-shrink.md'), 'utf-8')).toBe('# Short\n');
+  });
+
+  it('rejects empty agent save_file writes unless explicitly allowed', async () => {
+    seedFile('agent-empty-write.md', 'keep me');
+    invalidateCache();
+
+    const blocked = await POST(post(
+      { op: 'save_file', path: 'agent-empty-write.md', content: '' },
+      { 'x-mindos-agent': 'codex' },
+    ));
+
+    expect(blocked.status).toBe(400);
+    expect((await blocked.json()).error).toContain('refusing to write empty content');
+    expect(fs.readFileSync(path.join(root(), 'agent-empty-write.md'), 'utf-8')).toBe('keep me');
+
+    const allowed = await POST(post(
+      { op: 'save_file', path: 'agent-empty-write.md', content: '', allow_shrink: true },
+      { 'x-mindos-agent': 'codex' },
+    ));
+    expect(allowed.status).toBe(200);
+    expect(fs.readFileSync(path.join(root(), 'agent-empty-write.md'), 'utf-8')).toBe('');
   });
 
   it('delete_file moves file to trash instead of permanent delete', async () => {
@@ -368,34 +483,6 @@ describe('POST /api/file', () => {
     expect(content).toContain('appended');
   });
 
-  it('append_to_file transparently migrates legacy .agent-log.json writes into .mindos/agent-audit-log.json', async () => {
-    invalidateCache();
-    const line = JSON.stringify({
-      ts: '2026-03-25T12:00:00.000Z',
-      tool: 'mindos_search_notes',
-      params: { query: 'agent' },
-      result: 'ok',
-      message: '1 result',
-    }) + '\n';
-
-    const res = await POST(post({
-      op: 'append_to_file',
-      path: '.agent-log.json',
-      content: line,
-    }));
-    expect(res.status).toBe(200);
-
-    const newLogPath = path.join(root(), '.mindos', 'agent-audit-log.json');
-    expect(fs.existsSync(newLogPath)).toBe(true);
-    const json = JSON.parse(fs.readFileSync(newLogPath, 'utf-8')) as {
-      events: Array<{ tool: string; op: string }>;
-    };
-    expect(json.events.length).toBeGreaterThan(0);
-    expect(json.events[0].tool).toBe('mindos_search_notes');
-    expect(json.events[0].op).toBe('append');
-    expect(fs.existsSync(path.join(root(), '.agent-log.json'))).toBe(false);
-  });
-
   it('create_file creates a new file', async () => {
     invalidateCache();
     const res = await POST(post({
@@ -417,6 +504,26 @@ describe('POST /api/file', () => {
     expect(res.status).toBe(200);
     const content = fs.readFileSync(path.join(root(), 'empty.md'), 'utf-8');
     expect(content).toBe('');
+  });
+
+  it('rejects empty files from agent create_file unless explicitly allowed', async () => {
+    invalidateCache();
+
+    const blocked = await POST(post(
+      { op: 'create_file', path: 'agent-empty.md' },
+      { 'x-mindos-agent': 'codex' },
+    ));
+
+    expect(blocked.status).toBe(400);
+    expect((await blocked.json()).error).toContain('refusing to create empty file');
+    expect(fs.existsSync(path.join(root(), 'agent-empty.md'))).toBe(false);
+
+    const allowed = await POST(post(
+      { op: 'create_file', path: 'agent-empty-ok.md', allow_empty: true },
+      { 'x-mindos-agent': 'codex' },
+    ));
+    expect(allowed.status).toBe(200);
+    expect(fs.readFileSync(path.join(root(), 'agent-empty-ok.md'), 'utf-8')).toBe('');
   });
 
   it('move_file moves a file and returns affected files', async () => {

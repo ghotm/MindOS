@@ -1,7 +1,8 @@
 'use client';
 
-import { Loader2, Plus, X } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { HelpCircle, Loader2, Plus, X, type LucideIcon } from 'lucide-react';
+import { useEffect, useId, useRef } from 'react';
+import { agentIconFile } from '@/lib/agent-icons';
 import { useFocusTrap } from '@/lib/hooks/useFocusTrap';
 
 /* ────────── Pill / Status / Search ────────── */
@@ -35,6 +36,87 @@ export function StatusDot({ tone, label, count }: { tone: 'ok' | 'warn' | 'neutr
   );
 }
 
+export function AgentSectionHeading({
+  id,
+  icon,
+  title,
+  description,
+  descriptionTooltip,
+  as: HeadingTag = 'h2',
+  size = 'md',
+  className,
+  titleClassName,
+}: {
+  id?: string;
+  icon: React.ReactNode;
+  title: React.ReactNode;
+  description?: React.ReactNode;
+  descriptionTooltip?: string;
+  as?: 'h2' | 'h3' | 'p' | 'div';
+  size?: 'sm' | 'md';
+  className?: string;
+  titleClassName?: string;
+}) {
+  const iconBoxClass = size === 'sm' ? 'h-5 w-5' : 'h-6 w-6';
+  const titleSizeClass = size === 'sm' ? 'text-xs' : 'text-[13px]';
+
+  return (
+    <div className={`flex min-w-0 items-start gap-2.5 ${className ?? ''}`}>
+      <span
+        className={`flex ${iconBoxClass} shrink-0 items-center justify-center rounded-md bg-[var(--amber-subtle)] text-[var(--amber)]`}
+        aria-hidden="true"
+      >
+        {icon}
+      </span>
+      <span className="min-w-0">
+        <HeadingTag
+          id={id}
+          className={`flex min-w-0 items-center gap-1.5 ${titleSizeClass} font-semibold tracking-wide text-foreground ${titleClassName ?? ''}`}
+        >
+          <span className="min-w-0">{title}</span>
+          {descriptionTooltip ? <AgentHeadingHelp label={descriptionTooltip} size={size} /> : null}
+        </HeadingTag>
+        {description ? (
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+            {description}
+          </p>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+export function AgentHeadingHelp({
+  label,
+  size = 'md',
+}: {
+  label: string;
+  size?: 'sm' | 'md';
+}) {
+  const tooltipId = useId();
+  const iconSize = size === 'sm' ? 11 : 12;
+
+  return (
+    <span className="group/hint relative inline-flex shrink-0">
+      <button
+        type="button"
+        aria-label={label}
+        aria-describedby={tooltipId}
+        className="inline-flex h-5 w-5 items-center justify-center rounded-md text-muted-foreground/55 transition-colors duration-150 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <HelpCircle size={iconSize} aria-hidden="true" />
+      </button>
+      <span
+        id={tooltipId}
+        role="tooltip"
+        className="invisible pointer-events-none absolute left-1/2 top-full z-20 mt-1.5 w-max max-w-[260px] -translate-x-1/2 rounded-md bg-foreground px-2.5 py-1.5 text-left text-2xs font-normal leading-relaxed tracking-normal text-background opacity-0 shadow-sm transition-opacity duration-150 normal-case group-hover/hint:visible group-hover/hint:opacity-100 group-focus-within/hint:visible group-focus-within/hint:opacity-100"
+      >
+        {label}
+      </span>
+    </span>
+  );
+}
+
 export function SearchInput({
   value,
   onChange,
@@ -46,7 +128,7 @@ export function SearchInput({
   onChange: (v: string) => void;
   placeholder: string;
   ariaLabel: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  icon: LucideIcon;
 }) {
   return (
     <label className="relative block group/search">
@@ -160,29 +242,21 @@ function initials(name: string): string {
   return name.slice(0, 2).toUpperCase();
 }
 
-const AGENT_ICON_BY_KEY: Record<string, string> = {
-  'claude-code': 'claude',
-  claude: 'claude',
-  cursor: 'cursor',
-  windsurf: 'windsurf',
-  codex: 'openai',
-  'github-copilot': 'github-copilot',
-  copilot: 'github-copilot',
-  'gemini-cli': 'google',
-  gemini: 'google',
-  antigravity: 'google',
-};
+function avatarShellClasses(name: string, iconFile: string | null): string {
+  if (iconFile === 'mindos.svg') {
+    return 'border-[var(--amber)]/35 bg-[var(--amber-subtle)] text-[var(--amber)]';
+  }
+  if (iconFile) {
+    return 'border-border/60 bg-card/70 text-muted-foreground dark:bg-background/55';
+  }
+  const [bg, border, text] = AVATAR_PALETTES[hashName(name) % AVATAR_PALETTES.length];
+  return `${bg} ${border} ${text}`;
+}
 
-function agentIconSlug(name: string): string | null {
-  const key = name.trim().toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  if (AGENT_ICON_BY_KEY[key]) return AGENT_ICON_BY_KEY[key];
-  if (key.includes('claude')) return 'claude';
-  if (key.includes('cursor')) return 'cursor';
-  if (key.includes('windsurf')) return 'windsurf';
-  if (key.includes('codex')) return 'openai';
-  if (key.includes('copilot')) return 'github-copilot';
-  if (key.includes('gemini') || key.includes('google')) return 'google';
-  return null;
+function avatarStatusDotClass(status: 'connected' | 'detected' | 'notFound'): string {
+  if (status === 'connected') return 'bg-[var(--amber)]';
+  if (status === 'detected') return 'bg-[var(--amber)]/55';
+  return 'bg-muted-foreground/45';
 }
 
 export function AgentAvatar({
@@ -190,7 +264,6 @@ export function AgentAvatar({
   status,
   size = 'md',
   onRemove,
-  href,
 }: {
   name: string;
   status?: 'connected' | 'detected' | 'notFound';
@@ -198,18 +271,18 @@ export function AgentAvatar({
   onRemove?: () => void;
   href?: string;
 }) {
-  const [bg, border, text] = AVATAR_PALETTES[hashName(name) % AVATAR_PALETTES.length];
   const sizeClasses = size === 'sm' ? 'w-7 h-7 text-[10px]' : 'w-9 h-9 text-xs';
   const iconSizeClasses = size === 'sm' ? 'w-3.5 h-3.5' : 'w-5 h-5';
-  const dotColor = status === 'connected' ? 'bg-[var(--success)]' : status === 'detected' ? 'bg-[var(--amber)]' : 'bg-muted-foreground';
-  const iconSlug = agentIconSlug(name);
+  const iconFile = agentIconFile(name);
+  const shellClasses = avatarShellClasses(name, iconFile);
+  const dotColor = status ? avatarStatusDotClass(status) : '';
 
   return (
     <div className="relative group/avatar" title={name}>
-      <div className={`${sizeClasses} ${bg} ${border} ${text} border rounded-full flex items-center justify-center font-semibold select-none shadow-sm dark:shadow-none`}>
-        {iconSlug ? (
+      <div className={`${sizeClasses} ${shellClasses} border rounded-full flex items-center justify-center font-semibold select-none shadow-sm dark:shadow-none`}>
+        {iconFile ? (
           <img
-            src={`/agent-icons/${iconSlug}.svg`}
+            src={`/agent-icons/${iconFile}`}
             alt=""
             aria-hidden="true"
             className={`${iconSizeClasses} object-contain opacity-90`}

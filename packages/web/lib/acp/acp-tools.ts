@@ -4,13 +4,59 @@
  */
 
 import { Type, type Static } from '@sinclair/typebox';
-import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { getAcpAgents, findAcpAgent } from './registry';
-import { createSessionFromEntry, prompt, closeSession } from './session';
+import { createSessionFromEntry, prompt, closeSession, cancelPrompt } from './session';
 import { getMindRoot } from '../fs';
+import {
+  completeAgentRun,
+  failAgentRun,
+  startAgentRun,
+  updateAgentRun,
+} from '@geminilight/mindos/agent/ledger/run-ledger';
+import { createMindosAgentPermissionPolicyFromContext } from '@geminilight/mindos/agent/mindos-pi/permission';
+import {
+  abortErrorFromSignal,
+  isAbortLikeError,
+  linkAbortSignalToAgentRun,
+  registerAgentRunCancelHandler,
+} from '@geminilight/mindos/agent/ledger/run-cancellation';
 
 function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }], details: {} };
+}
+
+type MindosAgentTool = {
+  name: string;
+  label: string;
+  description: string;
+  parameters: unknown;
+  execute: (...args: any[]) => Promise<ReturnType<typeof textResult>>;
+};
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function permissionPolicyFromContext(ctx: unknown) {
+  return createMindosAgentPermissionPolicyFromContext(ctx, 'ask');
+}
+
+async function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw abortErrorFromSignal(signal, 'ACP run was canceled.');
+
+  let removeAbortListener: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => reject(abortErrorFromSignal(signal, 'ACP run was canceled.'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+  });
+
+  try {
+    return await Promise.race([promise, abortPromise]);
+  } finally {
+    removeAbortListener?.();
+  }
 }
 
 /* ── Parameter Schemas ─────────────────────────────────────────────────── */
@@ -27,7 +73,7 @@ const CallAcpAgentParams = Type.Object({
 /* ── Tool Implementations ──────────────────────────────────────────────── */
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const acpTools: AgentTool<any>[] = [
+export const acpTools: MindosAgentTool[] = [
   {
     name: 'list_acp_agents',
     label: 'List ACP Agents',
@@ -69,18 +115,62 @@ export const acpTools: AgentTool<any>[] = [
     label: 'Call ACP Agent',
     description: 'Spawn an ACP agent, send it a message, and return the result. The agent runs as a local subprocess. Use list_acp_agents first to see available agents.',
     parameters: CallAcpAgentParams,
-    execute: async (_id: string, params: Static<typeof CallAcpAgentParams>) => {
+    execute: async (_id: string, params: Static<typeof CallAcpAgentParams>, _signal?: AbortSignal, _onUpdate?: unknown, ctx?: unknown) => {
+      const cwd = getMindRoot();
+      const permissionPolicy = permissionPolicyFromContext(ctx);
+      const run = startAgentRun({
+        agentKind: 'acp',
+        runtimeId: params.agent_id,
+        displayName: params.agent_id,
+        cwd,
+        permissionMode: permissionPolicy.permissionMode,
+        inputSummary: params.message,
+        metadata: {
+          toolCallId: _id,
+          phase: 'resolve_agent',
+        },
+      });
+      let session: { id: string } | undefined;
+      const unlinkAbortLedger = linkAbortSignalToAgentRun(run.id, _signal, {
+        reason: 'ACP run was canceled.',
+        metadata: { aborted: true },
+      });
+      const unregisterCancelHandler = registerAgentRunCancelHandler(run.id, async () => {
+        if (session?.id) await cancelPrompt(session.id).catch(() => {});
+      });
       try {
         const entry = await findAcpAgent(params.agent_id);
         if (!entry) {
+          failAgentRun(run.id, {
+            error: `ACP agent not found: ${params.agent_id}.`,
+            metadata: { phase: 'resolve_agent' },
+          });
           return textResult(`ACP agent not found: ${params.agent_id}. Use list_acp_agents to see available agents.`);
         }
 
-        const cwd = getMindRoot();
-        const session = await createSessionFromEntry(entry, { cwd });
+        updateAgentRun(run.id, {
+          runtimeId: entry.id,
+          displayName: entry.name,
+          metadata: { phase: 'create_session' },
+        });
+        session = await createSessionFromEntry(entry, { cwd, permissionMode: permissionPolicy.acpPermissionMode });
+        updateAgentRun(run.id, {
+          archive: { sessionId: session.id },
+          metadata: {
+            phase: 'prompt',
+            sessionId: session.id,
+          },
+        });
 
         try {
-          const response = await prompt(session.id, params.message);
+          const response = await raceWithAbort(prompt(session.id, params.message), _signal);
+          completeAgentRun(run.id, {
+            outputSummary: response.text || '(empty response)',
+            metadata: {
+              sessionId: session.id,
+              outputChars: response.text?.length ?? 0,
+            },
+          });
           return textResult(
             `**${entry.name}** responded:\n\n${response.text || '(empty response)'}`
           );
@@ -88,7 +178,27 @@ export const acpTools: AgentTool<any>[] = [
           await closeSession(session.id).catch(() => {});
         }
       } catch (err) {
-        return textResult(`ACP call failed: ${(err as Error).message}`);
+        if (isAbortLikeError(err) || _signal?.aborted) {
+          failAgentRun(run.id, {
+            status: 'canceled',
+            error: 'ACP run was canceled.',
+            metadata: {
+              ...(session?.id ? { sessionId: session.id } : {}),
+              aborted: true,
+            },
+          });
+          return textResult('ACP call canceled.');
+        }
+        failAgentRun(run.id, {
+          error: err,
+          metadata: {
+            ...(session?.id ? { sessionId: session.id } : {}),
+          },
+        });
+        return textResult(`ACP call failed: ${errorMessage(err)}`);
+      } finally {
+        unlinkAbortLedger();
+        unregisterCancelHandler();
       }
     },
   },

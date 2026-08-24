@@ -1,42 +1,109 @@
 'use client';
 
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { PanelRightClose, PanelRightOpen } from 'lucide-react';
 import GithubSlugger from 'github-slugger';
 import { useLocale } from '@/lib/stores/locale-store';
 import { cn } from '@/lib/utils';
+import { getMainScrollContainer, getMainScrollRelativeTop, scrollMainTo } from '@/lib/main-scroll-container';
 
-interface Heading {
+export interface TableOfContentsHeading {
   id: string;
   text: string;
   level: number;
 }
 
-function parseHeadings(content: string): Heading[] {
+export function parseTableOfContentsHeadings(content: string): TableOfContentsHeading[] {
   const slugger = new GithubSlugger();
-  const lines = content.split('\n');
-  const headings: Heading[] = [];
+  const headings: TableOfContentsHeading[] = [];
   let inCodeBlock = false;
-  for (const line of lines) {
-    if (/^(`{3,}|~{3,})/.test(line)) {
-      inCodeBlock = !inCodeBlock;
-      continue;
+
+  for (let start = 0; start <= content.length;) {
+    let end = content.indexOf('\n', start);
+    if (end === -1) end = content.length;
+    const line = content.charCodeAt(end - 1) === 13
+      ? content.slice(start, end - 1)
+      : content.slice(start, end);
+
+    const fenceChar = line[0];
+    if ((fenceChar === '`' || fenceChar === '~') && line.length >= 3) {
+      let fenceLen = 0;
+      while (line[fenceLen] === fenceChar) fenceLen += 1;
+      if (fenceLen >= 3) {
+        inCodeBlock = !inCodeBlock;
+        start = end + 1;
+        continue;
+      }
     }
-    if (inCodeBlock) continue;
-    const match = line.match(/^(#{1,4})\s+(.+)/);
-    if (match) {
-      const level = match[1].length;
-      const text = match[2].trim();
-      const id = slugger.slug(text);
-      headings.push({ id, text, level });
+
+    if (!inCodeBlock && line[0] === '#') {
+      let level = 0;
+      while (level < 4 && line[level] === '#') level += 1;
+      const next = line[level];
+      if (level > 0 && (next === ' ' || next === '\t')) {
+        const text = line.slice(level).trim();
+        if (text) {
+          const id = slugger.slug(text);
+          headings.push({ id, text, level });
+        }
+      }
     }
+
+    if (end === content.length) break;
+    start = end + 1;
   }
+
   return headings;
 }
 
-const TOPBAR_H = 46;
-const SCROLL_OFFSET = TOPBAR_H + 12;
+export function hasTableOfContents(content: string): boolean {
+  return parseTableOfContentsHeadings(content).length >= 2;
+}
+
+const VIEW_HEADER_FALLBACK_H = 40;
+const VIEW_HEADER_CSS_VAR = 'var(--workspace-header-h)';
 const NAV_W = 212;
+export const TOC_COLLAPSED_KEY = 'mindos.toc.collapsed';
+export const TOC_COLLAPSED_EVENT = 'mindos:toc-collapsed-change';
+
+export function readTableOfContentsCollapsed(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(TOC_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function subscribeTableOfContentsCollapsed(callback: () => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const sync = () => callback();
+  window.addEventListener('storage', sync);
+  window.addEventListener(TOC_COLLAPSED_EVENT, sync);
+  return () => {
+    window.removeEventListener('storage', sync);
+    window.removeEventListener(TOC_COLLAPSED_EVENT, sync);
+  };
+}
+
+// Desktop has a fixed titlebar row above the view header (wiki/41 rule 10).
+// Read var(--app-titlebar-h) at runtime so JS scroll math stays in sync with CSS.
+function titlebarOffset(): number {
+  if (typeof document === 'undefined') return 0;
+  return parseInt(getComputedStyle(document.documentElement).getPropertyValue('--app-titlebar-h'), 10) || 0;
+}
+
+function viewHeaderHeight(): number {
+  if (typeof document === 'undefined') return VIEW_HEADER_FALLBACK_H;
+  const topbar = document.querySelector<HTMLElement>('.view-page-topbar');
+  const measured = topbar ? Math.round(topbar.getBoundingClientRect().height) : 0;
+  if (measured > 0) return measured;
+  return titlebarOffset() || VIEW_HEADER_FALLBACK_H;
+}
+
+function scrollOffset(): number {
+  return (getMainScrollContainer() ? 0 : titlebarOffset()) + viewHeaderHeight() + 12;
+}
 
 /**
  * Find the content heading elements in the DOM by index.
@@ -48,7 +115,7 @@ const NAV_W = 212;
  *
  * Instead, we find headings by scanning visible content containers in order.
  */
-function findHeadingElements(headings: Heading[]): (HTMLElement | null)[] {
+function findHeadingElements(headings: TableOfContentsHeading[]): (HTMLElement | null)[] {
   if (headings.length === 0) return [];
 
   // Check both .prose (View mode) and .ProseMirror (Edit mode) containers
@@ -84,30 +151,51 @@ function findHeadingElements(headings: Heading[]): (HTMLElement | null)[] {
   return headings.map(() => null);
 }
 
-interface TableOfContentsProps {
-  content: string;
+function findHeadingElementById(heading: TableOfContentsHeading | undefined): HTMLElement | null {
+  if (!heading?.id) return null;
+  return document.getElementById(heading.id);
 }
 
-export default function TableOfContents({ content }: TableOfContentsProps) {
+export function scrollTocLinkIntoNavView(link: HTMLElement, nav: HTMLElement): void {
+  if (!link.isConnected) return;
+
+  const navRect = nav.getBoundingClientRect();
+  const linkRect = link.getBoundingClientRect();
+  if (navRect.height <= 0 || linkRect.height <= 0) return;
+
+  const topInset = 40;
+  const bottomInset = 40;
+  const isAbove = linkRect.top < navRect.top + topInset;
+  const isBelow = linkRect.bottom > navRect.bottom - bottomInset;
+  if (!isAbove && !isBelow) return;
+
+  const centeredDelta = linkRect.top - navRect.top - (navRect.height - linkRect.height) / 2;
+  const nextTop = Math.max(0, nav.scrollTop + centeredDelta);
+  if (typeof nav.scrollTo === 'function') {
+    nav.scrollTo({ top: nextTop, behavior: 'auto' });
+  } else {
+    nav.scrollTop = nextTop;
+  }
+}
+
+interface TableOfContentsProps {
+  content?: string;
+  headings?: TableOfContentsHeading[];
+}
+
+export default function TableOfContents({ content = '', headings: providedHeadings }: TableOfContentsProps) {
   const { t } = useLocale();
   const { headings, minLevel } = useMemo(() => {
-    const h = parseHeadings(content);
+    const h = providedHeadings ?? parseTableOfContentsHeadings(content);
     return { headings: h, minLevel: h.length > 0 ? Math.min(...h.map(x => x.level)) : 1 };
-  }, [content]);
+  }, [content, providedHeadings]);
   const [activeIdx, setActiveIdx] = useState(-1);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(readTableOfContentsCollapsed);
 
-  // Broadcast TOC width to content area via CSS variables
   useEffect(() => {
-    const root = document.documentElement.style;
-    root.setProperty('--toc-width', collapsed ? '0px' : `${NAV_W}px`);
-    if (collapsed) {
-      root.removeProperty('--toc-margin');
-    } else {
-      root.setProperty('--toc-margin', `${NAV_W + 8}px`);
-    }
-    return () => { root.removeProperty('--toc-width'); root.removeProperty('--toc-margin'); };
-  }, [collapsed]);
+    return subscribeTableOfContentsCollapsed(() => setCollapsed(readTableOfContentsCollapsed()));
+  }, []);
+
   const observerRef = useRef<IntersectionObserver | null>(null);
   const navRef = useRef<HTMLElement | null>(null);
   const linkRefs = useRef<Map<number, HTMLAnchorElement>>(new Map());
@@ -117,15 +205,20 @@ export default function TableOfContents({ content }: TableOfContentsProps) {
   const scrollActiveIntoView = useCallback((idx: number) => {
     const link = linkRefs.current.get(idx);
     const nav = navRef.current;
-    if (!link || !nav || !link.isConnected) return;
-    const navRect = nav.getBoundingClientRect();
-    const linkRect = link.getBoundingClientRect();
-    const isAbove = linkRect.top < navRect.top + 40;
-    const isBelow = linkRect.bottom > navRect.bottom - 40;
-    if (isAbove || isBelow) {
-      link.scrollIntoView({ block: 'center', behavior: 'auto' });
-    }
+    if (!link || !nav) return;
+    scrollTocLinkIntoNavView(link, nav);
   }, []);
+
+  const handleCollapsedToggle = useCallback(() => {
+    const next = !collapsed;
+    setCollapsed(next);
+    try {
+      window.localStorage.setItem(TOC_COLLAPSED_KEY, next ? '1' : '0');
+    } catch {
+      // Keep the in-memory toggle responsive even when storage is unavailable.
+    }
+    window.dispatchEvent(new Event(TOC_COLLAPSED_EVENT));
+  }, [collapsed]);
 
   // Set up IntersectionObserver to track which heading is visible
   useEffect(() => {
@@ -135,6 +228,7 @@ export default function TableOfContents({ content }: TableOfContentsProps) {
       headingElsRef.current = els;
       const validEls = els.filter(Boolean) as HTMLElement[];
       if (validEls.length === 0) return;
+      const scrollRoot = getMainScrollContainer();
 
       observerRef.current?.disconnect();
       observerRef.current = new IntersectionObserver(
@@ -151,7 +245,7 @@ export default function TableOfContents({ content }: TableOfContentsProps) {
             }
           }
         },
-        { rootMargin: `-${SCROLL_OFFSET}px 0% -70% 0%`, threshold: 0 }
+        { root: scrollRoot, rootMargin: `-${scrollOffset()}px 0% -70% 0%`, threshold: 0 }
       );
       validEls.forEach(el => observerRef.current?.observe(el));
     }, 300);
@@ -161,60 +255,57 @@ export default function TableOfContents({ content }: TableOfContentsProps) {
 
   if (headings.length < 2) return null;
 
+  const toggleLabel = collapsed ? t.view.tocExpandLabel : t.view.tocCollapseLabel;
+
   const handleClick = (e: React.MouseEvent, idx: number) => {
-    e.preventDefault();
     // Re-find elements in case DOM changed since observer setup
     const els = findHeadingElements(headings);
     headingElsRef.current = els;
-    const el = els[idx];
-    if (!el) return;
-    const top = el.getBoundingClientRect().top + window.scrollY - SCROLL_OFFSET;
-    window.scrollTo({ top, behavior: 'smooth' });
+    const el = els[idx] ?? findHeadingElementById(headings[idx]);
+    if (!el) {
+      setActiveIdx(idx);
+      return;
+    }
+    e.preventDefault();
+    const top = getMainScrollRelativeTop(el) - scrollOffset();
+    scrollMainTo({ top, behavior: 'smooth' });
     setActiveIdx(idx);
   };
 
   return (
-    <>
-      {/* Collapse / expand toggle — separate from aside so it stays visible */}
+    <aside
+      className="hidden xl:flex min-w-0 flex-col z-app-sticky overflow-visible self-start sticky relative"
+      data-markdown-toc-panel
+      style={{
+        top: `calc(${VIEW_HEADER_CSS_VAR} + 24px)`,
+        maxHeight: `calc(100dvh - var(--app-titlebar-h) - ${VIEW_HEADER_CSS_VAR} - 48px)`,
+        width: collapsed ? 0 : NAV_W,
+      }}
+    >
       <button
-        onClick={() => setCollapsed(v => !v)}
-        className="hidden xl:flex fixed z-10 top-[46px] flex items-center justify-center w-5 h-8 rounded-l-md border border-r-0 border-border hover:bg-muted transition-colors"
-        style={{
-          right: `calc(var(--right-panel-width, 0px) + ${collapsed ? 0 : NAV_W}px)`,
-          background: 'var(--background)',
-          transition: 'right 200ms ease-in-out',
-        }}
-        title={collapsed ? t.view.tocExpand : t.view.tocCollapse}
+        type="button"
+        onClick={handleCollapsedToggle}
+        className={cn(
+          'absolute top-12 z-10 flex h-8 items-center justify-center border border-border bg-background text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          'w-7 shadow-sm',
+          collapsed ? 'left-0 rounded-md' : '-left-7 rounded-l-md border-r-0',
+        )}
+        title={toggleLabel}
+        aria-label={toggleLabel}
+        aria-expanded={!collapsed}
+        data-markdown-toc-toggle
       >
-        <ChevronRight
-          size={11}
-          className="text-muted-foreground/60 transition-transform duration-200"
-          style={{ transform: collapsed ? 'rotate(180deg)' : 'rotate(0deg)' }}
-        />
+        {collapsed ? <PanelRightOpen size={13} aria-hidden="true" /> : <PanelRightClose size={13} aria-hidden="true" />}
       </button>
-
-      {/* TOC panel */}
-      <aside
-        className="hidden xl:flex flex-col fixed z-10 overflow-hidden"
-        style={{
-          top: TOPBAR_H,
-          height: `calc(100vh - ${TOPBAR_H}px)`,
-          width: NAV_W,
-          right: 'var(--right-panel-width, 0px)',
-          transform: collapsed ? `translateX(${NAV_W}px)` : 'translateX(0)',
-          transition: 'transform 200ms ease-in-out, right 200ms ease-out',
-        }}
-      >
-      <div className="flex items-center h-[46px] px-4 border-l border-b border-border" style={{ background: 'var(--background)' }}>
-        <p className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground/55 shrink-0">
-          {t.view.tocTitle}
-        </p>
-      </div>
       <nav
         ref={navRef}
         aria-label={t.view.tocTitle}
-        className="flex flex-col gap-0.5 overflow-y-auto min-h-0 flex-1 pt-3 pb-5 pl-2 pr-3 border-l border-border"
+        className={cn(
+          'flex flex-col gap-0.5 overflow-y-auto min-h-0 flex-1 pb-5 pl-2 pr-3 border-l border-border bg-background/95 transition-opacity duration-150',
+          collapsed ? 'pointer-events-none opacity-0' : 'opacity-100',
+        )}
         style={{ background: 'var(--background)' }}
+        aria-hidden={collapsed}
       >
         {headings.map((heading, i) => {
           const indent = (heading.level - minLevel) * 14;
@@ -258,6 +349,5 @@ export default function TableOfContents({ content }: TableOfContentsProps) {
         })}
       </nav>
     </aside>
-    </>
   );
 }

@@ -16,14 +16,15 @@ export default function PanelHeader({
   onMaximize?: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between px-4 py-3 h-[46px] border-b border-border shrink-0">
-      <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{title}</span>
-      <div className="flex items-center gap-1">
+    <div className="panel-header relative z-10 flex h-[var(--workspace-header-h)] shrink-0 items-center justify-between gap-2 border-b border-border px-4">
+      <span className="relative z-10 min-w-0 shrink truncate text-xs text-muted-foreground uppercase tracking-wider">{title}</span>
+      <div className="relative z-10 flex shrink-0 items-center gap-1">
         {children}
         {onMaximize && (
           <button
+            type="button"
             onClick={onMaximize}
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+            className="hit-target-box inline-flex h-8 w-8 items-center justify-center text-muted-foreground transition-colors duration-75 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-md)]"
             aria-label={maximized ? 'Restore panel' : 'Maximize panel'}
           >
             {maximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}

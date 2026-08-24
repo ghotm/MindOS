@@ -1,25 +1,35 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, AlertCircle, Loader2, Copy } from 'lucide-react';
 import CustomSelect from '@/components/CustomSelect';
 import { apiFetch } from '@/lib/api';
 import { copyToClipboard } from '@/lib/clipboard';
+import { revealMcpAuthToken } from '@/lib/mcp-token';
+import { SKILL_AGENT_REGISTRY } from '@/lib/mcp-agent-registry';
 import { toast } from '@/lib/toast';
 import { PasswordInput } from './Primitives';
-import type { AgentInfo, McpAgentInstallProps } from './types';
+import type { AgentInfo, McpAgentInstallProps, SettingsMcpMessages } from './types';
+import { Button } from '@/components/ui/button';
 
 /* ── Agent Install ─────────────────────────────────────────────── */
 
-export default function AgentInstall({ agents, t, onRefresh, mode = 'mcp', activeSkillName = 'mindos' }: McpAgentInstallProps) {
+export default function AgentInstall({ agents, t, onRefresh, mode = 'mcp', activeSkillName = 'mindos', status }: McpAgentInstallProps) {
   const m = t.settings?.mcp;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [transport, setTransport] = useState<'auto' | 'stdio' | 'http'>('auto');
-  const [httpUrl, setHttpUrl] = useState('http://localhost:8781/mcp');
+  const defaultHttpUrl = useMemo(() => status?.endpoint || `http://localhost:${status?.port ?? 8781}/mcp`, [status?.endpoint, status?.port]);
+  const [httpUrl, setHttpUrl] = useState(defaultHttpUrl);
   const [httpToken, setHttpToken] = useState('');
+  const [httpUrlTouched, setHttpUrlTouched] = useState(false);
+  const [httpTokenTouched, setHttpTokenTouched] = useState(false);
   const [scopes, setScopes] = useState<Record<string, 'project' | 'global'>>({});
   const [installing, setInstalling] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!httpUrlTouched) setHttpUrl(defaultHttpUrl);
+  }, [defaultHttpUrl, httpUrlTouched]);
 
   const getEffectiveTransport = (agent: AgentInfo) => {
     if (transport === 'auto') return agent.preferredTransport;
@@ -27,6 +37,8 @@ export default function AgentInstall({ agents, t, onRefresh, mode = 'mcp', activ
   };
 
   const toggle = (key: string) => {
+    const agent = agents.find(a => a.key === key);
+    if (!agent?.present) return;
     setSelected(prev => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key); else next.add(key);
@@ -34,14 +46,30 @@ export default function AgentInstall({ agents, t, onRefresh, mode = 'mcp', activ
     });
   };
 
+  const selectedInstallableKeys = useMemo(
+    () => [...selected].filter(key => agents.some(agent => agent.key === key && agent.present)),
+    [agents, selected],
+  );
+
   /* ── MCP mode: install MCP config via API ── */
   const handleMcpInstall = async () => {
-    if (selected.size === 0) return;
+    if (selectedInstallableKeys.length === 0) return;
     setInstalling(true);
     setMessage(null);
     try {
+      const includeHttpSettings = transport === 'http' || selectedInstallableKeys.some(key => {
+        const agent = agents.find(a => a.key === key);
+        return transport === 'auto' && agent?.preferredTransport === 'http';
+      });
+      const resolvedHttpToken = includeHttpSettings
+        ? httpTokenTouched
+          ? httpToken
+          : status?.authConfigured
+            ? await revealMcpAuthToken()
+            : ''
+        : '';
       const payload = {
-        agents: [...selected].map(key => {
+        agents: selectedInstallableKeys.map(key => {
           const agent = agents.find(a => a.key === key);
           const effectiveTransport = transport === 'auto'
             ? (agent?.preferredTransport || 'stdio')
@@ -53,20 +81,54 @@ export default function AgentInstall({ agents, t, onRefresh, mode = 'mcp', activ
           };
         }),
         transport,
-        ...(transport === 'http' ? { url: httpUrl, token: httpToken } : {}),
-        ...(transport === 'auto' ? { url: httpUrl, token: httpToken } : {}),
+        ...(includeHttpSettings ? { url: httpUrl, token: resolvedHttpToken } : {}),
       };
       const res = await apiFetch<{ results: Array<{ agent: string; status: string; message?: string }> }>('/api/mcp/install', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      const ok = res.results.filter(r => r.status === 'ok').length;
+      const okResults = res.results.filter(r => r.status === 'ok');
+      const ok = okResults.length;
       const fail = res.results.filter(r => r.status === 'error');
-      if (fail.length > 0) {
-        setMessage({ type: 'error', text: fail.map(f => `${f.agent}: ${f.message}`).join('; ') });
+
+      // Link the active skill to each successfully configured, skill-capable agent.
+      // MCP config install and skill linking are independent steps: a link failure
+      // never rolls back the MCP install.
+      const linkErrors: string[] = [];
+      const restartAgents: string[] = [];
+      let linkedCount = 0;
+      for (const result of okResults) {
+        const registration = SKILL_AGENT_REGISTRY[result.agent];
+        if (registration?.mode === 'unsupported') continue;
+        try {
+          await apiFetch('/api/skills', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'link', name: activeSkillName, agentKey: result.agent }),
+          });
+          linkedCount += 1;
+          if (registration?.mode === 'additional') {
+            restartAgents.push(agents.find(a => a.key === result.agent)?.name ?? result.agent);
+          }
+        } catch (err) {
+          linkErrors.push(`${result.agent}: ${err instanceof Error ? err.message : (m?.skillLinkFailed ?? 'Failed to update skill link')}`);
+        }
+      }
+
+      if (fail.length > 0 || linkErrors.length > 0) {
+        const parts = [...fail.map(f => `${f.agent}: ${f.message}`), ...linkErrors];
+        setMessage({ type: 'error', text: parts.join('; ') });
       } else {
-        setMessage({ type: 'success', text: m?.installSuccess ? m.installSuccess(ok) : `${ok} agent(s) configured` });
+        let text = m?.installSuccess ? m.installSuccess(ok) : `${ok} agent(s) configured`;
+        if (linkedCount > 0) {
+          text += ` · ${m?.skillLinked ?? 'Skill linked'}`;
+          if (restartAgents.length > 0) {
+            const names = restartAgents.join(', ');
+            text += ` · ${m?.skillLinkRestartHint ? m.skillLinkRestartHint(names) : `Takes effect the next time ${names} starts`}`;
+          }
+        }
+        setMessage({ type: 'success', text });
       }
       setSelected(new Set());
       onRefresh();
@@ -99,18 +161,19 @@ export default function AgentInstall({ agents, t, onRefresh, mode = 'mcp', activ
       {/* Agent list */}
       <div className="space-y-1">
         {agents.map(agent => (
-          <div key={agent.key} className="flex items-center gap-3 py-1.5 text-sm">
+          <div key={agent.key} className={`flex items-center gap-3 py-1.5 text-sm ${agent.present ? '' : 'opacity-60'}`}>
             <input
               type="checkbox"
-              checked={selected.has(agent.key)}
+              checked={agent.present && selected.has(agent.key)}
               onChange={() => toggle(agent.key)}
+              disabled={!agent.present || installing}
               className="form-check"
             />
             <span className="w-28 shrink-0 text-xs">{agent.name}</span>
             <span className="text-2xs px-1.5 py-0.5 rounded font-mono bg-muted">
               {getEffectiveTransport(agent)}
             </span>
-            {agent.installed ? (
+            {agent.present && agent.installed ? (
               <>
                 <span className="text-2xs px-1.5 py-0.5 rounded bg-success/15 text-success font-mono">
                   {agent.transport}
@@ -119,7 +182,9 @@ export default function AgentInstall({ agents, t, onRefresh, mode = 'mcp', activ
               </>
             ) : (
               <span className="text-2xs text-muted-foreground">
-                {agent.present ? (m?.detected ?? 'Detected') : (m?.notFound ?? 'Not found')}
+                {agent.installed
+                  ? `${m?.installed ?? 'Installed'} · ${m?.notFound ?? 'Not found'}`
+                  : agent.present ? (m?.detected ?? 'Detected') : (m?.notFound ?? 'Not found')}
               </span>
             )}
             {selected.has(agent.key) && agent.hasProjectScope && agent.hasGlobalScope && (
@@ -173,15 +238,15 @@ export default function AgentInstall({ agents, t, onRefresh, mode = 'mcp', activ
         <div className="space-y-2 pl-5 text-xs">
           <div className="space-y-1">
             <label className="text-muted-foreground">{m?.httpUrl ?? 'MCP URL'}</label>
-            <input type="text" value={httpUrl} onChange={e => setHttpUrl(e.target.value)}
+            <input type="text" value={httpUrl} onChange={e => { setHttpUrlTouched(true); setHttpUrl(e.target.value); }}
               className="w-full px-2.5 py-1.5 text-xs rounded-md border border-border bg-background font-mono text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring" />
           </div>
           <div className="space-y-1">
             <label className="text-muted-foreground">{m?.httpToken ?? 'Auth Token'}</label>
             <PasswordInput
               value={httpToken}
-              onChange={setHttpToken}
-              placeholder="Bearer token"
+              onChange={(value) => { setHttpTokenTouched(true); setHttpToken(value); }}
+              placeholder={status?.authConfigured ? (status.maskedToken ?? 'Saved token') : 'Bearer token'}
               size="sm"
             />
           </div>
@@ -189,11 +254,16 @@ export default function AgentInstall({ agents, t, onRefresh, mode = 'mcp', activ
       )}
 
       {/* Install button */}
-      <button onClick={handleMcpInstall} disabled={selected.size === 0 || installing}
-        className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-[var(--amber)] text-[var(--amber-foreground)]">
+      <Button
+        variant="amber"
+        size="sm"
+        onClick={handleMcpInstall}
+        disabled={selectedInstallableKeys.length === 0 || installing}
+        className="gap-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-40"
+      >
         {installing && <Loader2 size={12} className="animate-spin" />}
         {installing ? (m?.installing ?? 'Installing...') : (m?.installSelected ?? 'Install Selected')}
-      </button>
+      </Button>
 
       {/* Message */}
       {message && (
@@ -213,21 +283,44 @@ export default function AgentInstall({ agents, t, onRefresh, mode = 'mcp', activ
 
 function CliSkillInstall({ agents, m, activeSkillName }: {
   agents: AgentInfo[];
-  m: Record<string, any> | undefined;
+  m: SettingsMcpMessages | undefined;
   activeSkillName: string;
 }) {
-  const [selectedAgent, setSelectedAgent] = useState(agents[0]?.key ?? 'claude-code');
-  const agent = agents.find(a => a.key === selectedAgent);
-  const cmd = `npx skills add GeminiLight/MindOS --skill ${activeSkillName} -a ${selectedAgent} -g -y`;
+  const installableAgents = useMemo(() => agents.filter(agent => agent.present), [agents]);
+  const [selectedAgent, setSelectedAgent] = useState(installableAgents[0]?.key ?? '');
+  const effectiveSelectedAgent = installableAgents.some(agent => agent.key === selectedAgent)
+    ? selectedAgent
+    : installableAgents[0]?.key ?? '';
+  const agent = installableAgents.find(a => a.key === effectiveSelectedAgent);
+  const registration = SKILL_AGENT_REGISTRY[effectiveSelectedAgent];
+  const agentFlag = registration?.mode === 'additional'
+    ? (registration.skillAgentName ?? effectiveSelectedAgent)
+    : 'universal';
+  const cmd = effectiveSelectedAgent
+    ? `npx skills add GeminiLight/MindOS --skill ${activeSkillName} -a ${agentFlag} -g -y`
+    : '';
 
   const handleCopy = async () => {
+    if (!cmd) return;
     const ok = await copyToClipboard(cmd);
     if (ok) toast.copy();
   };
 
-  const connected = agents.filter(a => a.present && a.installed);
-  const detected = agents.filter(a => a.present && !a.installed);
-  const notFound = agents.filter(a => !a.present);
+  const connected = installableAgents.filter(a => a.installed);
+  const detected = installableAgents.filter(a => !a.installed);
+
+  if (installableAgents.length === 0) {
+    return (
+      <div className="space-y-3 pt-2">
+        <p className="text-xs text-muted-foreground">
+          {m?.cliInstallDesc ?? 'Install the MindOS Skill to your agent so it can operate your knowledge base.'}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {m?.notFound ?? 'Not found'}
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-3 pt-2">
@@ -237,13 +330,12 @@ function CliSkillInstall({ agents, m, activeSkillName }: {
 
       {/* Agent selector */}
       <CustomSelect
-        value={selectedAgent}
+        value={effectiveSelectedAgent}
         onChange={setSelectedAgent}
         size="sm"
         options={[
           ...(connected.length > 0 ? [{ label: m?.connectedGroup ?? 'Connected', options: connected.map(a => ({ value: a.key, label: a.name })) }] : []),
           ...(detected.length > 0 ? [{ label: m?.detectedGroup ?? 'Detected', options: detected.map(a => ({ value: a.key, label: a.name })) }] : []),
-          ...(notFound.length > 0 ? [{ label: m?.notFoundGroup ?? 'Not Installed', options: notFound.map(a => ({ value: a.key, label: a.name })) }] : []),
         ]}
       />
 

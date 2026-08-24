@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { AcpRegistryEntry } from './types';
+import type { AcpPermissionEvent, AcpRegistryEntry } from './types';
 
 // Mock SDK connection that records calls
 let mockInitialize: ReturnType<typeof vi.fn>;
@@ -9,10 +9,14 @@ let mockPrompt: ReturnType<typeof vi.fn>;
 let mockCancel: ReturnType<typeof vi.fn>;
 let mockSetSessionMode: ReturnType<typeof vi.fn>;
 let mockSetSessionConfigOption: ReturnType<typeof vi.fn>;
-let mockUnstableCloseSession: ReturnType<typeof vi.fn>;
+let mockCloseSession: ReturnType<typeof vi.fn>;
 let mockLoadSession: ReturnType<typeof vi.fn>;
 let mockListSessions: ReturnType<typeof vi.fn>;
-let capturedCallbacks: { onSessionUpdate?: (params: unknown) => void } = {};
+let capturedCallbacks: {
+  onSessionUpdate?: (params: unknown) => void;
+  onPermissionRequest?: (event: AcpPermissionEvent) => void;
+  onPermissionResolved?: (event: AcpPermissionEvent) => void;
+} = {};
 
 vi.mock('./registry.js', () => ({
   findAcpAgent: vi.fn(),
@@ -30,7 +34,7 @@ vi.mock('./subprocess.js', () => ({
         cancel: mockCancel,
         setSessionMode: mockSetSessionMode,
         setSessionConfigOption: mockSetSessionConfigOption,
-        unstable_closeSession: mockUnstableCloseSession,
+        closeSession: mockCloseSession,
         loadSession: mockLoadSession,
         listSessions: mockListSessions,
         signal: new AbortController().signal,
@@ -43,8 +47,9 @@ vi.mock('./subprocess.js', () => ({
   killAgent: vi.fn((p: { alive: boolean }) => { p.alive = false; }),
 }));
 
-import { createSession, createSessionFromEntry, loadSession, listSessions, prompt, promptStream, cancelPrompt, closeSession, setMode, setConfigOption, getSession, getActiveSessions } from './session';
+import { createSession, createSessionFromEntry, loadSession, listSessions, listSessionsForAgent, prompt, promptStream, cancelPrompt, closeSession, setMode, setConfigOption, getSession, getActiveSessions, getSessionSnapshot, getActiveSessionSnapshots } from './session';
 import { findAcpAgent } from './registry.js';
+import { spawnAndConnect } from './subprocess.js';
 
 const MOCK_ENTRY: AcpRegistryEntry = {
   id: 'test-agent',
@@ -66,7 +71,7 @@ describe('ACP Session (SDK-based)', () => {
     mockCancel = vi.fn().mockResolvedValue(undefined);
     mockSetSessionMode = vi.fn().mockResolvedValue({});
     mockSetSessionConfigOption = vi.fn().mockResolvedValue({ configOptions: [] });
-    mockUnstableCloseSession = vi.fn().mockResolvedValue({});
+    mockCloseSession = vi.fn().mockResolvedValue({});
     mockLoadSession = vi.fn().mockResolvedValue({ sessionId: 'loaded-ses-1' });
     mockListSessions = vi.fn().mockResolvedValue({ sessions: [] });
 
@@ -83,6 +88,64 @@ describe('ACP Session (SDK-based)', () => {
       expect(session.id).toContain('ses-test-agent-');
       expect(mockInitialize).toHaveBeenCalledOnce();
       expect(mockNewSession).toHaveBeenCalledOnce();
+    });
+
+    it('injects allowlisted MCP servers into new ACP sessions after initialize', async () => {
+      mockInitialize.mockResolvedValueOnce({
+        agentCapabilities: { mcpCapabilities: { http: true } },
+      });
+
+      const session = await createSessionFromEntry(MOCK_ENTRY, {
+        mcpConfig: {
+          mcpServers: {
+            filesystem: {
+              command: 'mcp-filesystem',
+              args: ['--root', '/tmp/project'],
+              env: { FILESYSTEM_TOKEN: 'secret-value' },
+              agentSessions: true,
+            },
+            remoteDocs: {
+              type: 'http',
+              url: 'https://mcp.example.com',
+              headers: { Authorization: 'Bearer secret' },
+              agentSessions: true,
+            },
+            github: {
+              command: 'mcp-github',
+              env: { GITHUB_TOKEN: 'must-not-inherit' },
+              agentSessions: ['search_repositories'],
+            },
+          },
+        },
+      });
+
+      expect(mockNewSession).toHaveBeenCalledWith({
+        cwd: process.cwd(),
+        mcpServers: [
+          {
+            name: 'filesystem',
+            command: 'mcp-filesystem',
+            args: ['--root', '/tmp/project'],
+            env: [{ name: 'FILESYSTEM_TOKEN', value: 'secret-value' }],
+          },
+          {
+            type: 'http',
+            name: 'remoteDocs',
+            url: 'https://mcp.example.com',
+            headers: [{ name: 'Authorization', value: 'Bearer secret' }],
+          },
+        ],
+      });
+      expect(session.mcpServers).toEqual([
+        { name: 'filesystem', type: 'stdio' },
+        { name: 'remoteDocs', type: 'http' },
+      ]);
+      expect(getSessionSnapshot(session.id)?.mcpServers).toEqual([
+        { name: 'filesystem', type: 'stdio' },
+        { name: 'remoteDocs', type: 'http' },
+      ]);
+      expect(JSON.stringify(getSessionSnapshot(session.id))).not.toContain('secret');
+      expect(JSON.stringify(getSessionSnapshot(session.id))).not.toContain('must-not-inherit');
     });
 
     it('extracts agentSessionId from SDK newSession response', async () => {
@@ -112,6 +175,7 @@ describe('ACP Session (SDK-based)', () => {
       expect(session.modes).toHaveLength(2);
       expect(session.modes![0]).toEqual({ id: 'default', name: 'Default', description: undefined });
       expect(session.modes![1]).toEqual({ id: 'code', name: 'Code Mode', description: 'Optimized for coding' });
+      expect(session.currentModeId).toBe('default');
     });
 
     it('parses modes from flat array format', async () => {
@@ -145,6 +209,17 @@ describe('ACP Session (SDK-based)', () => {
       const session = await createSessionFromEntry(MOCK_ENTRY);
       expect(session).toBeDefined();
       expect(mockAuthenticate).toHaveBeenCalledWith({ methodId: 'terminal' });
+    });
+
+    it('declares readonly client capabilities when permissionMode is readonly', async () => {
+      await createSessionFromEntry(MOCK_ENTRY, { permissionMode: 'readonly' });
+
+      expect(mockInitialize).toHaveBeenCalledWith(expect.objectContaining({
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: false },
+          terminal: false,
+        },
+      }));
     });
   });
 
@@ -240,6 +315,145 @@ describe('ACP Session (SDK-based)', () => {
       expect(updates.length).toBeGreaterThanOrEqual(1);
       expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ type: 'done' }));
     });
+
+    it('updates the session snapshot from dynamic ACP updates', async () => {
+      mockNewSession.mockResolvedValueOnce({
+        sessionId: 'agent-ses-snapshot',
+        modes: {
+          availableModes: [
+            { id: 'default', name: 'Default' },
+            { id: 'code', name: 'Code' },
+          ],
+          currentModeId: 'default',
+        },
+        configOptions: [
+          {
+            configId: 'model',
+            category: 'model',
+            currentValue: 'cheap',
+            options: [{ id: 'cheap', label: 'Cheap' }, { id: 'smart', label: 'Smart' }],
+          },
+          {
+            configId: 'reasoning_effort',
+            category: 'thought_level',
+            currentValue: 'medium',
+            options: [{ id: 'low', label: 'Low' }, { id: 'medium', label: 'Medium' }],
+          },
+        ],
+      });
+      mockPrompt.mockImplementationOnce(async () => {
+        capturedCallbacks.onSessionUpdate?.({
+          sessionId: 'agent-ses-snapshot',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              { name: 'commit', description: 'Prepare a commit.' },
+              '/plan',
+            ],
+          },
+        });
+        capturedCallbacks.onSessionUpdate?.({
+          sessionId: 'agent-ses-snapshot',
+          update: { sessionUpdate: 'current_mode_update', currentModeId: 'code' },
+        });
+        capturedCallbacks.onSessionUpdate?.({
+          sessionId: 'agent-ses-snapshot',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tc-1',
+            title: 'Read file',
+            status: 'pending',
+            kind: 'read',
+            rawInput: '{"path":"README.md"}',
+          },
+        });
+        capturedCallbacks.onSessionUpdate?.({
+          sessionId: 'agent-ses-snapshot',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tc-1',
+            status: 'completed',
+            rawOutput: 'ok',
+          },
+        });
+        return { stopReason: 'end_turn' };
+      });
+
+      const session = await createSessionFromEntry(MOCK_ENTRY);
+      await promptStream(session.id, 'inspect', () => {});
+
+      const snapshot = getSessionSnapshot(session.id);
+      expect(snapshot).toMatchObject({
+        schemaVersion: 1,
+        sessionId: session.id,
+        agentId: 'test-agent',
+        agentSessionId: 'agent-ses-snapshot',
+        currentModeId: 'code',
+        controls: {
+          model: { status: 'available', currentValue: 'cheap', options: [{ id: 'cheap', label: 'Cheap' }, { id: 'smart', label: 'Smart' }] },
+          mode: { status: 'available', currentValue: 'code' },
+          thoughtLevel: { status: 'available', currentValue: 'medium' },
+        },
+        availableCommands: [
+          { id: 'commit', name: 'commit', description: 'Prepare a commit.' },
+          { id: 'plan', name: 'plan' },
+        ],
+        toolSummary: { total: 1, completed: 1 },
+      });
+      expect(snapshot?.toolCalls[0]).toMatchObject({
+        toolCallId: 'tc-1',
+        status: 'completed',
+        rawOutput: 'ok',
+      });
+      expect(getActiveSessionSnapshots().some((item) => item.sessionId === session.id)).toBe(true);
+    });
+
+    it('stores ACP permission request and resolution events in the session snapshot', async () => {
+      mockPrompt.mockImplementationOnce(async () => {
+        capturedCallbacks.onPermissionRequest?.({
+          requestId: 'perm-1',
+          sessionId: 'agent-ses-perm',
+          toolCallId: 'tc-perm',
+          toolName: 'Write file',
+          status: 'pending',
+          options: [
+            { id: 'allow', label: 'Allow', kind: 'allow_once' },
+            { id: 'reject', label: 'Reject', kind: 'reject_once' },
+          ],
+          requestedAt: '2026-06-26T00:00:00.000Z',
+        });
+        capturedCallbacks.onPermissionResolved?.({
+          requestId: 'perm-1',
+          sessionId: 'agent-ses-perm',
+          toolCallId: 'tc-perm',
+          toolName: 'Write file',
+          status: 'resolved',
+          options: [
+            { id: 'allow', label: 'Allow', kind: 'allow_once' },
+            { id: 'reject', label: 'Reject', kind: 'reject_once' },
+          ],
+          selectedOptionId: 'allow',
+          outcome: 'allow_once',
+          requestedAt: '2026-06-26T00:00:00.000Z',
+          resolvedAt: '2026-06-26T00:00:01.000Z',
+        });
+        return { stopReason: 'end_turn' };
+      });
+
+      const session = await createSessionFromEntry(MOCK_ENTRY);
+      await promptStream(session.id, 'needs permission', () => {});
+
+      const snapshot = getSessionSnapshot(session.id);
+      expect(snapshot?.permissionEvents).toEqual([
+        expect.objectContaining({
+          requestId: 'perm-1',
+          status: 'resolved',
+          selectedOptionId: 'allow',
+          outcome: 'allow_once',
+        }),
+      ]);
+      expect(snapshot?.pendingPermissions).toEqual([]);
+    });
   });
 
   describe('cancelPrompt', () => {
@@ -296,14 +510,23 @@ describe('ACP Session (SDK-based)', () => {
       await closeSession('nonexistent');
     });
 
-    it('calls unstable_closeSession on SDK connection', async () => {
+    it('calls closeSession on SDK connection', async () => {
       mockNewSession.mockResolvedValueOnce({ sessionId: 'agent-ses-close' });
       const session = await createSessionFromEntry(MOCK_ENTRY);
       await closeSession(session.id);
 
-      expect(mockUnstableCloseSession).toHaveBeenCalledWith({
+      expect(mockCloseSession).toHaveBeenCalledWith({
         sessionId: 'agent-ses-close',
       });
+    });
+
+    it('can release the local process without closing a resumable agent session', async () => {
+      mockNewSession.mockResolvedValueOnce({ sessionId: 'agent-ses-preserve' });
+      const session = await createSessionFromEntry(MOCK_ENTRY);
+      await closeSession(session.id, { closeAgentSession: false });
+
+      expect(mockCloseSession).not.toHaveBeenCalled();
+      expect(getSession(session.id)).toBeUndefined();
     });
   });
 
@@ -324,19 +547,43 @@ describe('ACP Session (SDK-based)', () => {
       const session = await createSession('test-agent');
       expect(session.agentId).toBe('test-agent');
     });
+
+    it('creates sessions for configured custom ACP agents without registry lookup', async () => {
+      const session = await createSession('custom-acp', {
+        overrides: {
+          'custom-acp': {
+            name: 'Custom ACP',
+            command: 'custom-acp',
+            args: ['--acp'],
+          },
+        },
+      });
+
+      expect(session.agentId).toBe('custom-acp');
+      expect(findAcpAgent).not.toHaveBeenCalled();
+      expect(spawnAndConnect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'custom-acp',
+          name: 'Custom ACP',
+          command: 'custom-acp',
+          args: ['--acp'],
+          transport: 'stdio',
+        }),
+        expect.any(Object),
+      );
+    });
   });
 
   describe('createSessionFromEntry — edge cases', () => {
-    it('continues when session/new fails with non-auth error', async () => {
+    it('throws and cleans up when session/new fails with non-auth error', async () => {
       mockNewSession.mockRejectedValueOnce(new Error('Network timeout'));
-      const session = await createSessionFromEntry(MOCK_ENTRY);
-      expect(session).toBeDefined();
-      expect(session.agentSessionId).toBeUndefined();
+      await expect(createSessionFromEntry(MOCK_ENTRY)).rejects.toThrow('test-agent: session/new failed: Network timeout');
+      expect(getActiveSessions()).toHaveLength(0);
     });
 
     it('throws when session/new fails with auth error', async () => {
       mockNewSession.mockRejectedValueOnce(new Error('Authentication required'));
-      await expect(createSessionFromEntry(MOCK_ENTRY)).rejects.toThrow('Authentication required');
+      await expect(createSessionFromEntry(MOCK_ENTRY)).rejects.toThrow('test-agent: session/new failed: Authentication required');
     });
 
     it('enforces max total sessions limit', async () => {
@@ -398,6 +645,39 @@ describe('ACP Session (SDK-based)', () => {
       const session = await loadSession('test-agent', 'ses-loaded');
       expect(session.agentSessionId).toBe('ses-loaded');
     });
+
+    it('injects allowlisted MCP servers when loading ACP sessions', async () => {
+      (findAcpAgent as ReturnType<typeof vi.fn>).mockResolvedValueOnce(MOCK_ENTRY);
+      mockInitialize.mockResolvedValueOnce({
+        agentCapabilities: { loadSession: true, mcpCapabilities: { sse: true } },
+      });
+      mockLoadSession.mockResolvedValueOnce({ sessionId: 'ses-loaded', modes: [] });
+
+      const session = await loadSession('test-agent', 'ses-loaded', {
+        cwd: '/tmp/project',
+        mcpConfig: {
+          mcpServers: {
+            events: {
+              type: 'sse',
+              url: 'https://mcp.example.com/events',
+              agentSessions: true,
+            },
+          },
+        },
+      });
+
+      expect(mockLoadSession).toHaveBeenCalledWith({
+        sessionId: 'ses-loaded',
+        cwd: '/tmp/project',
+        mcpServers: [{
+          type: 'sse',
+          name: 'events',
+          url: 'https://mcp.example.com/events',
+          headers: [],
+        }],
+      });
+      expect(session.mcpServers).toEqual([{ name: 'events', type: 'sse' }]);
+    });
   });
 
   describe('listSessions', () => {
@@ -411,14 +691,54 @@ describe('ACP Session (SDK-based)', () => {
         agentCapabilities: { sessionCapabilities: { list: true } },
       });
       mockListSessions.mockResolvedValueOnce({
-        sessions: [{ sessionId: 'ses-1', cwd: '/home', title: 'My Session' }],
+        sessions: [{
+          sessionId: 'ses-1',
+          cwd: '/home',
+          title: 'My Session',
+          messages: [{ role: 'user', content: 'hello' }],
+          messageCount: 1,
+        }],
         nextCursor: 'abc',
       });
       const session = await createSessionFromEntry(MOCK_ENTRY);
       const result = await listSessions(session.id);
       expect(result.sessions).toHaveLength(1);
       expect(result.sessions[0].sessionId).toBe('ses-1');
+      expect(result.sessions[0].messages).toEqual([{ role: 'user', content: 'hello' }]);
+      expect(result.sessions[0].messageCount).toBe(1);
       expect(result.nextCursor).toBe('abc');
+    });
+
+    it('lists sessions by agent without creating a new session', async () => {
+      (findAcpAgent as ReturnType<typeof vi.fn>).mockResolvedValueOnce(MOCK_ENTRY);
+      mockInitialize.mockResolvedValueOnce({
+        agentCapabilities: { sessionCapabilities: { list: true } },
+      });
+      mockListSessions.mockResolvedValueOnce({
+        sessions: [{ sessionId: 'ses-agent-1', title: 'Agent Session', turns: [{ input: 'hi', output: 'there' }] }],
+      });
+
+      const result = await listSessionsForAgent('test-agent', { cwd: '/tmp/project' });
+
+      expect(mockNewSession).not.toHaveBeenCalled();
+      expect(mockListSessions).toHaveBeenCalledWith({ cwd: '/tmp/project' });
+      expect(result.sessions[0]).toMatchObject({
+        sessionId: 'ses-agent-1',
+        title: 'Agent Session',
+        turns: [{ input: 'hi', output: 'there' }],
+      });
+    });
+
+    it('accepts ACP 1.0 object-shaped session/list capabilities', async () => {
+      mockInitialize.mockResolvedValueOnce({
+        agentCapabilities: { sessionCapabilities: { list: {} } },
+      });
+      mockListSessions.mockResolvedValueOnce({
+        sessions: [{ sessionId: 'ses-object-cap', title: 'Object Cap' }],
+      });
+      const session = await createSessionFromEntry(MOCK_ENTRY);
+      const result = await listSessions(session.id);
+      expect(result.sessions[0].sessionId).toBe('ses-object-cap');
     });
   });
 

@@ -3,10 +3,21 @@ import type { AgentIdentity, ChatSession, Message } from '@/lib/types';
 import {
   MINDOS_AGENT,
   annotateMessageWithAgent,
+  annotateMessageWithAgentRuntime,
   bindSessionAgent,
+  bindSessionAgentRuntime,
+  compactRuntimeSessionPathLabel,
+  filterSessionsByRuntimeLane,
+  getRuntimeSessionSummary,
+  getMatchingRuntimeSessionBinding,
+  getMessageAgentRuntime,
   getSelectedAcpAgentFromMessage,
+  getSessionAgentRuntime,
+  isRuntimeSessionBindingResumable,
   resolveComposerAgent,
   resolveMessageAgent,
+  runtimeSessionCompactLabel,
+  runtimeSessionTooltip,
 } from '@/lib/ask-agent';
 
 describe('ask agent helpers', () => {
@@ -34,6 +45,24 @@ describe('ask agent helpers', () => {
     });
   });
 
+  it('annotates a native runtime message with its runtime kind', () => {
+    const message: Message = {
+      role: 'assistant',
+      content: 'Here is the answer.',
+    };
+
+    expect(annotateMessageWithAgentRuntime(message, {
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+    })).toEqual({
+      ...message,
+      agentId: 'codex',
+      agentName: 'Codex',
+      agentKind: 'codex',
+    });
+  });
+
   it('prefers the bound session agent over the initial preselected agent', () => {
     const initial: AgentIdentity = { id: 'cursor', name: 'Cursor' };
     expect(resolveComposerAgent({ sessionAgent: claude, initialAgent: initial })).toEqual(claude);
@@ -53,6 +82,35 @@ describe('ask agent helpers', () => {
     expect(getSelectedAcpAgentFromMessage({ agentId: 'mindos', agentName: 'MindOS' })).toBeNull();
   });
 
+  it('does not restore a native runtime as a legacy ACP selection', () => {
+    expect(getSelectedAcpAgentFromMessage({
+      agentId: 'codex',
+      agentName: 'Codex',
+      agentKind: 'codex',
+    })).toBeNull();
+  });
+
+  it('restores native and legacy runtime selections from message attribution', () => {
+    expect(getMessageAgentRuntime({
+      agentId: 'codex',
+      agentName: 'Codex',
+      agentKind: 'codex',
+    })).toEqual({
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+    });
+
+    expect(getMessageAgentRuntime({
+      agentId: 'claude-code',
+      agentName: 'Claude Code',
+    })).toEqual({
+      id: 'claude-code',
+      name: 'Claude Code',
+      kind: 'acp',
+    });
+  });
+
   it('binds an ACP agent to the active session without touching messages', () => {
     const session: ChatSession = {
       id: 's1',
@@ -64,6 +122,9 @@ describe('ask agent helpers', () => {
     expect(bindSessionAgent(session, claude)).toEqual({
       ...session,
       defaultAcpAgent: claude,
+      defaultAgentRuntime: { id: 'claude-code', name: 'Claude Code', kind: 'acp' },
+      externalAgentBinding: null,
+      runtimeSessionBinding: null,
     });
   });
 
@@ -74,11 +135,432 @@ describe('ask agent helpers', () => {
       updatedAt: 1,
       messages: [],
       defaultAcpAgent: claude,
+      externalAgentBinding: {
+        runtime: 'codex',
+        externalSessionId: 'thr_old',
+        status: 'active',
+        updatedAt: 1,
+      },
     };
 
     expect(bindSessionAgent(session, null)).toEqual({
       ...session,
       defaultAcpAgent: null,
+      defaultAgentRuntime: null,
+      externalAgentBinding: null,
+      runtimeSessionBinding: null,
     });
+  });
+
+  it('normalizes a legacy ACP session binding into a runtime identity', () => {
+    const session: ChatSession = {
+      id: 's1',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      defaultAcpAgent: claude,
+    };
+
+    expect(getSessionAgentRuntime(session)).toEqual({
+      id: 'claude-code',
+      name: 'Claude Code',
+      kind: 'acp',
+    });
+  });
+
+  it('prefers the new runtime binding over the legacy ACP binding', () => {
+    const session: ChatSession = {
+      id: 's1',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      defaultAcpAgent: claude,
+      defaultAgentRuntime: { id: 'codex', name: 'Codex', kind: 'codex' },
+    };
+
+    expect(getSessionAgentRuntime(session)).toEqual({
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+    });
+  });
+
+  it('binds a native runtime and stores its external session metadata', () => {
+    const session: ChatSession = {
+      id: 's1',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      defaultAcpAgent: claude,
+    };
+
+    expect(bindSessionAgentRuntime(session, {
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+    }, {
+      externalSessionId: 'thr_123',
+      cwd: '/tmp/mind',
+      updatedAt: 123,
+    })).toEqual({
+      ...session,
+      defaultAcpAgent: null,
+      defaultAgentRuntime: { id: 'codex', name: 'Codex', kind: 'codex' },
+      externalAgentBinding: {
+        runtime: 'codex',
+        externalSessionId: 'thr_123',
+        cwd: '/tmp/mind',
+        status: 'active',
+        updatedAt: 123,
+      },
+      runtimeSessionBinding: {
+        kind: 'codex-thread',
+        runtime: 'codex',
+        runtimeId: 'codex',
+        externalSessionId: 'thr_123',
+        cwd: '/tmp/mind',
+        status: 'active',
+        updatedAt: 123,
+      },
+    });
+  });
+
+  it('binds MindOS Pi runtime session metadata only after the runtime returns a session id', () => {
+    const session: ChatSession = {
+      id: 's1',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+    };
+    const runtime = { id: 'mindos', name: 'MindOS', kind: 'mindos' as const };
+
+    expect(bindSessionAgentRuntime(session, runtime)).toEqual({
+      ...session,
+      defaultAcpAgent: null,
+      defaultAgentRuntime: null,
+      externalAgentBinding: null,
+      runtimeSessionBinding: null,
+    });
+
+    const bound = bindSessionAgentRuntime(session, runtime, {
+      externalSessionId: 'pi-session-1',
+      cwd: '/tmp/mind',
+      updatedAt: 123,
+    });
+
+    expect(bound.runtimeSessionBinding).toEqual({
+      kind: 'mindos-pi-session',
+      runtime: 'mindos',
+      runtimeId: 'mindos',
+      externalSessionId: 'pi-session-1',
+      cwd: '/tmp/mind',
+      status: 'active',
+      updatedAt: 123,
+    });
+    expect(bound.externalAgentBinding).toBeNull();
+    expect(bound.defaultAgentRuntime).toBeNull();
+    expect(getSessionAgentRuntime(bound)).toBeNull();
+    expect(getMatchingRuntimeSessionBinding(bound, runtime)).toEqual(bound.runtimeSessionBinding);
+    expect(getRuntimeSessionSummary(bound)?.label).toBe('MindOS Pi session');
+  });
+
+  it('filters Chat Panel sessions into MindOS and native runtime lanes', () => {
+    const mindosSession: ChatSession = {
+      id: 'mindos-session',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'mindos' }],
+    };
+    const acpSession: ChatSession = {
+      id: 'acp-session',
+      createdAt: 2,
+      updatedAt: 2,
+      messages: [{ role: 'user', content: 'acp' }],
+      defaultAgentRuntime: { id: 'local-agent', name: 'Local ACP Agent', kind: 'acp' },
+    };
+    const codexSession: ChatSession = {
+      id: 'codex-session',
+      createdAt: 3,
+      updatedAt: 3,
+      messages: [{ role: 'user', content: 'codex' }],
+      defaultAgentRuntime: { id: 'codex', name: 'Codex', kind: 'codex' },
+    };
+    const claudeSession: ChatSession = {
+      id: 'claude-session',
+      createdAt: 4,
+      updatedAt: 4,
+      messages: [{ role: 'user', content: 'claude' }],
+      defaultAgentRuntime: { id: 'claude', name: 'Claude Code', kind: 'claude' },
+    };
+    const sessions = [mindosSession, acpSession, codexSession, claudeSession];
+
+    expect(filterSessionsByRuntimeLane(sessions, null).map((session) => session.id)).toEqual([
+      'mindos-session',
+    ]);
+    expect(filterSessionsByRuntimeLane(sessions, { id: 'local-agent', name: 'Local ACP Agent', kind: 'acp' }).map((session) => session.id)).toEqual([
+      'acp-session',
+    ]);
+    expect(filterSessionsByRuntimeLane(sessions, { id: 'other-acp', name: 'Other ACP Agent', kind: 'acp' }).map((session) => session.id)).toEqual([
+    ]);
+    expect(filterSessionsByRuntimeLane(sessions, { id: 'codex', name: 'Codex', kind: 'codex' }).map((session) => session.id)).toEqual([
+      'codex-session',
+    ]);
+    expect(filterSessionsByRuntimeLane(sessions, { id: 'claude', name: 'Claude Code', kind: 'claude' }).map((session) => session.id)).toEqual([
+      'claude-session',
+    ]);
+  });
+
+  it('unlinks local external session metadata while keeping the selected native runtime lane', () => {
+    const session: ChatSession = {
+      id: 's1',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'continue' }],
+      defaultAgentRuntime: { id: 'claude', name: 'Claude Code', kind: 'claude' },
+      externalAgentBinding: {
+        runtime: 'claude',
+        externalSessionId: 'session_123',
+        cwd: '/tmp/mind',
+        status: 'active',
+        updatedAt: 123,
+      },
+      runtimeSessionBinding: {
+        kind: 'claude-session',
+        runtime: 'claude',
+        runtimeId: 'claude',
+        externalSessionId: 'session_123',
+        cwd: '/tmp/mind',
+        status: 'active',
+        updatedAt: 123,
+      },
+    };
+
+    expect(bindSessionAgentRuntime(session, {
+      id: 'claude',
+      name: 'Claude Code',
+      kind: 'claude',
+    }, {
+      updatedAt: 456,
+    })).toEqual({
+      ...session,
+      defaultAcpAgent: null,
+      defaultAgentRuntime: { id: 'claude', name: 'Claude Code', kind: 'claude' },
+      externalAgentBinding: {
+        runtime: 'claude',
+        status: 'active',
+        updatedAt: 456,
+      },
+      runtimeSessionBinding: {
+        kind: 'claude-session',
+        runtime: 'claude',
+        runtimeId: 'claude',
+        status: 'active',
+        updatedAt: 456,
+      },
+    });
+  });
+
+  it('returns only the binding that matches the active native runtime identity', () => {
+    const session: ChatSession = {
+      id: 's1',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      runtimeSessionBinding: {
+        kind: 'codex-thread',
+        runtime: 'codex',
+        runtimeId: 'codex-main',
+        externalSessionId: 'thr_123',
+        status: 'active',
+        updatedAt: 123,
+      },
+    };
+
+    expect(getMatchingRuntimeSessionBinding(session, {
+      id: 'codex-main',
+      name: 'Codex',
+      kind: 'codex',
+    })).toEqual(session.runtimeSessionBinding);
+
+    expect(getMatchingRuntimeSessionBinding(session, {
+      id: 'codex-other',
+      name: 'Codex Other',
+      kind: 'codex',
+    })).toBeNull();
+  });
+
+  it('normalizes matching legacy native session metadata for display and resume', () => {
+    const session: ChatSession = {
+      id: 's1',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      externalAgentBinding: {
+        runtime: 'claude',
+        externalSessionId: 'claude-session-1',
+        cwd: '/tmp/mind',
+        status: 'active',
+        updatedAt: 456,
+      },
+    };
+
+    expect(getMatchingRuntimeSessionBinding(session, {
+      id: 'claude',
+      name: 'Claude Code',
+      kind: 'claude',
+    })).toEqual({
+      kind: 'claude-session',
+      runtime: 'claude',
+      runtimeId: 'claude',
+      externalSessionId: 'claude-session-1',
+      cwd: '/tmp/mind',
+      status: 'active',
+      updatedAt: 456,
+    });
+  });
+
+  it('restores native runtime identity from legacy native session metadata', () => {
+    const codexSession: ChatSession = {
+      id: 'legacy-codex',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      externalAgentBinding: {
+        runtime: 'codex',
+        externalSessionId: 'thread_legacy',
+        cwd: '/tmp/mind',
+        status: 'active',
+        updatedAt: 456,
+      },
+    };
+    const claudeSession: ChatSession = {
+      id: 'legacy-claude',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      externalAgentBinding: {
+        runtime: 'claude',
+        externalSessionId: 'session_legacy',
+        cwd: '/tmp/mind',
+        status: 'active',
+        updatedAt: 789,
+      },
+    };
+
+    expect(getSessionAgentRuntime(codexSession)).toEqual({
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+    });
+    expect(getSessionAgentRuntime(claudeSession)).toEqual({
+      id: 'claude',
+      name: 'Claude Code',
+      kind: 'claude',
+    });
+  });
+
+  it('summarizes typed and legacy runtime session metadata for history UI', () => {
+    const typed: ChatSession = {
+      id: 'codex',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      runtimeSessionBinding: {
+        kind: 'codex-thread',
+        runtime: 'codex',
+        runtimeId: 'codex',
+        externalSessionId: 'thread_1234567890abcdef',
+        cwd: '/tmp/mind',
+        status: 'failed',
+        updatedAt: 1,
+      },
+    };
+    const legacy: ChatSession = {
+      id: 'claude',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      externalAgentBinding: {
+        runtime: 'claude',
+        externalSessionId: 'session_1234567890abcdef',
+        cwd: '/tmp/mind',
+        status: 'active',
+        updatedAt: 2,
+      },
+    };
+
+    expect(getRuntimeSessionSummary(typed)).toMatchObject({
+      label: 'Codex thread',
+      idLabel: 'Codex thread thread_1...abcdef',
+      cwd: '/tmp/mind',
+      status: 'failed',
+    });
+    expect(getRuntimeSessionSummary(legacy)).toMatchObject({
+      label: 'Claude Code session',
+      idLabel: 'Claude Code session session_...abcdef',
+      cwd: '/tmp/mind',
+    });
+    expect(getRuntimeSessionSummary({ id: 'mindos', createdAt: 1, updatedAt: 1, messages: [] })).toBeNull();
+  });
+
+  it('builds compact runtime session display labels without losing full tooltip metadata', () => {
+    const session: ChatSession = {
+      id: 'claude',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      runtimeSessionBinding: {
+        kind: 'claude-session',
+        runtime: 'claude',
+        runtimeId: 'claude',
+        externalSessionId: 'session_1234567890abcdef',
+        cwd: '/tmp/mind',
+        status: 'active',
+        updatedAt: 1,
+      },
+    };
+    const summary = getRuntimeSessionSummary(session);
+
+    expect(runtimeSessionCompactLabel(summary)).toBe('Claude');
+    expect(compactRuntimeSessionPathLabel(summary?.cwd)).toBe('/mind');
+    expect(runtimeSessionTooltip(summary)).toContain('Claude Code session session_1234567890abcdef');
+    expect(runtimeSessionTooltip(summary)).toContain('/tmp/mind');
+  });
+
+  it('only treats active runtime session bindings with external ids as resumable', () => {
+    expect(isRuntimeSessionBindingResumable({
+      kind: 'codex-thread',
+      runtime: 'codex',
+      runtimeId: 'codex',
+      externalSessionId: 'thread_123',
+      status: 'active',
+      updatedAt: 1,
+    })).toBe(true);
+
+    expect(isRuntimeSessionBindingResumable({
+      kind: 'claude-session',
+      runtime: 'claude',
+      runtimeId: 'claude',
+      externalSessionId: 'session_failed',
+      status: 'failed',
+      updatedAt: 2,
+    })).toBe(false);
+
+    expect(isRuntimeSessionBindingResumable({
+      kind: 'codex-thread',
+      runtime: 'codex',
+      runtimeId: 'codex',
+      externalSessionId: 'thread_archived',
+      status: 'archived',
+      updatedAt: 3,
+    })).toBe(false);
+
+    expect(isRuntimeSessionBindingResumable({
+      kind: 'claude-session',
+      runtime: 'claude',
+      runtimeId: 'claude',
+      status: 'active',
+      updatedAt: 4,
+    })).toBe(false);
   });
 });

@@ -16,13 +16,14 @@ vi.mock('@/lib/stores/locale-store', () => ({
         help: 'Help',
         settingsTitle: 'Settings',
         syncLabel: 'Sync',
+        userLabel: 'User',
       },
     },
   }),
 }));
 
 vi.mock('next/link', () => ({
-  default: ({ children, ...props }: any) => <a {...props}>{children}</a>,
+  default: ({ children, onNavigate: _onNavigate, ...props }: any) => <a {...props}>{children}</a>,
 }));
 
 vi.mock('next/navigation', () => ({

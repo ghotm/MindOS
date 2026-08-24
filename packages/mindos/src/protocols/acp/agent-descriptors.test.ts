@@ -9,6 +9,8 @@ import {
   getDescriptorBinary,
   getDescriptorInstallCmd,
   getDetectableAgents,
+  getConfiguredDetectableAgents,
+  resolveConfiguredAcpAgentEntry,
 } from './agent-descriptors';
 import type { AcpRegistryEntry } from './types';
 
@@ -43,7 +45,7 @@ describe('resolveAgentCommand', () => {
     const result = resolveAgentCommand('gemini', fakeRegistry);
     expect(result.source).toBe('descriptor');
     expect(result.cmd).toBe('gemini');
-    expect(result.args).toEqual(['--experimental-acp']);
+    expect(result.args).toEqual(['--acp']);
   });
 
   it('falls back to registry for unknown agent', () => {
@@ -83,6 +85,34 @@ describe('resolveAgentCommand', () => {
     expect(result.cmd).toBe('npx');
     expect(result.args).toContain('@agentclientprotocol/claude-agent-acp');
   });
+
+  it('resolves Codex ACP through the ACP adapter wrapper', () => {
+    const result = resolveAgentCommand('codex-acp');
+    expect(result.source).toBe('descriptor');
+    expect(result.cmd).toBe('npx');
+    expect(result.args).toContain('@agentclientprotocol/codex-acp');
+  });
+
+  it('resolves Kimi through its ACP stdio subcommand', () => {
+    const result = resolveAgentCommand('kimi');
+    expect(result.source).toBe('descriptor');
+    expect(result.cmd).toBe('kimi');
+    expect(result.args).toEqual(['acp']);
+  });
+
+  it('resolves OpenCode through its ACP stdio subcommand', () => {
+    const result = resolveAgentCommand('opencode');
+    expect(result.source).toBe('descriptor');
+    expect(result.cmd).toBe('opencode');
+    expect(result.args).toEqual(['acp']);
+  });
+
+  it('resolves Qwen Code through its ACP flag', () => {
+    const result = resolveAgentCommand('qwen-code');
+    expect(result.source).toBe('descriptor');
+    expect(result.cmd).toBe('qwen');
+    expect(result.args).toEqual(['--acp']);
+  });
 });
 
 /* ── parseAcpAgentOverrides ──────────────────────────────────────────── */
@@ -97,7 +127,7 @@ describe('parseAcpAgentOverrides', () => {
     expect(parseAcpAgentOverrides(42)).toBeUndefined();
   });
 
-  it('returns undefined for array', () => {
+  it('returns undefined for empty array', () => {
     expect(parseAcpAgentOverrides([])).toBeUndefined();
   });
 
@@ -108,6 +138,234 @@ describe('parseAcpAgentOverrides', () => {
   it('parses valid config with command', () => {
     const result = parseAcpAgentOverrides({ 'gemini': { command: '/usr/local/bin/gemini' } });
     expect(result).toEqual({ 'gemini': { command: '/usr/local/bin/gemini' } });
+  });
+
+  it('parses custom ACP adapter metadata', () => {
+    const result = parseAcpAgentOverrides({
+      'my-agent': {
+        name: 'My Agent',
+        description: 'Local ACP adapter',
+        command: 'my-agent',
+        args: ['--acp', '--verbose'],
+        detectCommands: ['my-agent', 'my-agent-beta', 'my-agent'],
+        presenceDirs: ['~/.my-agent/'],
+        installCmd: 'npm install -g my-agent',
+        adapterMetadata: {
+          healthCheck: {
+            command: 'my-agent doctor',
+            timeoutMs: 4500.9,
+            summary: 'Runs the custom adapter self-check.',
+            env: { SECRET_TOKEN: 'must-not-pass' },
+          },
+          commands: [
+            { name: 'review', description: 'Review the active workspace.' },
+            { name: 'review', description: 'duplicate is allowed by adapter order' },
+            { name: '', description: 'ignored' },
+            { name: 42 },
+          ],
+          output: {
+            kinds: ['diff', 'artifact', 'token'],
+            fileChanges: true,
+            artifacts: true,
+            env: { SECRET_TOKEN: 'must-not-pass' },
+          },
+          env: { API_KEY: 'must-not-pass' },
+        },
+      },
+    });
+    expect(result).toEqual({
+      'my-agent': {
+        name: 'My Agent',
+        description: 'Local ACP adapter',
+        command: 'my-agent',
+        args: ['--acp', '--verbose'],
+        detectCommands: ['my-agent', 'my-agent-beta'],
+        presenceDirs: ['~/.my-agent/'],
+        installCmd: 'npm install -g my-agent',
+        adapterMetadata: {
+          healthCheck: {
+            command: 'my-agent doctor',
+            timeoutMs: 4500,
+            summary: 'Runs the custom adapter self-check.',
+          },
+          commands: [
+            { name: 'review', description: 'Review the active workspace.' },
+            { name: 'review', description: 'duplicate is allowed by adapter order' },
+          ],
+          output: {
+            kinds: ['artifact', 'diff', 'text'],
+            fileChanges: true,
+            artifacts: true,
+          },
+        },
+      },
+    });
+  });
+
+  it('parses AionUI-style top-level ACP capability declarations without secrets', () => {
+    const result = parseAcpAgentOverrides({
+      'adapter-pack-agent': {
+        name: 'Adapter Pack Agent',
+        cliCommand: 'adapter-pack-agent',
+        acpArgs: ['--acp'],
+        connectionType: 'cli',
+        authRequired: true,
+        supportsStreaming: true,
+        models: [
+          'cheap-model',
+          { id: 'fast-model', label: 'Fast Model', description: 'Low cost model.' },
+          { value: 'smart-model', name: 'Smart Model' },
+          { id: '' },
+        ],
+        promptCapabilities: { image: true, audio: false, embeddedContext: true, ignored: true },
+        mcpCapabilities: { stdio: true, http: true, sse: false, headers: true },
+        sessionCapabilities: { loadSession: true, list: true, resume: false, fork: true, close: true },
+        outputKinds: ['text', 'diff', 'artifact', 'token'],
+        fileChanges: true,
+        artifacts: true,
+        healthCheck: {
+          versionCommand: 'adapter-pack-agent --version',
+          timeout: 3000,
+          summary: 'Runs adapter pack diagnostics.',
+          env: { API_KEY: 'must-not-pass' },
+        },
+        commands: [
+          { name: 'plan', description: 'Create an implementation plan.' },
+        ],
+        apiKeyFields: ['API_KEY'],
+        env: { API_KEY: 'allowed-launch-env-but-not-adapter-metadata' },
+      },
+    });
+
+    expect(result).toEqual({
+      'adapter-pack-agent': {
+        name: 'Adapter Pack Agent',
+        command: 'adapter-pack-agent',
+        args: ['--acp'],
+        detectCommands: ['adapter-pack-agent'],
+        env: { API_KEY: 'allowed-launch-env-but-not-adapter-metadata' },
+        adapterMetadata: {
+          connectionType: 'cli',
+          authRequired: true,
+          supportsStreaming: true,
+          models: [
+            { id: 'cheap-model', label: 'cheap-model' },
+            { id: 'fast-model', label: 'Fast Model', description: 'Low cost model.' },
+            { id: 'smart-model', label: 'Smart Model' },
+          ],
+          promptCapabilities: { image: true, audio: false, embeddedContext: true },
+          mcpCapabilities: { stdio: true, http: true, sse: false },
+          sessionCapabilities: { loadSession: true, list: true, resume: false, fork: true, close: true },
+          output: {
+            kinds: ['artifact', 'diff', 'text'],
+            fileChanges: true,
+            artifacts: true,
+          },
+          healthCheck: {
+            command: 'adapter-pack-agent --version',
+            timeoutMs: 3000,
+            summary: 'Runs adapter pack diagnostics.',
+          },
+          commands: [
+            { name: 'plan', description: 'Create an implementation plan.' },
+          ],
+        },
+      },
+    });
+    expect(JSON.stringify(result?.['adapter-pack-agent'].adapterMetadata)).not.toContain('API_KEY');
+    expect(JSON.stringify(result?.['adapter-pack-agent'].adapterMetadata)).not.toContain('must-not-pass');
+  });
+
+  it('parses AionUI extension contributes.acpAdapters manifests', () => {
+    const result = parseAcpAgentOverrides({
+      name: 'example-acp-adapter',
+      contributes: {
+        acpAdapters: [
+          {
+            id: 'ext-buddy',
+            name: 'ext-buddy',
+            description: 'Extension-provided ACP adapter',
+            connectionType: 'cli',
+            cliCommand: 'codebuddy',
+            defaultCliPath: 'npx @tencent-ai/codebuddy-code',
+            acpArgs: ['--acp'],
+            authRequired: true,
+            supportsStreaming: false,
+            models: ['demo-model'],
+            outputCapabilities: {
+              kinds: ['artifact'],
+              fileChanges: true,
+              branches: true,
+              env: { SECRET_TOKEN: 'must-not-pass' },
+            },
+            healthCheck: {
+              versionCommand: 'codebuddy --version',
+              timeout: 3000,
+            },
+            apiKeyFields: [
+              { key: 'CODEBUDDY_TOKEN', label: 'Token', type: 'password', required: true },
+            ],
+          },
+          { id: '', cliCommand: 'ignored' },
+          'not-an-adapter',
+        ],
+      },
+    });
+
+    expect(result).toEqual({
+      'ext-buddy': {
+        name: 'ext-buddy',
+        description: 'Extension-provided ACP adapter',
+        command: 'codebuddy',
+        args: ['--acp'],
+        detectCommands: ['codebuddy'],
+        adapterMetadata: {
+          connectionType: 'cli',
+          authRequired: true,
+          supportsStreaming: false,
+          models: [{ id: 'demo-model', label: 'demo-model' }],
+          output: {
+            kinds: ['artifact', 'branch', 'diff', 'text'],
+            fileChanges: true,
+            branches: true,
+          },
+          healthCheck: {
+            command: 'codebuddy --version',
+            timeoutMs: 3000,
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('CODEBUDDY_TOKEN');
+  });
+
+  it('parses AionUI acp-adapters arrays directly', () => {
+    const result = parseAcpAgentOverrides([
+      {
+        id: 'hello-stdio-agent',
+        name: 'Hello Stdio Agent',
+        connectionType: 'stdio',
+        cliCommand: 'echo',
+        defaultCliPath: 'echo',
+        acpArgs: ['--acp'],
+        supportsStreaming: true,
+        models: ['demo-model'],
+      },
+    ]);
+
+    expect(result).toEqual({
+      'hello-stdio-agent': {
+        name: 'Hello Stdio Agent',
+        command: 'echo',
+        args: ['--acp'],
+        detectCommands: ['echo'],
+        adapterMetadata: {
+          connectionType: 'stdio',
+          supportsStreaming: true,
+          models: [{ id: 'demo-model', label: 'demo-model' }],
+        },
+      },
+    });
   });
 
   it('parses valid config with args', () => {
@@ -130,9 +388,35 @@ describe('parseAcpAgentOverrides', () => {
     expect(result).toEqual({ 'gemini': { env: { API_KEY: 'abc' } } });
   });
 
+  it('filters unsafe env var names from parsed overrides', () => {
+    const result = parseAcpAgentOverrides({
+      'gemini': {
+        env: {
+          API_KEY: 'abc',
+          'bad key': 'bad',
+          ['__proto__']: 'pollute',
+          constructor: 'ctor',
+          NUMBER_VALUE: 123,
+        },
+      },
+    });
+    expect(result).toEqual({ 'gemini': { env: { API_KEY: 'abc' } } });
+    expect(({} as Record<string, unknown>).pollute).toBeUndefined();
+  });
+
   it('skips invalid entries', () => {
     const result = parseAcpAgentOverrides({ 'good': { command: 'x' }, 'bad': 'not-an-object' });
     expect(result).toEqual({ 'good': { command: 'x' } });
+  });
+
+  it('skips unsafe agent ids while parsing overrides', () => {
+    const result = parseAcpAgentOverrides({
+      '__proto__': { command: 'bad' },
+      'bad id': { command: 'bad' },
+      'good-id': { command: 'ok' },
+    });
+    expect(result).toEqual({ 'good-id': { command: 'ok' } });
+    expect(({} as Record<string, unknown>).command).toBeUndefined();
   });
 
   it('trims command whitespace', () => {
@@ -194,6 +478,10 @@ describe('AGENT_DESCRIPTORS', () => {
     expect(binaries.length).toBe(uniqueBinaries.size);
   });
 
+  it('does not advertise the Pi CLI as a built-in ACP adapter', () => {
+    expect(AGENT_DESCRIPTORS.pi).toBeUndefined();
+  });
+
   it('includes Windows APPDATA presence directories for VS Code-family agents', () => {
     expect(AGENT_DESCRIPTORS['cline'].presenceDirs).toContain('%APPDATA%/Code/User/globalStorage/saoudrizwan.claude-dev/');
   });
@@ -208,7 +496,6 @@ describe('resolveAlias', () => {
     expect(resolveAlias('claude-acp')).toBe('claude');
     expect(resolveAlias('codebuddy')).toBe('codebuddy-code');
     expect(resolveAlias('codex')).toBe('codex-acp');
-    expect(resolveAlias('pi-acp')).toBe('pi');
   });
 
   it('returns canonical IDs unchanged', () => {
@@ -284,5 +571,89 @@ describe('getDetectableAgents', () => {
     const binaries = agents.map(a => a.binary);
     const unique = new Set(binaries);
     expect(binaries.length).toBe(unique.size);
+  });
+
+  it('appends enabled user-configured custom ACP agents', () => {
+    const agents = getDetectableAgents({
+      'my-agent': {
+        name: 'My Agent',
+        command: 'my-agent',
+        args: ['--acp'],
+        detectCommands: ['my-agent-beta'],
+        description: 'Custom local ACP agent',
+        adapterMetadata: {
+          commands: [{ name: 'plan', description: 'Create a plan.' }],
+        },
+      },
+      'disabled-agent': {
+        command: 'disabled-agent',
+        enabled: false,
+      },
+      'gemini': {
+        name: 'Renamed Gemini',
+        command: 'gemini-custom',
+      },
+    });
+
+    expect(agents).toContainEqual(expect.objectContaining({
+      id: 'my-agent',
+      name: 'My Agent',
+      binary: 'my-agent-beta',
+      detectCommands: ['my-agent-beta'],
+      adapterMetadata: {
+        commands: [{ name: 'plan', description: 'Create a plan.' }],
+      },
+      source: 'user-config',
+    }));
+    expect(agents.some((agent) => agent.id === 'disabled-agent')).toBe(false);
+    expect(agents.filter((agent) => agent.id === 'gemini')).toHaveLength(1);
+  });
+});
+
+describe('getConfiguredDetectableAgents', () => {
+  it('returns only custom agents with a command', () => {
+    expect(getConfiguredDetectableAgents({
+      'custom-acp': { command: 'custom-acp', name: 'Custom ACP' },
+      'no-command': { name: 'No command' },
+      'claude': { command: 'claude-custom' },
+    })).toEqual([
+      expect.objectContaining({
+        id: 'custom-acp',
+        name: 'Custom ACP',
+        binary: 'custom-acp',
+        source: 'user-config',
+      }),
+    ]);
+  });
+});
+
+describe('resolveConfiguredAcpAgentEntry', () => {
+  it('creates a registry entry for a custom configured ACP agent', () => {
+    expect(resolveConfiguredAcpAgentEntry('my-agent', {
+      'my-agent': {
+        name: 'My Agent',
+        description: 'Custom ACP',
+        command: 'my-agent',
+        args: ['--acp'],
+        env: { MY_AGENT_TOKEN: 'secret' },
+      },
+    })).toEqual({
+      id: 'my-agent',
+      name: 'My Agent',
+      description: 'Custom ACP',
+      transport: 'stdio',
+      command: 'my-agent',
+      args: ['--acp'],
+      env: { MY_AGENT_TOKEN: 'secret' },
+    });
+  });
+
+  it('does not shadow built-in descriptors or disabled custom agents', () => {
+    expect(resolveConfiguredAcpAgentEntry('gemini', {
+      gemini: { command: 'gemini-custom' },
+    })).toBeNull();
+    expect(resolveConfiguredAcpAgentEntry('my-agent', {
+      'my-agent': { command: 'my-agent', enabled: false },
+    })).toBeNull();
   });
 });

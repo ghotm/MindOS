@@ -20,9 +20,33 @@ WORK="/tmp/mindos-runtime-build-$$"
 ARCHIVE="/tmp/mindos-runtime-${VERSION}.tar.gz"
 rm -rf "$WORK"
 
+find_claude_sdk_native_packages() {
+  find "$1" -type d \( \
+    -path '*/node_modules/@anthropic-ai/claude-agent-sdk-*' -o \
+    -path '*/__node_modules/@anthropic-ai/claude-agent-sdk-*' -o \
+    -path '*/.pnpm/@anthropic-ai+claude-agent-sdk-*' \
+  \) -print 2>/dev/null || true
+}
+
+prune_claude_sdk_native_packages() {
+  local root="$1"
+  local removed=0
+  while IFS= read -r package_dir; do
+    [ -z "$package_dir" ] && continue
+    rm -rf "$package_dir"
+    removed=$((removed + 1))
+  done < <(find_claude_sdk_native_packages "$root")
+  if [ "$removed" -gt 0 ]; then
+    echo "  Removed ${removed} Claude Agent SDK native package(s)"
+  fi
+}
+
 echo "📦 Building MindOS runtime v${VERSION}..."
 
 # ── Web server (standalone Next.js) ──
+echo "  Materializing standalone runtime dependencies..."
+node -e "import('./packages/desktop/scripts/prepare-mindos-bundle.mjs').then((m) => m.materializeStandaloneAssets('packages/web', { runtimeDependencySeeds: m.RUNTIME_DEPENDENCY_SEEDS }))"
+
 echo "  Copying standalone..."
 mkdir -p "$WORK/packages/web/.next"
 # Copy the entire standalone tree (server.js + node_modules + .next/server + .next/static + public)
@@ -54,8 +78,8 @@ if [ -d "$STANDALONE_NM" ]; then
   find "$STANDALONE_NM" -name '*.js.map' -delete
   find "$STANDALONE_NM" -name '*.mjs.map' -delete
   find "$STANDALONE_NM" -name '*.cjs.map' -delete
-  # TypeScript source files (compiled JS is what runs)
-  find "$STANDALONE_NM" -name '*.ts' ! -name '*.d.ts' -path '*/src/*' -delete
+  # Keep runtime .ts sources: built-in PI extensions such as pi-subagents and
+  # pi-schedule-prompt ship TS-only entrypoints that are loaded through jiti.
   # Markdown docs inside packages
   find "$STANDALONE_NM" -name 'README.md' -delete
   find "$STANDALONE_NM" -name 'CHANGELOG.md' -delete
@@ -97,6 +121,7 @@ node scripts/runtime-manifest.mjs \
   --platform runtime-archive \
   --layout runtime-archive \
   --package-name "@geminilight/mindos-runtime"
+prune_claude_sdk_native_packages "$WORK"
 
 # ── Package (flat, no outer directory) ──
 echo "  Creating archive..."
@@ -126,10 +151,23 @@ if [ ! -e "$VERIFY/runtime-manifest.json" ]; then
   ERRORS=$((ERRORS + 1))
 fi
 
+for f in skills/mindos/SKILL.md skills/mindos-zh/SKILL.md packages/web/data/skills/mindos/SKILL.md packages/web/data/skills/mindos-zh/SKILL.md; do
+  if [ ! -e "$VERIFY/$f" ]; then
+    echo "  ❌ MISSING: $f"
+    ERRORS=$((ERRORS + 1))
+  fi
+done
+
 # Verify version in package.json matches
 PKG_VER=$(node -p "require('$VERIFY/package.json').version" 2>/dev/null || echo "")
 if [ "$PKG_VER" != "$VERSION" ]; then
   echo "  ❌ Version mismatch: package.json=$PKG_VER, expected=$VERSION"
+  ERRORS=$((ERRORS + 1))
+fi
+
+if BAD_CLAUDE_NATIVE=$(find_claude_sdk_native_packages "$VERIFY" | head -20); [ -n "$BAD_CLAUDE_NATIVE" ]; then
+  echo "  ❌ Claude Agent SDK native package(s) should not be bundled:"
+  echo "$BAD_CLAUDE_NATIVE" | sed 's/^/     /'
   ERRORS=$((ERRORS + 1))
 fi
 
@@ -153,6 +191,13 @@ if command -v numfmt >/dev/null 2>&1; then
 elif command -v stat >/dev/null 2>&1; then
   SIZE_BYTES=$(stat -f%z "$ARCHIVE" 2>/dev/null || stat -c%s "$ARCHIVE" 2>/dev/null)
   SIZE_HUMAN="${SIZE_BYTES} bytes"
+fi
+
+MAX_RUNTIME_ARCHIVE_BYTES="${MINDOS_MAX_RUNTIME_ARCHIVE_BYTES:-125829120}"
+if [ "$SIZE_BYTES" -gt "$MAX_RUNTIME_ARCHIVE_BYTES" ]; then
+  echo "❌ Runtime archive is too large: ${SIZE_BYTES} bytes (limit ${MAX_RUNTIME_ARCHIVE_BYTES} bytes)"
+  echo "   Check for package-internal node_modules, _standalone, .next, or other generated artifacts in bundled dependencies."
+  exit 1
 fi
 
 echo ""

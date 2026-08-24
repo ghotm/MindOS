@@ -31,20 +31,268 @@ export {
 } from './context.js';
 
 export {
+  handleAgentCapabilitiesGet,
+  type AgentCapabilitiesPayload,
+  type AgentCapabilitiesServices,
+  type AgentCapability,
+  type AgentCapabilityInput,
+  type AgentCapabilityKind,
+  type AgentCapabilityPermissionRequired,
+  type AgentCapabilitySource,
+  type AgentCapabilitySourceKey,
+  type AgentCapabilitySourceStatus,
+  type AgentCapabilityStatus,
+} from './handlers/agent-capabilities.js';
+
+export {
   handleAgentActivity,
+  handleAgentActivityPost,
+  type AgentActivityAppendPayload,
   type AgentActivityHandlerServices,
   type AgentActivityPayload,
 } from './handlers/agent-activity.js';
 
 export {
-  handleAskSessionsDelete,
-  handleAskSessionsGet,
-  handleAskSessionsPost,
-  type AskSessionsDeletePayload,
-  type AskSessionsHandlerServices,
-  type AskSessionsSavePayload,
+  buildAgentRuntimesPayload,
+  checkCodexProviderEnvironment,
+  checkClaudeRuntimeHealth,
+  defaultCheckNativeRuntimeHealth,
+  handleAgentRuntimesGet,
+  mergeCodexProviderAndLoginHealth,
+  type AgentRuntimeCapabilities,
+  type AgentRuntimeBridge,
+  type AgentRuntimeCompatibilityAssessment,
+  type AgentRuntimeCompatibilityLevel,
+  type AgentRuntimeCompatibilityOwner,
+  type AgentRuntimeCompatibilityProfile,
+  type AgentRuntimeCompatibilityRequirement,
+  type AgentRuntimeCompatibilityRequirementStatus,
+  type AgentRuntimeCompatibilityScenario,
+  type AgentRuntimeCoordinationRole,
+  type AgentRuntimeDescriptor,
+  type AgentRuntimeKind,
+  type AgentRuntimeLifecycle,
+  type AgentRuntimeLifecycleSource,
+  type AgentRuntimeLifecycleStage,
+  type AgentRuntimeLifecycleStageDescriptor,
+  type AgentRuntimeLifecycleSupport,
+  type AgentRuntimePayload,
+  type AgentRuntimeRemoteMode,
+  type AgentRuntimeStatus,
+  type AgentRuntimeUnattendedSupport,
+  type AgentRuntimesPayload,
+  type AgentRuntimesServices,
+  type DetectedRuntimeAgent,
+  type MissingRuntimeAgent,
+  type NativeRuntimeHealthInput,
+  type NativeRuntimeHealthResult,
+} from './handlers/agent-runtimes.js';
+
+export {
+  buildSkillRuntimeMatchesPayload,
+  handleSkillRuntimeMatchesGet,
+  type MindosSkillRuntimeMatchesPayload,
+  type SkillRuntimeMatchesHandlerServices,
+} from './handlers/skill-runtime-matches.js';
+
+export {
+  buildAgentRuntimeMcpProjectionsPayload,
+  handleAgentRuntimeMcpProjectionsGet,
+  type AgentRuntimeMcpProjection,
+  type AgentRuntimeMcpProjectionReason,
+  type AgentRuntimeMcpProjectionServices,
+  type AgentRuntimeMcpProjectionStatus,
+  type AgentRuntimeMcpProjectionsPayload,
+} from './handlers/mcp-runtime-projections.js';
+
+export {
+  buildAgentRuntimeAdapterProjectionsPayload,
+  handleAgentRuntimeAdapterProjectionsGet,
+  type AgentRuntimeAdapterCommandsProjection,
+  type AgentRuntimeAdapterConfigurationProjection,
+  type AgentRuntimeAdapterConnectionProjection,
+  type AgentRuntimeAdapterFacetStatus,
+  type AgentRuntimeAdapterHealthProjection,
+  type AgentRuntimeAdapterProtocolProjection,
+  type AgentRuntimeAdapterProjection,
+  type AgentRuntimeAdapterProjectionReason,
+  type AgentRuntimeAdapterProjectionServices,
+  type AgentRuntimeAdapterProjectionStatus,
+  type AgentRuntimeAdapterProjectionsPayload,
+} from './handlers/runtime-adapter-projections.js';
+
+export {
+  buildAgentRuntimePermissionProjectionsPayload,
+  handleAgentRuntimePermissionProjectionsGet,
+  type AgentRuntimePermissionApprovalRoute,
+  type AgentRuntimePermissionPolicyProjection,
+  type AgentRuntimePermissionProjection,
+  type AgentRuntimePermissionProjectionReason,
+  type AgentRuntimePermissionProjectionServices,
+  type AgentRuntimePermissionProjectionStatus,
+  type AgentRuntimePermissionProjectionsPayload,
+  type AgentRuntimePermissionUnattendedStatus,
+} from './handlers/runtime-permission-projections.js';
+
+export {
+  buildRuntimeSessionProjectionsPayload,
+  handleRuntimeSessionProjectionsGet,
+  type AgentRuntimeSessionProjectionReason,
+  type AgentRuntimeSessionProjectionStatus,
+  type RuntimeSessionProjection,
+  type RuntimeSessionProjectionCommands,
+  type RuntimeSessionProjectionControl,
+  type RuntimeSessionProjectionPermissionEvents,
+  type RuntimeSessionProjectionServices,
+  type RuntimeSessionProjectionToolEvents,
+  type RuntimeSessionProjectionsPayload,
+} from './handlers/runtime-session-projections.js';
+
+export {
+  buildAgentRuntimeArtifactProjectionsPayload,
+  handleAgentRuntimeArtifactProjectionsGet,
+  type AgentRuntimeArtifactHandoffTarget,
+  type AgentRuntimeArtifactOutputKind,
+  type AgentRuntimeArtifactProjection,
+  type AgentRuntimeArtifactProjectionReason,
+  type AgentRuntimeArtifactProjectionServices,
+  type AgentRuntimeArtifactProjectionStatus,
+  type AgentRuntimeArtifactProjectionsPayload,
+} from './handlers/runtime-artifact-projections.js';
+
+export {
+  buildAgentRuntimeAutomationProjectionsPayload,
+  handleAgentRuntimeAutomationProjectionsGet,
+  type AgentRuntimeAutomationProjection,
+  type AgentRuntimeAutomationProjectionReason,
+  type AgentRuntimeAutomationProjectionServices,
+  type AgentRuntimeAutomationProjectionStatus,
+  type AgentRuntimeAutomationProjectionsPayload,
+  type AgentRuntimeAutomationReadinessStatus,
+} from './handlers/runtime-automation-projections.js';
+
+export {
+  MINDOS_RUNTIME_CONTROL_PLANE_FILE,
+  applyRuntimeControlPlaneMutation,
+  handleRuntimeControlPlaneGet,
+  handleRuntimeControlPlanePost,
+  readRuntimeControlPlane,
+  type RuntimeControlPlaneApprovalRequest,
+  type RuntimeControlPlaneApprovalStatus,
+  type RuntimeControlPlaneFailureAudit,
+  type RuntimeControlPlaneFailureKind,
+  type RuntimeControlPlaneMailboxMessage,
+  type RuntimeControlPlaneMailboxStatus,
+  type RuntimeControlPlaneMutationPayload,
+  type RuntimeControlPlaneMutationResult,
+  type RuntimeControlPlaneOverlapPolicy,
+  type RuntimeControlPlanePermissionMode,
+  type RuntimeControlPlaneSchedule,
+  type RuntimeControlPlaneScheduleStatus,
+  type RuntimeControlPlaneServices,
+  type RuntimeControlPlaneSnapshot,
+  type RuntimeControlPlaneTask,
+  type RuntimeControlPlaneTaskPriority,
+  type RuntimeControlPlaneTaskStatus,
+  type RuntimeControlPlaneTrigger,
+  type RuntimeControlPlaneTriggerType,
+  type RuntimeControlPlaneWakeEvent,
+  type RuntimeControlPlaneWakeStatus,
+} from './handlers/runtime-control-plane.js';
+
+export {
+  buildAgentRuntimeReadinessPayload,
+  handleAgentRuntimeReadinessGet,
+  type AgentRuntimeReadinessGap,
+  type AgentRuntimeReadinessGapCategory,
+  type AgentRuntimeReadinessGapSeverity,
+  type AgentRuntimeReadinessPayload,
+  type AgentRuntimeReadinessProjection,
+  type AgentRuntimeReadinessRecommendation,
+  type AgentRuntimeReadinessRequirement,
+  type AgentRuntimeReadinessServices,
+  type AgentRuntimeReadinessSource,
+  type AgentRuntimeReadinessStatus,
+  type AgentRuntimeReadinessUseCase,
+} from './handlers/runtime-readiness.js';
+
+export {
+  MINDOS_RUNTIME_EXTENSIONS_ROOT,
+  buildAgentRuntimeExtensionPreflight,
+  handleAgentRuntimeExtensionInstallPost,
+  handleAgentRuntimeExtensionPreflightPost,
+  handleAgentRuntimeExtensionsGet,
+  listInstalledAgentRuntimeExtensions,
+  type AgentRuntimeExtensionContributionCounts,
+  type AgentRuntimeExtensionInstallPayload,
+  type AgentRuntimeExtensionPreflightPayload,
+  type InstalledAgentRuntimeExtension,
+  type InstalledAgentRuntimeExtensionMetadata,
+  type RuntimeExtensionServices,
+  type RuntimeExtensionSettings,
+} from './handlers/runtime-extensions.js';
+
+export {
+  evaluateSkillRuntimeMatch,
+  type MindosSkillRuntimeMatch,
+  type MindosSkillRuntimeMatchInput,
+  type MindosSkillRuntimeMatchLevel,
+  type MindosSkillRuntimeMatchReason,
+  type MindosSkillRuntimeMatchReasonStatus,
+} from '../agent/runtime/skill-runtime-matcher.js';
+
+export {
+  emptySkillRuntimeRequirements,
+  type MindosSkillRuntimeKindRequirement,
+  type MindosSkillRuntimeNeed,
+  type MindosSkillRuntimeRequirements,
+  type MindosSkillRuntimeSafety,
+  type MindosSkillRuntimeToolRequirement,
+} from '../agent/runtime/skill-runtime-requirements.js';
+
+export {
+  handleCodexModelsGet,
+  handleCodexThreadArchivePost,
+  handleCodexThreadForkPost,
+  handleCodexThreadGet,
+  handleCodexThreadUnarchivePost,
+  handleCodexThreadsGet,
+  type CodexModelListPayload,
+  type CodexThreadForkPayload,
+  type CodexThreadListPayload,
+  type CodexThreadManagerServices,
+  type CodexThreadReadPayload,
+} from './handlers/agent-runtimes-codex.js';
+
+export {
+  handleAgentSessionsDelete,
+  handleAgentSessionsGet,
+  handleAgentSessionsPost,
+  type AgentSessionsDeletePayload,
+  type AgentSessionsHandlerServices,
+  type AgentSessionsSavePayload,
   type MindosChatSession,
-} from './handlers/ask-sessions.js';
+} from './handlers/agent-sessions.js';
+
+export {
+  MINDOS_ASSISTANTS_ROOT,
+  handleAssistantsDelete,
+  handleAssistantsGet,
+  handleAssistantsPost,
+  isMindosBuiltinAssistantId,
+  listLocalAssistants,
+  type MindosAssistantDeletePayload,
+  type MindosAssistantHealth,
+  type MindosAssistantHealthIssue,
+  type MindosAssistantLibraryItem,
+  type MindosAssistantOrigin,
+  type MindosAssistantPaths,
+  type MindosAssistantProfileMetadata,
+  type MindosAssistantPromptPayload,
+  type MindosAssistantWritePayload,
+  type MindosAssistantsPayload,
+  type MindosAssistantsServices,
+} from './handlers/assistants.js';
 
 export {
   createDefaultMindosHttpServices,
@@ -65,9 +313,11 @@ export {
   listDirectoriesFromMindRoot,
   listMindSpacesFromMindRoot,
   readLinesFromMindRoot,
+  readMindosIgnoreFile,
   readRuntimeSettings,
   readTextFileFromMindRoot,
   searchMindRoot,
+  writeMindosIgnoreFile,
   type MindosRuntimeFileNode,
   type MindosRuntimeOptions,
   type MindosRuntimeSearchResult,
@@ -93,6 +343,22 @@ export {
 } from './handlers/files.js';
 
 export {
+  EXTRACT_PDF_MAX_BODY_BYTES,
+  handleExtractPdfPost,
+  type ExtractPdfPayload,
+  type ExtractPdfResult,
+  type ExtractPdfServices,
+} from './handlers/extract-pdf.js';
+
+export {
+  EXTRACT_DOCX_MAX_BODY_BYTES,
+  handleExtractDocxPost,
+  type ExtractDocxPayload,
+  type ExtractDocxResult,
+  type ExtractDocxServices,
+} from './handlers/extract-docx.js';
+
+export {
   INBOX_DIR,
   archiveFromInbox,
   ensureInboxSpace,
@@ -109,14 +375,24 @@ export {
 } from './handlers/inbox.js';
 
 export {
+  detectInboxSourcePlatform,
+  extractInboxSourceMetadata,
+  type InboxSourceMetadata,
+  type InboxSourcePlatform,
+  type InboxSourcePlatformId,
+} from './handlers/inbox-source.js';
+
+export {
   handleInitPost,
   type InitHandlerServices,
   type InitPostPayload,
 } from './handlers/init.js';
 
 export {
+  getServerSyncLockPath,
   handleSyncGet,
   handleSyncPost,
+  sanitizeGitEnv,
   type MindosSyncConfig,
   type MindosSyncPostPayload,
   type MindosSyncServices,
@@ -141,6 +417,7 @@ export {
   handleAcpSessionDelete,
   handleAcpSessionGet,
   handleAcpSessionPost,
+  getAcpSessionSnapshots,
   resolveNpmInvocation,
   type AcpConfigServices,
   type AcpDetectServices,
@@ -173,8 +450,19 @@ export {
 } from './handlers/bootstrap.js';
 
 export {
-  handleChannelsVerifyPost,
+  CHANNEL_CAPABILITIES,
+  CHANNEL_CREDENTIAL_SETS,
+  CHANNEL_FIELD_PATTERNS,
+  CHANNEL_PLATFORMS,
+  isChannelPlatform,
+  normalizeChannelCredentials,
+  validateChannelCredentials,
   type ChannelPlatform,
+  type ChannelValidationResult,
+} from './channel-contract.js';
+
+export {
+  handleChannelsVerifyPost,
   type ChannelsVerifyPayload,
   type ChannelsVerifyResult,
   type ChannelsVerifyServices,
@@ -203,6 +491,15 @@ export {
   type FeishuLongConnectionStatus,
   type ImFeishuLongConnectionServices,
 } from './handlers/im-feishu-long-connection.js';
+
+export {
+  handleImFeishuOAuthCallbackGet,
+  handleImFeishuOAuthGet,
+  type FeishuOAuthExchangeInput,
+  type FeishuOAuthExchangeResult,
+  type FeishuOAuthUser,
+  type ImFeishuOAuthServices,
+} from './handlers/im-feishu-oauth.js';
 
 export {
   handleImStatusGet,
@@ -282,9 +579,12 @@ export {
 
 export {
   handleFileGet,
+  handleOpenInFileManagerGet,
   handleFilePost,
   type FileGetHandlerServices,
   type FilePostHandlerServices,
+  type OpenInFileManagerExecFile,
+  type OpenInFileManagerServices,
 } from './handlers/file.js';
 
 export {
@@ -298,6 +598,8 @@ export {
 export {
   handleSearch,
   type SearchHandlerServices,
+  type SearchRequestFileType,
+  type SearchRequestOptions,
 } from './handlers/search.js';
 
 export {
@@ -310,14 +612,19 @@ export {
   handleSetupGet,
   handleSetupPatch,
   handleSetupPost,
+  type MindosSetupApplyPayload,
   type MindosSetupAiConfig,
   type MindosSetupGuideState,
+  type MindosSetupInitialSpaceId,
+  type MindosSetupInitialSpaceInstallResult,
+  type MindosSetupInitialSpaceLocale,
   type MindosSetupProvider,
   type MindosSetupProviderPreset,
   type MindosSetupServices,
   type MindosSetupSettings,
   type MindosSetupStatePayload,
   type SetupWizardServices,
+  INITIAL_SPACE_IDS,
 } from './handlers/setup.js';
 
 export {
@@ -366,12 +673,19 @@ export {
   handleGraph,
   type BacklinkItem,
   type GraphData,
+  type GraphDirection,
   type GraphEdge,
+  type GraphEdgeKind,
   type GraphHandlerServices,
   type GraphNode,
+  type GraphNodeType,
+  type GraphScope,
+  type GraphStats,
 } from './handlers/graph.js';
 
 export {
+  collectSkillInfos,
+  handleSkillMatrixGet,
   handleSkillsGet,
   handleSkillsPost,
   type MindosSkillInfo,
@@ -379,6 +693,7 @@ export {
   type MindosSkillRoot,
   type MindosSkillSource,
   type MindosSkillsSettings,
+  type SkillMatrixHandlerServices,
   type SkillsHandlerServices,
   type SkillsPayload,
   type SkillsPostAction,
@@ -387,18 +702,52 @@ export {
 } from './handlers/skills.js';
 
 export {
+  parseSkillMarkdownMetadata,
+  parseSkillRuntimeRequirements,
+  type MindosSkillMetadata,
+} from './handlers/skill-metadata.js';
+
+export {
+  buildSkillMatrix,
+  disableNativeSkill,
+  enableNativeSkill,
+  getSkillCellStatus,
+  isSkillCellEnabled,
+  linkSkillToAgent,
+  migrateInstalledSkillAgents,
+  MINDOS_DISABLED_DIR,
+  MINDOS_MANAGED_MARKER,
+  MINDOS_SELF_AGENT_KEY,
+  resolveSkillSourceDir,
+  unlinkSkillFromAgent,
+  type MindosSkillCellStatus,
+  type MindosSkillInstallRecord,
+  type MindosSkillLinkAgent,
+  type MindosSkillLinkAgentMode,
+  type MindosSkillLinkDeps,
+  type MindosSkillLinkOutcome,
+  type MindosSkillMatrix,
+  type MindosSkillMatrixAgent,
+  type MindosSkillMatrixCell,
+  type MindosSkillMigrationResult,
+} from './handlers/skill-links.js';
+
+export {
   STATIC_MIME_TYPES,
   handleStaticArtifact,
   type StaticArtifactHandlerOptions,
 } from './handlers/static.js';
 
 export {
-  handleAskStream,
-  type AskStreamHandlerResult,
-  type AskStreamHandlerServices,
-  type MindosAskMessage,
-  type MindosAskStreamRequest,
-} from './handlers/ask.js';
+  handleAgentSessionTurnStream,
+  handleAgentTurnStream,
+  type AgentTurnStreamHandlerResult,
+  type AgentTurnStreamHandlerServices,
+  type MindosAgentRuntimeKind,
+  type MindosAgentTurnMessage,
+  type MindosAgentTurnRequest,
+  type MindosSelectedRuntime,
+} from './handlers/agent-turn.js';
 
 export {
   handleSettingsGet,
@@ -433,10 +782,12 @@ export {
 
 export {
   handleMcpStatus,
+  handleMcpTokenReveal,
   type MindosMcpStatusOptions,
   type MindosMcpStatusPayload,
   type MindosMcpStatusServices,
   type MindosMcpStatusSettings,
+  type MindosMcpTokenRevealPayload,
 } from './handlers/mcp-status.js';
 
 export {
@@ -464,12 +815,16 @@ export {
 
 export {
   handleMcpInstallPost,
+  handleMcpServerCopyPost,
   handleMcpUninstallPost,
   type MindosMcpAgentDef,
   type MindosMcpInstallItem,
   type MindosMcpInstallRequest,
   type MindosMcpInstallResult,
   type MindosMcpInstallServices,
+  type MindosMcpServerCopyRequest,
+  type MindosMcpServerCopyServices,
+  type MindosMcpServerCopyTarget,
   type MindosMcpUninstallRequest,
   type MindosMcpUninstallServices,
   type MindosSkillAgentRegistration,
@@ -481,18 +836,27 @@ export {
   handleMcpAgentsGet,
   parseJsonForServers,
   parseTomlForServers,
+  resolveSkillLinkAgents,
   type MindosCustomMcpAgentDef,
   type MindosMcpAgentConfiguredServers,
   type MindosMcpAgentInstallStatus,
   type MindosMcpAgentInstalledSkills,
   type MindosMcpAgentProfile,
   type MindosMcpAgentRegistryDef,
+  type MindosMcpAgentSkillCapabilities,
   type MindosMcpAgentsPayload,
   type MindosMcpAgentsServices,
   type MindosMcpAgentRuntimeSignals,
   type MindosMcpAgentSkillProfile,
   type MindosMcpMindosSkills,
 } from './handlers/mcp-agents.js';
+
+export {
+  createDefaultMcpAgents,
+  createDefaultSkillAgentRegistry,
+  DEFAULT_MCP_AGENTS,
+  DEFAULT_SKILL_AGENT_REGISTRY,
+} from './mcp-agent-registry.js';
 
 export {
   handleMcpDirectToolsPost,

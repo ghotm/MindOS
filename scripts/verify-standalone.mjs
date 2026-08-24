@@ -10,10 +10,15 @@
  */
 import { spawn } from 'child_process';
 import http from 'http';
-import { existsSync } from 'fs';
+import { createServer as createTcpServer } from 'net';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { materializeStandaloneAssets } from '../packages/desktop/scripts/prepare-mindos-bundle.mjs';
+import {
+  RUNTIME_DEPENDENCY_SEEDS,
+  materializeStandaloneAssets,
+} from '../packages/desktop/scripts/prepare-mindos-bundle.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
@@ -28,40 +33,85 @@ if (!existsSync(serverJs)) {
 }
 
 try {
-  materializeStandaloneAssets(appDir);
+  materializeStandaloneAssets(appDir, { runtimeDependencySeeds: RUNTIME_DEPENDENCY_SEEDS });
 } catch (e) {
   console.error(e instanceof Error ? e.message : String(e));
   process.exit(1);
 }
 
-const port = 31000 + Math.floor(Math.random() * 5000);
-const nodeBin = process.execPath;
+async function allocateFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = createTcpServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const allocatedPort = typeof address === 'object' && address ? address.port : 0;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (allocatedPort >= 1024) resolve(allocatedPort);
+        else reject(new Error(`Invalid allocated test port: ${allocatedPort}`));
+      });
+    });
+  });
+}
 
-function waitHttpOk(pathname, timeoutMs, validate = () => true) {
+const port = await allocateFreePort();
+const nodeBin = process.execPath;
+const localOrigin = `http://127.0.0.1:${port}`;
+const redirectStatusCodes = new Set([301, 302, 303, 307, 308]);
+const isolatedRoot = mkdtempSync(path.join(tmpdir(), 'mindos-standalone-verify-'));
+const isolatedHome = path.join(isolatedRoot, 'home');
+const isolatedMindRoot = path.join(isolatedRoot, 'mind');
+mkdirSync(isolatedHome, { recursive: true });
+mkdirSync(isolatedMindRoot, { recursive: true });
+
+function resolveLocalRedirect(currentUrl, location) {
+  if (!location) return null;
+  const redirectUrl = new URL(location, currentUrl);
+  if (redirectUrl.origin !== localOrigin) {
+    throw new Error(`Refusing external redirect from ${currentUrl.href} to ${redirectUrl.href}`);
+  }
+  return redirectUrl;
+}
+
+function waitHttpOk(pathname, timeoutMs, validate = () => true, options = {}) {
+  const maxRedirects = options.maxRedirects ?? 0;
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
-    const tick = () => {
-      if (Date.now() > deadline) {
-        reject(new Error(`Timeout waiting for http://127.0.0.1:${port}${pathname}`));
-        return;
-      }
-      const req = http.get(
-        `http://127.0.0.1:${port}${pathname}`,
-        { timeout: 2000 },
-        (res) => {
-          let body = '';
-          res.on('data', (c) => {
-            body += c;
-          });
-          res.on('end', () => {
-            if (res.statusCode === 200 && validate(body)) {
-              resolve();
+    const requestUrl = (url, redirectsRemaining) => {
+      const req = http.get(url, { timeout: 2000 }, (res) => {
+        let body = '';
+        res.on('data', (c) => {
+          body += c;
+        });
+        res.on('end', () => {
+          if (res.statusCode === 200 && validate(body)) {
+            resolve();
+            return;
+          }
+
+          if (redirectStatusCodes.has(res.statusCode ?? 0)) {
+            if (redirectsRemaining <= 0) {
+              reject(new Error(`Too many redirects while waiting for ${localOrigin}${pathname}`));
               return;
             }
-            setTimeout(tick, 300);
-          });
-        }
-      );
+
+            try {
+              const redirectUrl = resolveLocalRedirect(url, res.headers.location);
+              if (redirectUrl) {
+                requestUrl(redirectUrl, redirectsRemaining - 1);
+                return;
+              }
+            } catch (error) {
+              reject(error);
+              return;
+            }
+          }
+
+          setTimeout(tick, 300);
+        });
+      });
       req.on('error', () => {
         setTimeout(tick, 300);
       });
@@ -69,6 +119,14 @@ function waitHttpOk(pathname, timeoutMs, validate = () => true) {
         req.destroy();
         setTimeout(tick, 300);
       });
+    };
+
+    const tick = () => {
+      if (Date.now() > deadline) {
+        reject(new Error(`Timeout waiting for ${localOrigin}${pathname}`));
+        return;
+      }
+      requestUrl(new URL(pathname, localOrigin), maxRedirects);
     };
     tick();
   });
@@ -101,10 +159,21 @@ const child = spawn(nodeBin, [serverJs], {
   cwd: appDir,
   env: {
     ...process.env,
+    AUTH_TOKEN: '',
+    HOME: isolatedHome,
+    USERPROFILE: isolatedHome,
+    APPDATA: path.join(isolatedHome, 'AppData', 'Roaming'),
+    LOCALAPPDATA: path.join(isolatedHome, 'AppData', 'Local'),
+    XDG_CONFIG_HOME: path.join(isolatedHome, '.config'),
+    XDG_DATA_HOME: path.join(isolatedHome, '.local', 'share'),
+    XDG_STATE_HOME: path.join(isolatedHome, '.local', 'state'),
+    MIND_ROOT: isolatedMindRoot,
     NODE_ENV: 'production',
     PORT: String(port),
     /** Next binds to machine hostname by default; Desktop health checks use 127.0.0.1 */
     HOSTNAME: '127.0.0.1',
+    WEB_PASSWORD: '',
+    WEB_SESSION_SECRET: '',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -125,7 +194,12 @@ async function main() {
   try {
     await waitHealth(90_000);
     await waitMcpAgents(30_000);
-    await waitHttpOk('/', 30_000, (body) => body.includes('MindOS') || body.includes('__next'));
+    await waitHttpOk(
+      '/',
+      30_000,
+      (body) => body.includes('MindOS') || body.includes('__next'),
+      { maxRedirects: 5 }
+    );
     console.log(`[verify-standalone] OK (port ${port})`);
     return 0;
   } catch (e) {
@@ -135,6 +209,7 @@ async function main() {
   } finally {
     killChild();
     await new Promise((r) => setTimeout(r, 500));
+    rmSync(isolatedRoot, { recursive: true, force: true });
   }
 }
 

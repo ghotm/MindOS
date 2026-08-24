@@ -1,110 +1,103 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { CheckCircle2, Circle, Loader2, AlertCircle, RefreshCw } from 'lucide-react';
+import { AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import { useLocale } from '@/lib/stores/locale-store';
-import { PLATFORMS, type PlatformStatus } from '@/lib/im/platforms';
+import { countConnectedChannels, resolveChannelListStatus } from '@/lib/im/display';
+import { PLATFORMS } from '@/lib/im/platforms';
+import { ChannelIcon } from '@/components/agents/ChannelIcon';
+import { ChannelStatusIndicator } from '@/components/agents/ChannelStatusIndicator';
+import { useChannelStatuses } from '@/components/agents/channel-detail/useChannelStatuses';
 
-/** Simple sidebar nav list for IM channels — icon + name + status dot. */
 export default function IMChannelsView() {
   const { t } = useLocale();
   const im = t.panels.im;
   const searchParams = useSearchParams();
   const activePlatform = searchParams.get('platform');
-
-  const [statuses, setStatuses] = useState<PlatformStatus[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-
-  const fetchStatuses = useCallback(async () => {
-    setError(false);
-    try {
-      const res = await fetch('/api/im/status');
-      if (res.ok) {
-        const data = await res.json();
-        setStatuses(data.platforms ?? []);
-      } else {
-        setError(true);
-      }
-    } catch {
-      setError(true);
-    }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => { fetchStatuses(); }, [fetchStatuses]);
+  const { statuses, loading, error, refresh } = useChannelStatuses();
 
   if (loading) {
     return (
-      <div className="flex justify-center py-8">
-        <Loader2 size={16} className="animate-spin text-muted-foreground" />
+      <div className="px-3 py-4">
+        <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+          <Loader2 size={14} className="animate-spin" />
+          <span>{im.title}</span>
+        </div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="flex flex-col items-center gap-2 py-8 px-3">
-        <AlertCircle size={16} className="text-muted-foreground" />
-        <p className="text-2xs text-muted-foreground">{im.fetchError}</p>
-        <button
-          type="button"
-          onClick={() => { setLoading(true); fetchStatuses(); }}
-          className="inline-flex items-center gap-1 text-2xs text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <RefreshCw size={11} /> {im.retry}
-        </button>
+      <div className="px-3 py-3">
+        <div className="rounded-md border border-border bg-card p-3">
+          <div className="flex items-start gap-2">
+            <AlertCircle size={14} className="mt-0.5 shrink-0 text-muted-foreground" />
+            <p className="min-w-0 flex-1 text-xs leading-5 text-muted-foreground">{im.fetchError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => { void refresh(); }}
+            className="mt-2 inline-flex items-center gap-1.5 rounded-sm px-0 text-xs font-medium text-foreground transition-colors hover:text-[var(--amber)]"
+          >
+            <RefreshCw size={12} /> {im.retry}
+          </button>
+        </div>
       </div>
     );
   }
 
-  const configuredCount = statuses.filter(s => s.connected).length;
+  const configuredCount = countConnectedChannels(statuses);
+  const total = PLATFORMS.length;
   const getStatus = (id: string) => statuses.find(s => s.platform === id);
+  const statusLabels = {
+    unconfigured: im.statusUnconfigured,
+    configured: im.statusConfigured,
+    running: im.statusRunning,
+    issue: im.statusIssue,
+  };
 
   return (
-    <div className="flex flex-col py-1">
-      {/* Section header */}
-      <div className="flex items-center gap-2 px-3 py-1.5 mb-0.5">
-        <span className="text-2xs font-medium text-muted-foreground uppercase tracking-wider">{im.title}</span>
-        {configuredCount > 0 && (
-          <span className="text-2xs text-muted-foreground/60">{configuredCount} {im.connected}</span>
-        )}
+    <div className="flex flex-col gap-2 px-2 py-2">
+      <div className="flex items-center justify-between gap-2 px-1.5">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{im.title}</span>
+        <span
+          className="rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[11px] leading-4 text-muted-foreground"
+          aria-label={`${configuredCount} / ${total}`}
+          title={`${configuredCount} / ${total}`}
+        >
+          {configuredCount}/{total}
+        </span>
       </div>
 
-      {/* Platform list */}
-      <div className="flex flex-col">
-        {PLATFORMS.map(({ id, name, icon }) => {
-          const status = getStatus(id);
-          const isConnected = status?.connected ?? false;
-          const isActive = activePlatform === id;
-
+      <div className="flex flex-col gap-1">
+        {PLATFORMS.map((platform) => {
+          const status = getStatus(platform.id);
+          const isActive = activePlatform === platform.id;
+          const channelStatus = resolveChannelListStatus(status);
           return (
             <Link
-              key={id}
-              href={`/agents?tab=channels&platform=${id}`}
+              key={platform.id}
+              href={`/agents?tab=channels&platform=${platform.id}`}
+              aria-current={isActive ? 'page' : undefined}
               className={`
-                relative flex items-center gap-2.5 px-3 py-2 text-left rounded-sm transition-colors
+                group relative grid min-h-[42px] grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2.5 rounded-md border px-2.5 py-2 text-left transition-[background-color,border-color,color,box-shadow] duration-150
                 ${isActive
-                  ? 'bg-[var(--amber-dim)]/40 pl-3.5'
-                  : 'hover:bg-muted/50'
+                  ? 'border-[var(--amber)]/35 bg-[var(--amber-dim)]/45 shadow-sm'
+                  : 'border-transparent hover:border-border/60 hover:bg-muted/45'
                 }
               `}
             >
-              {isActive && (
-                <span
-                  className="pointer-events-none absolute bottom-[22%] left-0 top-[22%] w-0.5 rounded-r-full bg-[var(--amber)]"
-                  aria-hidden
-                />
-              )}
-              <span className="text-sm">{icon}</span>
-              <span className="text-sm flex-1 truncate text-foreground">{name}</span>
-              {isConnected ? (
-                <CheckCircle2 size={14} className="text-success shrink-0" />
-              ) : (
-                <Circle size={14} className="text-border shrink-0" />
-              )}
+              <ChannelIcon
+                platform={platform}
+                size="sm"
+                className={isActive ? 'border-[var(--amber)]/35 bg-[var(--amber)]/10' : 'bg-background/80'}
+              />
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-medium leading-5 text-foreground" title={platform.name}>{platform.name}</span>
+              </span>
+              <ChannelStatusIndicator status={channelStatus} labels={statusLabels} className="h-6 w-6" />
             </Link>
           );
         })}

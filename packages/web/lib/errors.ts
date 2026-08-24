@@ -32,6 +32,7 @@ export const ErrorCodes = {
   INVALID_FILE_TYPE: 'INVALID_FILE_TYPE',
   // API
   INVALID_REQUEST: 'INVALID_REQUEST',
+  CONFLICT: 'CONFLICT',
   MODEL_INIT_FAILED: 'MODEL_INIT_FAILED',
   // Generic
   INTERNAL_ERROR: 'INTERNAL_ERROR',
@@ -46,6 +47,8 @@ export interface ApiErrorResponse {
   error: {
     code: string;
     message: string;
+    issueCode?: string;
+    context?: Record<string, unknown>;
   };
 }
 
@@ -63,6 +66,7 @@ function mapCodeToStatus(code: ErrorCode): number {
     case ErrorCodes.HEADING_NOT_FOUND:
       return 404;
     case ErrorCodes.FILE_ALREADY_EXISTS:
+    case ErrorCodes.CONFLICT:
       return 409;
     case ErrorCodes.PATH_OUTSIDE_ROOT:
     case ErrorCodes.PROTECTED_FILE:
@@ -80,14 +84,33 @@ function mapCodeToStatus(code: ErrorCode): number {
   }
 }
 
+function isProductAppError(err: unknown): err is { code: string; statusCode?: number; message: string } {
+  return err instanceof Error
+    && typeof (err as { code?: unknown }).code === 'string'
+    && (
+      typeof (err as { statusCode?: unknown }).statusCode === 'number'
+      || (err as { code?: unknown }).code === 'VALIDATION_ERROR'
+    );
+}
+
+function mapProductErrorToSimpleStatus(err: { code: string; statusCode?: number; message: string }): number {
+  if (err.code === 'VALIDATION_ERROR' && err.message.includes('Access denied')) return 403;
+  return err.statusCode ?? 500;
+}
+
 /**
  * Build a NextResponse with the standard `{ ok, error }` envelope.
  *
  * If `status` is omitted it is derived from the error code.
  */
-export function apiError(code: ErrorCode, message: string, status?: number): NextResponse<ApiErrorResponse> {
+export function apiError(
+  code: ErrorCode,
+  message: string,
+  status?: number,
+  details: Pick<ApiErrorResponse['error'], 'issueCode' | 'context'> = {},
+): NextResponse<ApiErrorResponse> {
   const effectiveStatus = status ?? mapCodeToStatus(code);
-  return NextResponse.json({ ok: false as const, error: { code, message } }, { status: effectiveStatus });
+  return NextResponse.json({ ok: false as const, error: { code, message, ...details } }, { status: effectiveStatus });
 }
 
 /**
@@ -123,6 +146,13 @@ export function handleRouteErrorSimple(err: unknown, status = 500): NextResponse
     return NextResponse.json(
       { error: err.message },
       { status: mapCodeToStatus(err.code) },
+    );
+  }
+
+  if (isProductAppError(err)) {
+    return NextResponse.json(
+      { error: err.message },
+      { status: mapProductErrorToSimpleStatus(err) },
     );
   }
 

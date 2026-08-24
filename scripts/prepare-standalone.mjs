@@ -12,6 +12,13 @@ import { cpSync, existsSync, readFileSync, readdirSync, realpathSync, renameSync
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  BUILTIN_AGENT_EXTENSION_RUNTIME_DEPENDENCY_SEEDS,
+  IM_RUNTIME_DEPENDENCY_SEEDS,
+  materializeStandaloneAssets,
+  pruneClaudeAgentSdkNativePackages,
+  pruneRuntimePackageAssets,
+} from '../packages/desktop/scripts/prepare-mindos-bundle.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -21,13 +28,19 @@ const standaloneServerJs = resolve(standaloneAppDir, 'server.js');
 const productRoot = resolve(root, 'packages', 'mindos');
 const destDir = resolve(productRoot, '_standalone');
 const runtimeDependencySeeds = [
-  '@mariozechner/pi-coding-agent',
+  'pdfjs-dist',
+  'mammoth',
+  'word-extractor',
+  '@earendil-works/pi-coding-agent',
+  '@earendil-works/pi-ai',
   '@sinclair/typebox',
   'partial-json',
   'ajv',
   'ajv-formats',
   '@anthropic-ai/sdk',
   'openai',
+  ...BUILTIN_AGENT_EXTENSION_RUNTIME_DEPENDENCY_SEEDS,
+  ...IM_RUNTIME_DEPENDENCY_SEEDS,
 ];
 
 // ── Guard: ensure standalone build exists ────────────────────────────────────
@@ -40,10 +53,15 @@ if (!existsSync(standaloneServerJs)) {
 }
 
 // ── Step 1: Materialize static + public into standalone dir ──────────────────
-// Reuse the same logic Desktop uses.
-import { materializeStandaloneAssets } from '../packages/desktop/scripts/prepare-mindos-bundle.mjs';
-materializeStandaloneAssets(appDir);
+// Some runtime-only packages are not traced by Next.js because they are loaded
+// from child-process scripts. Seed them before the shared Desktop materializer
+// runs its required-file checks, then refresh the closure after pruning.
 copyRuntimeDependencyClosure(resolve(standaloneAppDir, 'node_modules'), runtimeDependencySeeds);
+
+// Reuse the same logic Desktop uses.
+materializeStandaloneAssets(appDir, { runtimeDependencySeeds });
+copyRuntimeDependencyClosure(resolve(standaloneAppDir, 'node_modules'), runtimeDependencySeeds);
+pruneRuntimePackageAssets(standaloneAppDir);
 
 // ── Step 2: Copy standalone to top-level _standalone/ ────────────────────────
 console.log('[prepare-standalone] Copying standalone build to packages/mindos/_standalone/ ...');
@@ -64,6 +82,12 @@ const removedRuntimeEntries = pruneRuntimeNodeModules(publishableNodeModules);
 if (removedRuntimeEntries > 0) {
   console.log(`[prepare-standalone] Pruned ${removedRuntimeEntries} dev-only runtime dependency file(s)/dir(s)`);
 }
+const removedClaudeNativePackages = pruneClaudeAgentSdkNativePackages(publishableNodeModules);
+if (removedClaudeNativePackages > 0) {
+  console.log(`[prepare-standalone] Removed ${removedClaudeNativePackages} Claude Agent SDK native package(s) from standalone output`);
+}
+
+verifyDocumentExtractionRuntime(destDir, publishableNodeModules);
 
 const removedPackageLocks = prunePackageLocks(destDir);
 if (removedPackageLocks > 0) {
@@ -138,8 +162,6 @@ function pruneStandalonePayload(dir) {
     'components.json',
     'components',
     'hooks',
-    'lib',
-    'scripts',
     'styles',
     'types',
     'eslint.config.mjs',
@@ -271,7 +293,7 @@ function copyRuntimeDependencyClosure(destNodeModules, seeds) {
 
     const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
     const destDir = resolve(destNodeModules, next.name);
-    if (!existsSync(destDir)) {
+    if (!existsSync(resolve(destDir, 'package.json'))) {
       rmSync(destDir, { recursive: true, force: true });
       cpSync(packageDir, destDir, {
         recursive: true,
@@ -305,8 +327,21 @@ function resolvePackageDir(packageName, fromDir) {
     const entry = requireFromPackage.resolve(packageName);
     return findPackageRoot(entry, packageName);
   } catch {
-    return null;
+    // Fall through to pnpm store scan below.
   }
+
+  const repoRoot = resolve(appDir, '..', '..');
+  const pnpmDir = resolve(repoRoot, 'node_modules', '.pnpm');
+  if (!existsSync(pnpmDir)) return null;
+
+  const encodedName = packageName.replace('/', '+');
+  for (const entry of readdirSync(pnpmDir)) {
+    if (!entry.startsWith(`${encodedName}@`)) continue;
+    const candidate = resolve(pnpmDir, entry, 'node_modules', packageName);
+    if (existsSync(resolve(candidate, 'package.json'))) return candidate;
+  }
+
+  return null;
 }
 
 function findPackageRoot(startPath, packageName) {
@@ -331,4 +366,23 @@ function findPackageRoot(startPath, packageName) {
 function shouldCopyRuntimePackageEntry(src) {
   const name = src.split('/').pop();
   return name !== 'node_modules' && name !== '.cache' && name !== '.turbo';
+}
+
+function verifyDocumentExtractionRuntime(standaloneDir, standaloneNodeModules) {
+  const required = [
+    resolve(standaloneDir, 'scripts', 'extract-pdf.cjs'),
+    resolve(standaloneNodeModules, 'pdfjs-dist', 'legacy', 'build', 'pdf.mjs'),
+    resolve(standaloneNodeModules, 'pdfjs-dist', 'legacy', 'build', 'pdf.worker.mjs'),
+    resolve(standaloneDir, 'scripts', 'extract-docx.cjs'),
+    resolve(standaloneNodeModules, 'mammoth', 'package.json'),
+    resolve(standaloneNodeModules, 'word-extractor', 'package.json'),
+  ];
+  const missing = required.filter((file) => !existsSync(file));
+  if (missing.length > 0) {
+    console.error(
+      '[prepare-standalone] FAILED: document extraction runtime is incomplete:\n'
+      + missing.map((file) => `  missing ${file}`).join('\n')
+    );
+    process.exit(1);
+  }
 }

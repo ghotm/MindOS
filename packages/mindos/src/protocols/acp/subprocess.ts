@@ -32,7 +32,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type { AcpRegistryEntry } from './types.js';
+import type { AcpPermissionEvent, AcpPermissionOption, AcpRegistryEntry } from './types.js';
 import { resolveAgentCommand, findUserOverride, type AcpAgentOverride } from './agent-descriptors.js';
 import { resolveCommandPathSync } from './detect-local.js';
 
@@ -53,6 +53,13 @@ export interface AcpProcess {
  */
 export interface AcpClientCallbacks {
   onSessionUpdate?: (params: SessionNotification) => void;
+  onPermissionRequest?: (event: AcpPermissionEvent) => void;
+  onPermissionResolved?: (event: AcpPermissionEvent) => void;
+  resolvePermissionRequest?: (input: {
+    event: AcpPermissionEvent;
+    params: RequestPermissionRequest;
+    mode: AcpConcretePermissionMode;
+  }) => Promise<RequestPermissionResponse | undefined> | RequestPermissionResponse | undefined;
 }
 
 export interface AcpConnection {
@@ -61,10 +68,15 @@ export interface AcpConnection {
   process: AcpProcess;
 }
 
+export type AcpConcretePermissionMode = 'readonly' | 'ask' | 'auto' | 'full';
+export type AcpPermissionMode = AcpConcretePermissionMode | 'agent';
+
 export interface AcpLaunchOptions {
   env?: Record<string, string>;
   cwd?: string;
   overrides?: Record<string, AcpAgentOverride>;
+  permissionMode?: AcpPermissionMode;
+  resolvePermissionRequest?: AcpClientCallbacks['resolvePermissionRequest'];
 }
 
 export interface TerminalSpawnSpec {
@@ -90,9 +102,11 @@ export function spawnAndConnect(
 ): AcpConnection {
   const proc = spawnAcpAgent(entry, options);
   const cwd = options?.cwd ?? process.cwd();
-  const callbacks: AcpClientCallbacks = {};
+  const callbacks: AcpClientCallbacks = {
+    resolvePermissionRequest: options?.resolvePermissionRequest,
+  };
 
-  const client = createMindosClient(proc, cwd, callbacks);
+  const client = createMindosClient(proc, cwd, callbacks, options?.permissionMode ?? 'auto', options?.env);
 
   const output = Writable.toWeb(proc.proc.stdin!) as WritableStream<Uint8Array>;
   const input = Readable.toWeb(proc.proc.stdout!) as ReadableStream<Uint8Array>;
@@ -264,6 +278,184 @@ export function killAllAgents(): void {
   }
 }
 
+function createPermissionRequestId(
+  proc: AcpProcess,
+  params: RequestPermissionRequest,
+  requestedAt: string,
+): string {
+  const toolCallId = params.toolCall?.toolCallId ?? 'tool';
+  return `${proc.id}:${params.sessionId}:${toolCallId}:${Date.parse(requestedAt) || Date.now()}`;
+}
+
+function buildPermissionEvent(input: {
+  requestId: string;
+  params: RequestPermissionRequest;
+  status: AcpPermissionEvent['status'];
+  requestedAt: string;
+}): AcpPermissionEvent {
+  const toolCall = input.params.toolCall;
+  return {
+    requestId: input.requestId,
+    sessionId: input.params.sessionId,
+    toolCallId: toolCall?.toolCallId ?? '',
+    toolName: permissionToolName(toolCall),
+    status: input.status,
+    options: normalizePermissionOptions(input.params.options),
+    requestedAt: input.requestedAt,
+  };
+}
+
+function normalizePermissionOptions(options: RequestPermissionRequest['options']): AcpPermissionOption[] {
+  return (options ?? [])
+    .map((option) => ({
+      id: option.optionId,
+      label: option.name,
+      kind: option.kind,
+    }))
+    .filter((option) => option.id && option.label);
+}
+
+function permissionToolName(toolCall: RequestPermissionRequest['toolCall'] | undefined): string {
+  if (!toolCall) return 'tool';
+  if (typeof toolCall.title === 'string' && toolCall.title.trim()) return toolCall.title.trim();
+  if (typeof toolCall.kind === 'string' && toolCall.kind.trim()) return toolCall.kind.trim();
+  return 'tool';
+}
+
+function resolvePermissionEvent(
+  pending: AcpPermissionEvent,
+  response: RequestPermissionResponse,
+): AcpPermissionEvent {
+  const selectedOptionId = response.outcome.outcome === 'selected'
+    ? response.outcome.optionId
+    : undefined;
+  const selectedOption = selectedOptionId
+    ? pending.options.find((option) => option.id === selectedOptionId)
+    : undefined;
+  return {
+    ...pending,
+    status: 'resolved',
+    ...(selectedOptionId ? { selectedOptionId } : {}),
+    outcome: response.outcome.outcome === 'cancelled'
+      ? 'cancelled'
+      : selectedOption?.kind ?? 'allow_once',
+    resolvedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeAcpPermissionMode(mode: AcpPermissionMode | undefined): AcpConcretePermissionMode {
+  if (mode === 'agent') return 'auto';
+  return mode ?? 'auto';
+}
+
+function permissionOptionByKind(
+  options: RequestPermissionRequest['options'] | undefined,
+  kinds: string[],
+) {
+  for (const kind of kinds) {
+    const option = options?.find(o => o.kind === kind);
+    if (option) return option;
+  }
+  return options?.[0];
+}
+
+function rejectPermissionResponse(params: RequestPermissionRequest): RequestPermissionResponse {
+  const selected = permissionOptionByKind(params.options, ['reject_once', 'reject_always']);
+  return selected
+    ? { outcome: { outcome: 'selected', optionId: selected.optionId } }
+    : { outcome: { outcome: 'cancelled' } };
+}
+
+function allowPermissionResponse(
+  params: RequestPermissionRequest,
+  preferredKinds: Array<'allow_once' | 'allow_always'>,
+): RequestPermissionResponse {
+  const selected = permissionOptionByKind(params.options, preferredKinds);
+  return selected
+    ? { outcome: { outcome: 'selected', optionId: selected.optionId } }
+    : { outcome: { outcome: 'cancelled' } };
+}
+
+function permissionResponseAllows(
+  params: RequestPermissionRequest,
+  response: RequestPermissionResponse,
+): boolean {
+  const outcome = response.outcome;
+  if (outcome.outcome === 'cancelled') return false;
+  const selected = params.options?.find(option => option.optionId === outcome.optionId);
+  return selected?.kind.startsWith('allow') === true;
+}
+
+async function resolveAcpPermissionRequest(input: {
+  proc: AcpProcess;
+  params: RequestPermissionRequest;
+  callbacks: AcpClientCallbacks;
+  permissionMode: AcpPermissionMode;
+  reason: string;
+}): Promise<RequestPermissionResponse> {
+  const requestedAt = new Date().toISOString();
+  const requestId = createPermissionRequestId(input.proc, input.params, requestedAt);
+  const pendingEvent = buildPermissionEvent({
+    requestId,
+    params: input.params,
+    status: 'pending',
+    requestedAt,
+  });
+  input.callbacks.onPermissionRequest?.(pendingEvent);
+
+  const mode = normalizeAcpPermissionMode(input.permissionMode);
+  let response: RequestPermissionResponse;
+  if (mode === 'readonly') {
+    console.log(`[ACP] Reject permission in readonly mode: agent=${input.proc.agentId} ${input.reason}`);
+    response = rejectPermissionResponse(input.params);
+  } else if (mode === 'full') {
+    console.log(`[ACP] Full permission auto-approve: agent=${input.proc.agentId} ${input.reason}`);
+    response = allowPermissionResponse(input.params, ['allow_always', 'allow_once']);
+  } else if (mode === 'auto') {
+    console.log(`[ACP] Auto permission approve once: agent=${input.proc.agentId} ${input.reason}`);
+    response = allowPermissionResponse(input.params, ['allow_once', 'allow_always']);
+  } else {
+    console.log(`[ACP] Ask permission via MindOS bridge: agent=${input.proc.agentId} ${input.reason}`);
+    try {
+      response = await input.callbacks.resolvePermissionRequest?.({
+        event: pendingEvent,
+        params: input.params,
+        mode,
+      }) ?? rejectPermissionResponse(input.params);
+    } catch (error) {
+      console.warn(`[ACP] Permission resolver failed for ${input.proc.agentId}:`, error);
+      response = rejectPermissionResponse(input.params);
+    }
+  }
+
+  input.callbacks.onPermissionResolved?.(resolvePermissionEvent(pendingEvent, response));
+  return response;
+}
+
+function createHostPermissionRequest(input: {
+  proc: AcpProcess;
+  sessionId: string;
+  toolCallId: string;
+  title: string;
+  kind: string;
+  params: Record<string, unknown>;
+}): RequestPermissionRequest {
+  return {
+    sessionId: input.sessionId,
+    toolCall: {
+      toolCallId: input.toolCallId,
+      title: input.title,
+      kind: input.kind,
+      status: 'pending',
+      rawInput: JSON.stringify(input.params),
+    } as RequestPermissionRequest['toolCall'],
+    options: [
+      { optionId: 'allow_once', kind: 'allow_once', name: 'Allow once' },
+      { optionId: 'reject_once', kind: 'reject_once', name: 'Reject' },
+    ],
+  };
+}
+
 export function resolveTerminalSpawn(command: string): TerminalSpawnSpec {
   const resolvedCommand = resolveCommandPathSync(command) ?? command;
   const needsWindowsShell =
@@ -277,20 +469,52 @@ export function resolveTerminalSpawn(command: string): TerminalSpawnSpec {
 
 /* ── Client Implementation ─────────────────────────────────────────────── */
 
-function createMindosClient(
+export function createMindosClient(
   proc: AcpProcess,
   cwd: string,
   callbacks: AcpClientCallbacks,
+  permissionMode: AcpPermissionMode = 'auto',
+  runtimeEnv: Record<string, string> = {},
 ): Client {
+  const concretePermissionMode = normalizeAcpPermissionMode(permissionMode);
+
+  const ensureAskPermissionForHostAction = async (input: {
+    toolCallId: string;
+    title: string;
+    kind: string;
+    params: Record<string, unknown>;
+    deniedMessage: string;
+  }) => {
+    if (concretePermissionMode !== 'ask') return;
+    const params = createHostPermissionRequest({
+      proc,
+      sessionId: `mindos-host:${proc.id}`,
+      toolCallId: input.toolCallId,
+      title: input.title,
+      kind: input.kind,
+      params: input.params,
+    });
+    const response = await resolveAcpPermissionRequest({
+      proc,
+      params,
+      callbacks,
+      permissionMode: concretePermissionMode,
+      reason: JSON.stringify(input.params).slice(0, 200),
+    });
+    if (!permissionResponseAllows(params, response)) {
+      throw new RequestError(-32001, input.deniedMessage);
+    }
+  };
+
   return {
     async requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
-      console.log(`[ACP] Auto-approve permission: agent=${proc.agentId} ${JSON.stringify(params.toolCall ?? params).slice(0, 200)}`);
-      const options = params.options ?? [];
-      const selected =
-        options.find(o => o.kind === 'allow_once') ??
-        options.find(o => o.kind === 'allow_always') ??
-        options[0];
-      return { outcome: { outcome: 'selected', optionId: selected?.optionId ?? 'allow_once' } };
+      return resolveAcpPermissionRequest({
+        proc,
+        params,
+        callbacks,
+        permissionMode: concretePermissionMode,
+        reason: JSON.stringify(params.toolCall ?? params).slice(0, 200),
+      });
     },
 
     async sessionUpdate(params: SessionNotification): Promise<void> {
@@ -299,11 +523,15 @@ function createMindosClient(
 
     async readTextFile(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
       if (!params.path) throw RequestError.invalidParams(undefined, 'path is required');
-      if (isSensitivePath(params.path)) {
+      const resolvedPath = resolveAcpPath(params.path, cwd);
+      if (isSensitivePath(resolvedPath)) {
         throw new RequestError(-32001, `Access denied: ${params.path} is a sensitive file`);
       }
+      if (!isWithinAllowedReadPaths(resolvedPath, cwd)) {
+        throw new RequestError(-32001, `Read denied: ${params.path} is outside the working directory`);
+      }
       try {
-        let content = fs.readFileSync(params.path, 'utf-8');
+        let content = fs.readFileSync(resolvedPath, 'utf-8');
         if (params.line != null || params.limit != null) {
           const lines = content.split('\n');
           const start = ((params.line ?? 1) - 1);
@@ -329,13 +557,24 @@ function createMindosClient(
 
     async writeTextFile(params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
       if (!params.path) throw RequestError.invalidParams(undefined, 'path is required');
-      if (!isWithinAllowedWritePaths(params.path, cwd)) {
+      if (concretePermissionMode === 'readonly') {
+        throw new RequestError(-32001, `Write denied: ACP readonly mode does not allow writing ${params.path}`);
+      }
+      const resolvedPath = resolveAcpPath(params.path, cwd);
+      if (!isWithinAllowedWritePaths(resolvedPath, cwd)) {
         throw new RequestError(-32001, `Write denied: ${params.path} is outside the working directory`);
       }
+      await ensureAskPermissionForHostAction({
+        toolCallId: `writeTextFile:${params.path}`,
+        title: 'Write file',
+        kind: 'edit',
+        params: { path: params.path, bytes: params.content.length },
+        deniedMessage: `Write denied by permission policy: ${params.path}`,
+      });
       try {
-        const dir = path.dirname(params.path);
+        const dir = path.dirname(resolvedPath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(params.path, params.content, 'utf-8');
+        fs.writeFileSync(resolvedPath, params.content, 'utf-8');
         return {};
       } catch (err) {
         // Type-safe error handling with proper guards
@@ -355,10 +594,13 @@ function createMindosClient(
 
     async createTerminal(params: CreateTerminalRequest): Promise<CreateTerminalResponse> {
       if (!params.command) throw RequestError.invalidParams(undefined, 'command is required');
+      if (concretePermissionMode === 'readonly') {
+        throw new RequestError(-32001, 'Terminal denied: ACP readonly mode does not allow terminal execution');
+      }
 
       const requestedCwd = params.cwd ?? undefined;
-      const terminalCwd = requestedCwd && isWithinAllowedWritePaths(requestedCwd, cwd)
-        ? requestedCwd
+      const terminalCwd = requestedCwd && isWithinAllowedWritePaths(resolveAcpPath(requestedCwd, cwd), cwd)
+        ? resolveAcpPath(requestedCwd, cwd)
         : cwd;
 
       const envObj: Record<string, string> = {};
@@ -368,6 +610,18 @@ function createMindosClient(
 
       console.log(`[ACP] terminal/create: agent=${proc.agentId} cmd="${params.command} ${(params.args ?? []).join(' ')}" cwd=${terminalCwd}`);
 
+      await ensureAskPermissionForHostAction({
+        toolCallId: `createTerminal:${Date.now()}`,
+        title: 'Create terminal',
+        kind: 'execute',
+        params: {
+          command: params.command,
+          args: params.args ?? [],
+          cwd: terminalCwd,
+        },
+        deniedMessage: `Terminal denied by permission policy: ${params.command}`,
+      });
+
       const terminalId = `term-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const outputByteLimit = params.outputByteLimit ?? 1_000_000;
 
@@ -375,7 +629,7 @@ function createMindosClient(
         const terminalSpawn = resolveTerminalSpawn(params.command);
         const child = spawn(terminalSpawn.command, params.args ?? [], {
           cwd: terminalCwd,
-          env: { ...process.env, ...envObj },
+          env: { ...process.env, ...runtimeEnv, ...envObj },
           shell: terminalSpawn.shell,
           stdio: ['pipe', 'pipe', 'pipe'],
         });
@@ -445,6 +699,13 @@ function createMindosClient(
     },
 
     async extMethod(_method: string, _params: Record<string, unknown>): Promise<Record<string, unknown>> {
+      await ensureAskPermissionForHostAction({
+        toolCallId: `extMethod:${_method}:${Date.now()}`,
+        title: `Extension method: ${_method}`,
+        kind: 'other',
+        params: _params,
+        deniedMessage: `Extension method denied by permission policy: ${_method}`,
+      });
       console.log(`[ACP] Auto-approve ext method: agent=${proc.agentId} method=${_method}`);
       return {};
     },
@@ -465,9 +726,19 @@ const SENSITIVE_PATH_PATTERNS = [
   /[/\\]\.gnupg[/\\]/i,
 ];
 
+function resolveAcpPath(filePath: string, cwd: string): string {
+  return path.resolve(path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath));
+}
+
 function isSensitivePath(filePath: string): boolean {
   const normalized = path.resolve(filePath);
   return SENSITIVE_PATH_PATTERNS.some(p => p.test(normalized));
+}
+
+function isWithinAllowedReadPaths(filePath: string, cwd: string): boolean {
+  const normalized = path.resolve(filePath);
+  const normalizedRoot = path.resolve(cwd);
+  return normalized === normalizedRoot || normalized.startsWith(normalizedRoot + path.sep);
 }
 
 function isWithinAllowedWritePaths(filePath: string, cwd: string): boolean {

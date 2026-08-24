@@ -1,32 +1,45 @@
 /**
- * Interactive REPL for CLI agent/chat sessions.
+ * Interactive REPL for CLI agent sessions.
  *
  * Provides a multi-turn conversation loop with SSE streaming.
- * Shared between `mindos agent` and `mindos ask` commands.
+ * Shared by `mindos agent` and the deprecated `mindos ask` alias.
  */
 
 import * as readline from 'node:readline';
 import { bold, dim, cyan, red } from './colors.js';
-import { streamSSE, postAsk, checkHealth } from './sse-stream.js';
+import { streamSSE, postAgentTurn, checkHealth } from './sse-stream.js';
 import { EXIT } from './command.js';
 
 /**
  * @param {object} opts
  * @param {string} opts.baseUrl - e.g. http://localhost:3456
  * @param {string} opts.token - auth token
- * @param {'agent'|'chat'} opts.mode
+ * @param {'default'|'plan'|'goal'} [opts.agentMode]
+ * @param {'read'|'ask'|'auto'|'full'} [opts.permissionMode]
  * @param {string} opts.prompt - readline prompt string (e.g. "agent> ")
  * @param {string} opts.welcome - welcome message shown on start
  * @param {boolean} opts.showTools - show tool calls in output
  * @param {string[]} [opts.attachedFiles] - initial file attachments
  * @param {number} [opts.maxSteps] - max agent steps per turn
+ * @param {string} [opts.providerOverride] - AI provider override
+ * @param {string} [opts.modelOverride] - model override
+ * @param {object} [opts.runtimeOptions] - runtime-specific request options
+ * @param {object} [opts.agentOptions] - MindOS agent request options
+ * @param {object} [opts.workDir] - request-scoped working directory
  */
 export async function startRepl(opts) {
   const {
-    baseUrl, token, mode, prompt, welcome,
+    baseUrl, token, prompt, welcome,
+    agentMode = 'default',
+    permissionMode,
     showTools = true,
     attachedFiles,
     maxSteps,
+    providerOverride,
+    modelOverride,
+    runtimeOptions,
+    agentOptions,
+    workDir,
   } = opts;
 
   const healthy = await checkHealth(baseUrl);
@@ -39,6 +52,7 @@ export async function startRepl(opts) {
   console.log(`  ${dim('Type "exit" or press Ctrl+C to quit.')}\n`);
 
   const messages = [];
+  const sessionId = `cli-repl-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   let busy = false;
   let exiting = false;
 
@@ -86,14 +100,20 @@ export async function startRepl(opts) {
       ? messages.slice(-MAX_CONTEXT)
       : [...messages];
 
-    const body = { messages: contextMessages, mode };
+    const body = { messages: contextMessages, agentMode };
+    if (permissionMode) body.permissionMode = permissionMode;
     if (attachedFiles) body.attachedFiles = attachedFiles;
     if (maxSteps) body.maxSteps = maxSteps;
+    if (providerOverride) body.providerOverride = providerOverride;
+    if (modelOverride) body.modelOverride = modelOverride;
+    if (runtimeOptions) body.runtimeOptions = runtimeOptions;
+    if (agentOptions) body.agentOptions = agentOptions;
+    if (workDir) body.workDir = workDir;
 
     process.stdout.write('\n');
 
     try {
-      const res = await postAsk(baseUrl, body, token);
+      const res = await postAgentTurn(baseUrl, sessionId, body, token);
 
       if (!res.ok) {
         const errText = await res.text();

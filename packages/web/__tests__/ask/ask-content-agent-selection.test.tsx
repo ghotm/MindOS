@@ -2,14 +2,38 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import AskContent from '@/components/ask/AskContent';
-import type { ChatSession } from '@/lib/types';
+import ChatContent from '@/components/chat/ChatContent';
+import { LAST_AGENT_RUNTIME_STORAGE_KEY } from '@/lib/ask-runtime-preference';
+import type { AgentMode, AgentPermissionMode, ChatSession } from '@/lib/types';
+import type { RuntimeSessionEntry } from '@/lib/runtime-session-entry';
 
 const mockSetMessages = vi.fn();
 const mockPersistSession = vi.fn();
 const mockClearPersistTimer = vi.fn();
 const mockInitSessions = vi.fn();
 const mockSetSessionDefaultAcpAgent = vi.fn();
+const mockSetSessionAgentRuntimeBinding = vi.fn();
+const mockSetSessionWorkDir = vi.fn(() => true);
+const mockSetSessionContextSelection = vi.fn(() => true);
+const mockSetSessionModelSelection = vi.fn(() => true);
+const mockAttachRuntimeSession = vi.fn(() => true);
+const mockResetSession = vi.fn();
+const mockLoadSession = vi.fn();
+const mockDeleteSession = vi.fn();
+const mockClearSessions = vi.fn();
+const mockAskHeaderProps = vi.fn();
+const mockSessionHistoryPanelProps = vi.fn();
+let mockPersistedProviderModel: { provider: string | null; model: string | null } = { provider: null, model: null };
+let mockRuntimeDescriptors: unknown[] = [];
+let mockDetectionLoading = false;
+let mockNativeRuntimeDescriptors: unknown[] = [];
+let mockNativeLoadingByKind: Partial<Record<'codex' | 'claude', boolean>> = {};
+let mockNativeErrorByKind: Partial<Record<'codex' | 'claude', string | null>> = {};
+let mockPersistedPermissionMode: AgentPermissionMode = 'ask';
+
+function isAgentTurnUrl(url: RequestInfo | URL): boolean {
+  return String(url).startsWith('/api/agent/sessions/') && String(url).endsWith('/turns');
+}
 
 const sessionWithClaude: ChatSession = {
   id: 's1',
@@ -18,6 +42,15 @@ const sessionWithClaude: ChatSession = {
   messages: [],
   defaultAcpAgent: { id: 'claude-code', name: 'Claude Code' },
 };
+const emptySession: ChatSession = {
+  id: 's-empty',
+  createdAt: 1,
+  updatedAt: 1,
+  messages: [],
+};
+let mockSessions: ChatSession[] = [sessionWithClaude];
+let mockActiveSession: ChatSession | null = sessionWithClaude;
+let mockActiveSessionId: string | null = 's1';
 
 vi.mock('@/lib/stores/locale-store', () => ({
   useLocale: () => ({
@@ -41,9 +74,31 @@ vi.mock('@/lib/stores/locale-store', () => ({
         reconnecting: (attempt: number, max: number) => `retry ${attempt}/${max}`,
         stopped: 'stopped',
         errorNoResponse: 'no response',
+        concurrentLimit: 'too many conversations are running',
         emptyPrompt: 'empty',
         suggestions: [],
         copyMessage: 'Copy',
+        sessionRunningRetry: 'That session is still running. Try again after it finishes.',
+        sessionContext: {
+          title: 'Context',
+          workDir: 'WorkDir',
+          spaces: 'Spaces',
+          assistants: 'Assistants',
+          mindRoot: 'Mind root',
+          none: 'None',
+          locked: 'Locked after first message',
+          editWorkDir: 'Set work directory',
+          workDirPlaceholder: '/path/to/project',
+          addSpace: 'Add Space',
+          addAssistant: 'Add Assistant',
+          newSession: 'New',
+          removeItem: (label: string) => `Remove ${label}`,
+          spacePlaceholder: 'Space path',
+          assistantPlaceholder: 'assistant-id',
+          applyNextTurn: 'Changes apply to the next message.',
+          spacesCount: (n: number) => `${n} space${n === 1 ? '' : 's'}`,
+          assistantsCount: (n: number) => `${n} assistant${n === 1 ? '' : 's'}`,
+        },
       },
       search: { close: 'close' },
       hints: {
@@ -67,19 +122,26 @@ vi.mock('@/lib/stores/locale-store', () => ({
 vi.mock('@/hooks/useAskSession', () => ({
   useAskSession: () => ({
     messages: [],
-    sessions: [sessionWithClaude],
-    activeSession: sessionWithClaude,
-    activeSessionId: 's1',
+    sessions: mockSessions,
+    activeSession: mockActiveSession,
+    activeSessionId: mockActiveSessionId,
     initSessions: mockInitSessions,
     persistSession: mockPersistSession,
     clearPersistTimer: mockClearPersistTimer,
     setMessages: mockSetMessages,
     setSessionDefaultAcpAgent: mockSetSessionDefaultAcpAgent,
-    resetSession: vi.fn(),
-    loadSession: vi.fn(),
-    deleteSession: vi.fn(),
+    setSessionAgentRuntimeBinding: mockSetSessionAgentRuntimeBinding,
+    setSessionWorkDir: mockSetSessionWorkDir,
+    setSessionContextSelection: mockSetSessionContextSelection,
+    setSessionModelSelection: mockSetSessionModelSelection,
+    attachRuntimeSession: mockAttachRuntimeSession,
+    resetSession: mockResetSession,
+    loadSession: mockLoadSession,
+    deleteSession: mockDeleteSession,
+    forkSession: vi.fn(),
     renameSession: vi.fn(),
     togglePinSession: vi.fn(),
+    clearSessions: mockClearSessions,
     clearAllSessions: vi.fn(),
   }),
 }));
@@ -133,10 +195,23 @@ vi.mock('@/hooks/useSlashCommand', () => ({
 
 vi.mock('@/hooks/useAcpDetection', () => ({
   useAcpDetection: () => ({
-    installedAgents: [{ id: 'claude-code', name: 'Claude Code', binaryPath: '/tmp/claude' }],
+    installedAgents: [
+      { id: 'claude-code', name: 'Claude Code', binaryPath: '/tmp/claude' },
+      { id: 'codex-acp', name: 'Codex', binaryPath: '/tmp/codex' },
+    ],
     notInstalledAgents: [],
-    loading: false,
+    runtimes: mockRuntimeDescriptors,
+    loading: mockDetectionLoading,
     error: null,
+    refresh: vi.fn(),
+  }),
+}));
+
+vi.mock('@/hooks/useNativeRuntimeDetection', () => ({
+  useNativeRuntimeDetection: () => ({
+    runtimes: mockNativeRuntimeDescriptors,
+    loadingByKind: mockNativeLoadingByKind,
+    errorByKind: mockNativeErrorByKind,
     refresh: vi.fn(),
   }),
 }));
@@ -147,40 +222,253 @@ vi.mock('@/components/ask/MessageList', () => ({
 vi.mock('@/components/ask/MentionPopover', () => ({ default: () => null }));
 vi.mock('@/components/ask/SlashCommandPopover', () => ({ default: () => null }));
 vi.mock('@/components/ask/SessionHistory', () => ({ default: () => null }));
-vi.mock('@/components/ask/SessionHistoryPanel', () => ({ default: () => null }));
-vi.mock('@/components/ask/AskHeader', () => ({ default: () => <div /> }));
+vi.mock('@/components/ask/SessionHistoryPanel', () => ({
+  default: (props: {
+    sessions?: ChatSession[];
+    activeSessionId?: string | null;
+    onLoad?: (id: string) => void;
+    onClose?: () => void;
+    onNewChat?: () => void;
+    onDelete?: (id: string) => void;
+    runtimeSessions?: RuntimeSessionEntry[];
+    runtimeSessionsLoading?: boolean;
+    runtimeSessionsError?: string | null;
+    onAttachRuntimeSession?: (entry: RuntimeSessionEntry) => void;
+    onForkRuntimeSession?: (entry: RuntimeSessionEntry) => void;
+    onArchiveRuntimeSession?: (entry: RuntimeSessionEntry) => void;
+  }) => {
+    mockSessionHistoryPanelProps(props);
+    return (
+      <div data-testid="history-session-list">
+        {props.sessions?.map((session) => <span key={session.id}>{session.title ?? session.id}</span>)}
+        {props.runtimeSessionsLoading && <span>Loading runtime sessions...</span>}
+        {props.runtimeSessionsError && <span>{props.runtimeSessionsError}</span>}
+        {props.runtimeSessions?.map((entry) => <span key={entry.id}>{entry.title ?? entry.id}</span>)}
+        {props.sessions?.map((session) => (
+          <button key={`load-${session.id}`} type="button" onClick={() => props.onLoad?.(session.id)}>
+            Load {session.title ?? session.id}
+          </button>
+        ))}
+        {props.runtimeSessions?.map((entry) => (
+          <button key={`attach-${entry.id}`} type="button" onClick={() => props.onAttachRuntimeSession?.(entry)}>
+            Attach {entry.title ?? entry.id}
+          </button>
+        ))}
+        {props.runtimeSessions?.map((entry) => (
+          <button key={`fork-${entry.id}`} type="button" onClick={() => props.onForkRuntimeSession?.(entry)}>
+            Fork {entry.title ?? entry.id}
+          </button>
+        ))}
+        {props.runtimeSessions?.map((entry) => (
+          <button key={`archive-${entry.id}`} type="button" onClick={() => props.onArchiveRuntimeSession?.(entry)}>
+            Archive {entry.title ?? entry.id}
+          </button>
+        ))}
+        <button type="button" onClick={() => props.onNewChat?.()}>History New Chat</button>
+        {props.sessions?.map((session) => (
+          <button key={`delete-${session.id}`} type="button" onClick={() => props.onDelete?.(session.id)}>
+            Delete {session.id}
+          </button>
+        ))}
+      </div>
+    );
+  },
+}));
+vi.mock('@/components/ask/AskHeader', () => ({
+  default: ({
+    sessions,
+    activeSessionId,
+    onToggleHistory,
+    onReset,
+    onDeleteSession,
+    selectedAgentRuntime,
+    onSelectAgentRuntime,
+    nativeRuntimes,
+    acpRuntimes,
+    agentLoading,
+    agentLoadingByKind,
+  }: {
+    sessions?: ChatSession[];
+    activeSessionId?: string | null;
+    onToggleHistory?: () => void;
+    onReset?: () => void;
+    onDeleteSession?: (id: string) => void;
+    selectedAgentRuntime: { id: string; name: string; kind: 'acp' | 'codex' | 'claude'; binaryPath?: string; status?: string; description?: string } | null;
+    onSelectAgentRuntime: (agent: { id: string; name: string; kind: 'acp' | 'codex' | 'claude'; binaryPath?: string; status?: string; description?: string } | null) => void;
+    nativeRuntimes?: unknown[];
+    acpRuntimes?: unknown[];
+    agentLoading?: boolean;
+    agentLoadingByKind?: Partial<Record<'codex' | 'claude', boolean>>;
+  }) => (
+    (() => {
+      const codexRuntime = nativeRuntimes?.find((runtime): runtime is { id: string; name: string; kind: 'codex'; binaryPath?: string } => (
+        !!runtime
+        && typeof runtime === 'object'
+        && (runtime as { kind?: unknown }).kind === 'codex'
+        && typeof (runtime as { id?: unknown }).id === 'string'
+        && typeof (runtime as { name?: unknown }).name === 'string'
+      ));
+      const findAcpRuntime = (id: string) => acpRuntimes?.find((runtime): runtime is { id: string; name: string; kind: 'acp'; binaryPath?: string; status?: string; description?: string } => (
+        !!runtime
+        && typeof runtime === 'object'
+        && (runtime as { kind?: unknown }).kind === 'acp'
+        && (runtime as { id?: unknown }).id === id
+        && typeof (runtime as { name?: unknown }).name === 'string'
+      ));
+      const openCodeRuntime = findAcpRuntime('opencode') ?? { id: 'opencode', name: 'OpenCode', kind: 'acp' as const };
+      const cursorRuntime = findAcpRuntime('cursor-agent') ?? { id: 'cursor-agent', name: 'Cursor Agent', kind: 'acp' as const };
+      mockAskHeaderProps({ sessions, activeSessionId, selectedAgentRuntime, nativeRuntimes, acpRuntimes, agentLoading, agentLoadingByKind });
+      return (
+        <div>
+          <div data-testid="runtime-switcher">{selectedAgentRuntime?.name ?? 'MindOS'}</div>
+          <div data-testid="header-session-list">
+            {sessions?.map((session) => <span key={session.id}>{session.title ?? session.id}</span>)}
+          </div>
+          <div data-testid="header-active-session">{activeSessionId ?? 'none'}</div>
+          <button type="button" onClick={() => onToggleHistory?.()}>Toggle History</button>
+          <button type="button" onClick={() => onReset?.()}>Header New Chat</button>
+          <button type="button" onClick={() => onDeleteSession?.(activeSessionId ?? 'missing')}>Header Delete Active</button>
+          <button type="button" onClick={() => onSelectAgentRuntime(null)}>Select MindOS</button>
+          <button type="button" onClick={() => onSelectAgentRuntime({ id: 'claude-code', name: 'Claude Code', kind: 'acp' })}>Select Claude</button>
+          <button type="button" onClick={() => onSelectAgentRuntime({ id: 'claude', name: 'Claude Code', kind: 'claude' })}>Select Claude Native</button>
+          <button type="button" onClick={() => onSelectAgentRuntime(codexRuntime ?? { id: 'codex', name: 'Codex', kind: 'codex' })}>Select Codex</button>
+          <button type="button" onClick={() => onSelectAgentRuntime(openCodeRuntime)}>Select OpenCode</button>
+          <button type="button" onClick={() => onSelectAgentRuntime(cursorRuntime)}>Select Cursor Agent</button>
+        </div>
+      );
+    })()
+  ),
+}));
 vi.mock('@/components/ask/FileChip', () => ({
   default: ({ path, variant }: { path: string; variant?: string }) => <div data-testid={`chip-${variant ?? 'kb'}`}>{path}</div>,
 }));
 vi.mock('@/components/ask/AgentSelectorCapsule', () => ({
-  default: ({ selectedAgent, onSelect }: { selectedAgent: { id: string; name: string } | null; onSelect: (agent: { id: string; name: string } | null) => void }) => (
+  default: ({ selectedAgent, onSelect }: { selectedAgent: { id: string; name: string; kind: 'acp' | 'codex' | 'claude' } | null; onSelect: (agent: { id: string; name: string; kind: 'acp' | 'codex' | 'claude' } | null) => void }) => (
     <div>
       <div data-testid="agent-selector">{selectedAgent?.name ?? 'MindOS'}</div>
-      <button type="button" onClick={() => onSelect({ id: 'claude-code', name: 'Claude Code' })}>Select Claude</button>
+      <button type="button" onClick={() => onSelect({ id: 'claude-code', name: 'Claude Code', kind: 'acp' })}>Select Claude</button>
+      <button type="button" onClick={() => onSelect({ id: 'claude', name: 'Claude Code', kind: 'claude' })}>Select Claude Native</button>
+      <button type="button" onClick={() => onSelect({ id: 'codex', name: 'Codex', kind: 'codex' })}>Select Codex</button>
     </div>
   ),
 }));
 vi.mock('@/components/ask/ProviderModelCapsule', () => ({
-  default: () => null,
-  getPersistedProviderModel: () => ({ provider: null, model: null }),
+  default: ({
+    providerValue,
+    modelValue,
+    onProviderChange,
+    onModelChange,
+    persistSelection,
+  }: {
+    providerValue: string | null;
+    modelValue: string | null;
+    onProviderChange: (provider: string | null) => void;
+    onModelChange: (model: string | null) => void;
+    persistSelection?: boolean;
+  }) => (
+    <div
+      data-testid="provider-model-capsule"
+      data-provider={providerValue ?? 'default'}
+      data-model={modelValue ?? 'default'}
+      data-persist-selection={String(persistSelection)}
+    >
+      <span data-testid="provider-model-value">{providerValue ?? 'default'}::{modelValue ?? 'default'}</span>
+      <button
+        type="button"
+        onClick={() => {
+          onProviderChange('p_session');
+          onModelChange('session-model');
+        }}
+      >
+        Pick Session Model
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          onProviderChange(null);
+          onModelChange(null);
+        }}
+      >
+        Pick Default Model
+      </button>
+    </div>
+  ),
+  getPersistedProviderModel: () => mockPersistedProviderModel,
+}));
+vi.mock('@/components/ask/PiThinkingLevelCapsule', () => ({
+  default: ({ onChange }: { onChange: (level: 'max') => void }) => (
+    <button type="button" data-testid="pi-thinking-level-capsule" onClick={() => onChange('max')}>
+      Pick Max Thinking
+    </button>
+  ),
+}));
+vi.mock('@/components/ask/AgentModeCapsule', () => ({
+  default: ({
+    mode,
+    onChange,
+  }: {
+    mode: AgentMode;
+    onChange: (mode: AgentMode) => void;
+  }) => (
+    <div data-testid="agent-mode-capsule" data-mode={mode}>
+      <button type="button" onClick={() => onChange('plan')}>Set Plan Mode</button>
+      <button type="button" onClick={() => onChange('goal')}>Set Goal Mode</button>
+    </div>
+  ),
 }));
 vi.mock('@/components/ask/ModeCapsule', () => ({
-  default: () => null,
-  getPersistedMode: () => 'agent',
+  default: ({
+    mode,
+    onChange,
+  }: {
+    mode: AgentPermissionMode;
+    onChange: (mode: AgentPermissionMode) => void;
+  }) => (
+    <div data-testid="permission-capsule" data-mode={mode}>
+      <button type="button" onClick={() => onChange('ask')}>Set Ask Permission</button>
+      <button type="button" onClick={() => onChange('full')}>Set Full Permission</button>
+    </div>
+  ),
+  getPersistedPermissionMode: () => mockPersistedPermissionMode,
 }));
 vi.mock('@/lib/utils', () => ({ cn: (...parts: Array<string | false | null | undefined>) => parts.filter(Boolean).join(' ') }));
+vi.mock('@/lib/agent/reconnect', () => ({
+  isRetryableError: () => false,
+  retryDelay: () => 0,
+  sleep: () => Promise.resolve(),
+}));
 
 vi.mock('@/lib/agent/stream-consumer', () => ({
   consumeUIMessageStream: () => new Promise(() => {}),
 }));
 
-describe('AskContent ACP session binding', () => {
+function setTextareaValue(textarea: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+  if (!setter) throw new Error('HTMLTextAreaElement value setter is unavailable');
+  setter.call(textarea, value);
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+describe('ChatContent ACP session binding', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
+    mockPersistedProviderModel = { provider: null, model: null };
+    mockRuntimeDescriptors = [];
+    mockDetectionLoading = false;
+    mockNativeRuntimeDescriptors = [];
+    mockNativeLoadingByKind = {};
+    mockNativeErrorByKind = {};
+    mockPersistedPermissionMode = 'ask';
+    mockSessions = [sessionWithClaude];
+    mockActiveSession = sessionWithClaude;
+    mockActiveSessionId = 's1';
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      body: new ReadableStream(),
+    vi.stubGlobal('fetch', vi.fn(() => {
+      return Promise.resolve({
+        ok: true,
+        body: new ReadableStream(),
+      });
     }));
   });
 
@@ -190,27 +478,275 @@ describe('AskContent ACP session binding', () => {
     const root = createRoot(host);
 
     await act(async () => {
-      root.render(<AskContent visible variant="panel" />);
+      root.render(<ChatContent visible variant="panel" />);
     });
 
     await act(async () => {
       await Promise.resolve();
     });
 
-    expect(host.querySelector('[data-testid="agent-selector"]')?.textContent).toBe('Claude Code');
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Claude Code');
 
     await act(async () => {
       root.unmount();
     });
   });
 
-  it('renders the selected ACP agent with the agent chip variant', async () => {
+  it('keeps the header switcher project-scoped while scoping the history panel to the selected native runtime lane', async () => {
+    const mindosSession: ChatSession = {
+      id: 's-mindos',
+      title: 'MindOS planning',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'plan' }],
+    };
+    const codexSession: ChatSession = {
+      id: 's-codex',
+      title: 'Codex repo thread',
+      createdAt: 2,
+      updatedAt: 2,
+      messages: [{ role: 'user', content: 'fix code' }],
+      defaultAgentRuntime: { id: 'codex', name: 'Codex', kind: 'codex' },
+      runtimeSessionBinding: {
+        kind: 'codex-thread',
+        runtime: 'codex',
+        runtimeId: 'codex',
+        externalSessionId: 'thread_123',
+        status: 'active',
+        updatedAt: 2,
+      },
+    };
+    const claudeSession: ChatSession = {
+      id: 's-claude',
+      title: 'Claude review',
+      createdAt: 3,
+      updatedAt: 3,
+      messages: [{ role: 'user', content: 'review' }],
+      defaultAgentRuntime: { id: 'claude', name: 'Claude Code', kind: 'claude' },
+    };
+    mockSessions = [mindosSession, codexSession, claudeSession];
+    mockActiveSession = mindosSession;
+    mockActiveSessionId = mindosSession.id;
+
     const host = document.createElement('div');
     document.body.appendChild(host);
     const root = createRoot(host);
 
     await act(async () => {
-      root.render(<AskContent visible variant="panel" initialMessage="review this diff" />);
+      root.render(<ChatContent visible variant="panel" />);
+    });
+
+    expect(host.querySelector('[data-testid="header-session-list"]')?.textContent).toContain('MindOS planning');
+    expect(host.querySelector('[data-testid="header-session-list"]')?.textContent).toContain('Codex repo thread');
+    expect(host.querySelector('[data-testid="header-session-list"]')?.textContent).toContain('Claude review');
+
+    const selectButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectButton.click();
+    });
+
+    expect(mockLoadSession).toHaveBeenCalledWith('s-codex');
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+    expect(host.querySelector('[data-testid="header-session-list"]')?.textContent).toContain('Codex repo thread');
+    expect(host.querySelector('[data-testid="header-session-list"]')?.textContent).toContain('MindOS planning');
+    expect(host.querySelector('[data-testid="header-session-list"]')?.textContent).toContain('Claude review');
+    expect(host.querySelector('[data-testid="header-active-session"]')?.textContent).toBe('none');
+
+    const toggleHistoryButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Toggle History') as HTMLButtonElement;
+    await act(async () => {
+      toggleHistoryButton.click();
+    });
+
+    expect(host.querySelector('[data-testid="history-session-list"]')?.textContent).toContain('Codex repo thread');
+    expect(host.querySelector('[data-testid="history-session-list"]')?.textContent).not.toContain('MindOS planning');
+    expect(host.querySelector('[data-testid="history-session-list"]')?.textContent).not.toContain('Claude review');
+    expect(mockSessionHistoryPanelProps).toHaveBeenLastCalledWith(expect.objectContaining({
+      sessions: [codexSession],
+      activeSessionId: null,
+    }));
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('resets the header runtime when switching from a native session to a MindOS session', async () => {
+    const codexSession: ChatSession = {
+      id: 's-codex',
+      title: 'Codex repo thread',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'fix code' }],
+      defaultAgentRuntime: { id: 'codex', name: 'Codex', kind: 'codex' },
+    };
+    const mindosSession: ChatSession = {
+      id: 's-mindos',
+      title: 'MindOS planning',
+      createdAt: 2,
+      updatedAt: 2,
+      messages: [{ role: 'user', content: 'plan' }],
+    };
+    mockSessions = [codexSession, mindosSession];
+    mockActiveSession = codexSession;
+    mockActiveSessionId = codexSession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+
+    mockActiveSession = mindosSession;
+    mockActiveSessionId = mindosSession.id;
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('MindOS');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('keeps the selected Codex runtime when the header new-chat button is clicked immediately after runtime selection', async () => {
+    mockSessions = [{
+      id: 's-mindos',
+      title: 'MindOS planning',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'plan' }],
+    }];
+    mockActiveSession = mockSessions[0];
+    mockActiveSessionId = 's-mindos';
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+
+    const selectCodex = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectCodex.click();
+    });
+
+    const newChat = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Header New Chat') as HTMLButtonElement;
+    await act(async () => {
+      newChat.click();
+    });
+
+    expect(mockResetSession).toHaveBeenLastCalledWith({ id: 'codex', name: 'Codex', kind: 'codex' });
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('keeps the selected Claude Code runtime when history panel New Chat is clicked', async () => {
+    const claudeSession: ChatSession = {
+      id: 's-claude',
+      title: 'Claude review',
+      createdAt: 2,
+      updatedAt: 2,
+      messages: [{ role: 'user', content: 'review' }],
+      defaultAgentRuntime: { id: 'claude', name: 'Claude Code', kind: 'claude' },
+    };
+    mockSessions = [{
+      id: 's-mindos',
+      title: 'MindOS planning',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'plan' }],
+    }, claudeSession];
+    mockActiveSession = mockSessions[0];
+    mockActiveSessionId = 's-mindos';
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+
+    const selectClaudeNative = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Claude Native') as HTMLButtonElement;
+    await act(async () => {
+      selectClaudeNative.click();
+    });
+
+    const toggleHistoryButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Toggle History') as HTMLButtonElement;
+    await act(async () => {
+      toggleHistoryButton.click();
+    });
+
+    const historyNewChat = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'History New Chat') as HTMLButtonElement;
+    await act(async () => {
+      historyNewChat.click();
+    });
+
+    expect(mockResetSession).toHaveBeenLastCalledWith({ id: 'claude', name: 'Claude Code', kind: 'claude' });
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Claude Code');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('creates the replacement empty session in the active native runtime when deleting the active session', async () => {
+    const codexSession: ChatSession = {
+      id: 's-codex',
+      title: 'Codex repo thread',
+      createdAt: 2,
+      updatedAt: 2,
+      messages: [{ role: 'user', content: 'fix code' }],
+      defaultAgentRuntime: { id: 'codex', name: 'Codex', kind: 'codex' },
+    };
+    mockSessions = [codexSession];
+    mockActiveSession = codexSession;
+    mockActiveSessionId = 's-codex';
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+
+    const deleteActive = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Header Delete Active') as HTMLButtonElement;
+    await act(async () => {
+      deleteActive.click();
+    });
+
+    expect(mockDeleteSession).toHaveBeenCalledWith('s-codex', { id: 'codex', name: 'Codex', kind: 'codex' });
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('keeps selected runtime in the header instead of rendering a composer agent chip', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="review this diff" />);
     });
 
     await act(async () => {
@@ -222,7 +758,8 @@ describe('AskContent ACP session binding', () => {
       selectButton.click();
     });
 
-    expect(host.querySelector('[data-testid="chip-agent"]')?.textContent).toBe('Claude Code');
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Claude Code');
+    expect(host.querySelector('[data-testid="chip-agent"]')).toBeNull();
     expect(host.querySelector('[data-testid="chip-skill"]')).toBeNull();
 
     await act(async () => {
@@ -230,13 +767,13 @@ describe('AskContent ACP session binding', () => {
     });
   });
 
-  it('does not clear the selected agent after submit', async () => {
+  it('does not clear the selected agent after submit and sends its runtime identity', async () => {
     const host = document.createElement('div');
     document.body.appendChild(host);
     const root = createRoot(host);
 
     await act(async () => {
-      root.render(<AskContent visible variant="panel" initialMessage="review this diff" />);
+      root.render(<ChatContent visible variant="panel" initialMessage="review this diff" />);
     });
 
     await act(async () => {
@@ -257,7 +794,1818 @@ describe('AskContent ACP session binding', () => {
       }
     });
 
-    expect(host.querySelector('[data-testid="agent-selector"]')?.textContent).toBe('Claude Code');
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Claude Code');
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedAcpAgent).toEqual({ id: 'claude-code', name: 'Claude Code' });
+    expect(requestBody.selectedRuntime).toEqual({ id: 'claude-code', name: 'Claude Code', kind: 'acp' });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('restores the draft instead of locking the session when WorkDir validation fails before runtime start', async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      if (isAgentTurnUrl(url)) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            error: {
+              code: 'CONFLICT',
+              issueCode: 'runtime_resume_untrusted',
+              message: 'Attach the runtime session first.',
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        body: new ReadableStream(),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="use the selected folder" />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const textarea = host.querySelector('textarea') as HTMLTextAreaElement;
+    expect(textarea.value).toBe('use the selected folder');
+    expect(host.textContent).toContain('Attach the runtime session first');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('can switch an opener-selected ACP runtime back to MindOS before submit', async () => {
+    mockPersistedProviderModel = { provider: 'openai', model: 'gpt-test' };
+    mockActiveSession = {
+      id: 's-acp-empty',
+      title: 'ACP opener',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      defaultAcpAgent: { id: 'claude-code', name: 'Claude Code' },
+    };
+    mockSessions = [mockActiveSession];
+    mockActiveSessionId = mockActiveSession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(
+        <ChatContent
+          visible
+          variant="panel"
+          initialMessage="answer with mindos"
+          initialAcpAgent={{ id: 'claude-code', name: 'Claude Code' }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Claude Code');
+
+    const selectMindos = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select MindOS') as HTMLButtonElement;
+    await act(async () => {
+      selectMindos.click();
+    });
+
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('MindOS');
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedAcpAgent).toBeNull();
+    expect(requestBody.selectedRuntime).toBeNull();
+    expect(requestBody.providerOverride).toBe('openai');
+    expect(requestBody.modelOverride).toBe('gpt-test');
+    expect(mockSetSessionDefaultAcpAgent).toHaveBeenLastCalledWith(null);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('sends the selected MindOS agent mode with the turn request', async () => {
+    mockPersistedProviderModel = { provider: 'openai', model: 'gpt-test' };
+    mockActiveSession = emptySession;
+    mockSessions = [emptySession];
+    mockActiveSessionId = emptySession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="finish this feature" />);
+    });
+
+    const goalMode = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Set Goal Mode') as HTMLButtonElement;
+    expect(goalMode).toBeTruthy();
+    await act(async () => {
+      goalMode.click();
+    });
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedAcpAgent).toBeNull();
+    expect(requestBody.selectedRuntime).toBeNull();
+    expect(requestBody.agentMode).toBe('goal');
+    expect(requestBody.permissionMode).toBe('ask');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('syncs the MindOS agent mode capsule from /plan and /goal composer directives', async () => {
+    mockActiveSession = emptySession;
+    mockSessions = [emptySession];
+    mockActiveSessionId = emptySession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+
+    const capsule = () => host.querySelector('[data-testid="agent-mode-capsule"]') as HTMLElement;
+    const textarea = host.querySelector('textarea') as HTMLTextAreaElement;
+    expect(capsule().getAttribute('data-mode')).toBe('default');
+
+    await act(async () => {
+      setTextareaValue(textarea, '/plan inspect before editing');
+    });
+    expect(capsule().getAttribute('data-mode')).toBe('plan');
+
+    await act(async () => {
+      setTextareaValue(textarea, '/goal finish the task');
+    });
+    expect(capsule().getAttribute('data-mode')).toBe('goal');
+
+    await act(async () => {
+      setTextareaValue(textarea, 'finish the task normally');
+    });
+    expect(capsule().getAttribute('data-mode')).toBe('default');
+
+    const planMode = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Set Plan Mode') as HTMLButtonElement;
+    await act(async () => {
+      planMode.click();
+    });
+    expect(capsule().getAttribute('data-mode')).toBe('plan');
+
+    await act(async () => {
+      setTextareaValue(textarea, '  /goal finish the task');
+    });
+    expect(capsule().getAttribute('data-mode')).toBe('goal');
+
+    await act(async () => {
+      setTextareaValue(textarea, '/planner is ordinary text');
+    });
+    expect(capsule().getAttribute('data-mode')).toBe('plan');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('keeps Plan mode available and submits it for a native Codex turn', async () => {
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      binaryPath: '/usr/local/bin/codex',
+      status: 'available',
+      capabilities: {},
+    }];
+    mockActiveSession = emptySession;
+    mockSessions = [emptySession];
+    mockActiveSessionId = emptySession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="inspect before editing" />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const selectCodex = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectCodex.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const capsule = host.querySelector('[data-testid="agent-mode-capsule"]') as HTMLElement;
+    expect(capsule).toBeTruthy();
+    expect(capsule.getAttribute('data-mode')).toBe('default');
+
+    const planMode = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Set Plan Mode') as HTMLButtonElement;
+    await act(async () => {
+      planMode.click();
+    });
+    expect(capsule.getAttribute('data-mode')).toBe('plan');
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedAcpAgent).toBeNull();
+    expect(requestBody.selectedRuntime).toEqual({ id: 'codex', name: 'Codex', kind: 'codex', binaryPath: '/usr/local/bin/codex' });
+    expect(requestBody.agentMode).toBe('plan');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('keeps Goal mode available and submits it for a native Claude Code turn', async () => {
+    mockNativeRuntimeDescriptors = [{
+      id: 'claude',
+      name: 'Claude Code',
+      kind: 'claude',
+      status: 'available',
+      capabilities: {},
+    }];
+    mockActiveSession = emptySession;
+    mockSessions = [emptySession];
+    mockActiveSessionId = emptySession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="finish the implementation" />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const selectClaudeNative = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Claude Native') as HTMLButtonElement;
+    await act(async () => {
+      selectClaudeNative.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const capsule = host.querySelector('[data-testid="agent-mode-capsule"]') as HTMLElement;
+    expect(capsule).toBeTruthy();
+
+    const goalMode = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Set Goal Mode') as HTMLButtonElement;
+    await act(async () => {
+      goalMode.click();
+    });
+    expect(capsule.getAttribute('data-mode')).toBe('goal');
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedAcpAgent).toBeNull();
+    expect(requestBody.selectedRuntime).toEqual({ id: 'claude', name: 'Claude Code', kind: 'claude' });
+    expect(requestBody.agentMode).toBe('goal');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('does not expose MindOS agent modes for ACP runtimes', async () => {
+    mockActiveSession = emptySession;
+    mockSessions = [emptySession];
+    mockActiveSessionId = emptySession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="run through acp" />);
+    });
+
+    const planMode = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Set Plan Mode') as HTMLButtonElement;
+    await act(async () => {
+      planMode.click();
+    });
+    expect(host.querySelector('[data-testid="agent-mode-capsule"]')?.getAttribute('data-mode')).toBe('plan');
+
+    const selectOpenCode = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select OpenCode') as HTMLButtonElement;
+    await act(async () => {
+      selectOpenCode.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(host.querySelector('[data-testid="agent-mode-capsule"]')).toBeNull();
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedRuntime).toEqual({ id: 'opencode', name: 'OpenCode', kind: 'acp' });
+    expect(requestBody.agentMode).toBe('default');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('keeps provider and model selection scoped to the active MindOS chat session', async () => {
+    mockPersistedProviderModel = { provider: 'p_global', model: 'global-model' };
+    const cheapSession: ChatSession = {
+      id: 's-cheap',
+      title: 'Cheap model chat',
+      createdAt: 1,
+      updatedAt: 10,
+      messages: [],
+      modelSelection: {
+        version: 1,
+        providerOverride: 'p_cheap',
+        modelOverride: 'cheap-model',
+        updatedAt: 10,
+      },
+    };
+    const defaultSession: ChatSession = {
+      id: 's-default',
+      title: 'Default chat',
+      createdAt: 2,
+      updatedAt: 20,
+      messages: [],
+    };
+    mockSessions = [cheapSession, defaultSession];
+    mockActiveSession = cheapSession;
+    mockActiveSessionId = cheapSession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="use session model" />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(host.querySelector('[data-testid="provider-model-value"]')?.textContent).toBe('p_cheap::cheap-model');
+    expect(host.querySelector('[data-testid="provider-model-capsule"]')?.getAttribute('data-persist-selection')).toBe('false');
+
+    mockActiveSession = defaultSession;
+    mockActiveSessionId = defaultSession.id;
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="use session model" />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(host.querySelector('[data-testid="provider-model-value"]')?.textContent).toBe('p_global::global-model');
+
+    const pickSessionModel = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Pick Session Model') as HTMLButtonElement;
+    await act(async () => {
+      pickSessionModel.click();
+    });
+
+    expect(mockSetSessionModelSelection).toHaveBeenLastCalledWith({
+      version: 1,
+      providerOverride: 'p_session',
+      modelOverride: 'session-model',
+      updatedAt: expect.any(Number),
+    });
+
+    const pickMaxThinking = Array.from(host.querySelectorAll('button'))
+      .find((button) => button.textContent === 'Pick Max Thinking') as HTMLButtonElement;
+    await act(async () => {
+      pickMaxThinking.click();
+    });
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.chatSessionId).toBe('s-default');
+    expect(requestBody.providerOverride).toBe('p_session');
+    expect(requestBody.modelOverride).toBe('session-model');
+    expect(requestBody.agentOptions).toEqual({ thinkingLevel: 'max' });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('sends a native Codex runtime selection without legacy ACP routing', async () => {
+    mockPersistedProviderModel = { provider: 'openai', model: 'gpt-test' };
+    localStorage.setItem('mindos-native-runtime-options.v1:codex', JSON.stringify({
+      modelOverride: 'gpt-5.4-codex',
+      reasoningEffort: 'high',
+      permissionMode: 'read',
+    }));
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      binaryPath: '/usr/local/bin/codex',
+      status: 'available',
+      capabilities: {},
+    }];
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="summarize this repo" />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const selectButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectButton.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(host.querySelector('[data-native-runtime-options]')).not.toBeNull();
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedAcpAgent).toBeNull();
+    expect(requestBody.selectedRuntime).toEqual({ id: 'codex', name: 'Codex', kind: 'codex', binaryPath: '/usr/local/bin/codex' });
+    expect(requestBody).not.toHaveProperty('providerOverride');
+    expect(requestBody).not.toHaveProperty('modelOverride');
+    expect(requestBody.permissionMode).toBe('ask');
+    expect(requestBody.runtimeOptions).toEqual({
+      modelOverride: 'gpt-5.4-codex',
+      reasoningEffort: 'high',
+    });
+    expect(mockSetSessionAgentRuntimeBinding).toHaveBeenCalledWith({ id: 'codex', name: 'Codex', kind: 'codex', binaryPath: '/usr/local/bin/codex' });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('submits the latest full permission mode for a native Codex turn', async () => {
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      binaryPath: '/usr/local/bin/codex',
+      status: 'available',
+      capabilities: {},
+    }];
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="write project notes" />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const selectButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectButton.click();
+    });
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    const fullPermissionButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Set Full Permission') as HTMLButtonElement;
+    await act(async () => {
+      fullPermissionButton.click();
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedRuntime).toEqual({ id: 'codex', name: 'Codex', kind: 'codex', binaryPath: '/usr/local/bin/codex' });
+    expect(requestBody.permissionMode).toBe('full');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('preselects a native runtime from an opener and submits it without legacy ACP routing', async () => {
+    mockActiveSession = emptySession;
+    localStorage.setItem('mindos-native-runtime-options.v1:codex', JSON.stringify({
+      modelOverride: 'gpt-5.4-codex',
+      reasoningEffort: 'xhigh',
+      permissionMode: 'read',
+    }));
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      binaryPath: '/usr/local/bin/codex',
+      status: 'available',
+      capabilities: {},
+    }];
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(
+        <ChatContent
+          visible
+          variant="panel"
+          initialMessage="continue with codex"
+          initialAgentRuntime={{ id: 'codex', name: 'Codex', kind: 'codex' }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+    expect(mockSetSessionAgentRuntimeBinding).toHaveBeenCalledWith({ id: 'codex', name: 'Codex', kind: 'codex', binaryPath: '/usr/local/bin/codex' });
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedAcpAgent).toBeNull();
+    expect(requestBody.selectedRuntime).toEqual({ id: 'codex', name: 'Codex', kind: 'codex', binaryPath: '/usr/local/bin/codex' });
+    expect(requestBody.permissionMode).toBe('ask');
+    expect(requestBody.runtimeOptions).toEqual({
+      modelOverride: 'gpt-5.4-codex',
+      reasoningEffort: 'xhigh',
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('uses the last selected runtime and its persisted options when opened without an explicit runtime', async () => {
+    mockSessions = [emptySession];
+    mockActiveSession = emptySession;
+    mockActiveSessionId = emptySession.id;
+    localStorage.setItem(LAST_AGENT_RUNTIME_STORAGE_KEY, JSON.stringify({
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      binaryPath: '/usr/local/bin/codex',
+    }));
+    localStorage.setItem('mindos-native-runtime-options.v1:codex', JSON.stringify({
+      modelOverride: 'gpt-5.4-codex',
+      reasoningEffort: 'high',
+      permissionMode: 'ask',
+    }));
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      binaryPath: '/usr/local/bin/codex',
+      status: 'available',
+      capabilities: {},
+    }];
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="continue last runtime" />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mockInitSessions).toHaveBeenCalledWith({
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      binaryPath: '/usr/local/bin/codex',
+    });
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedAcpAgent).toBeNull();
+    expect(requestBody.selectedRuntime).toEqual({ id: 'codex', name: 'Codex', kind: 'codex', binaryPath: '/usr/local/bin/codex' });
+    expect(requestBody.permissionMode).toBe('ask');
+    expect(requestBody.runtimeOptions).toEqual({
+      modelOverride: 'gpt-5.4-codex',
+      reasoningEffort: 'high',
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('sends a native Claude Code runtime selection without legacy ACP routing', async () => {
+    mockPersistedProviderModel = { provider: 'anthropic', model: 'claude-test' };
+    localStorage.setItem('mindos-native-runtime-options.v1:claude', JSON.stringify({
+      modelOverride: 'claude-sonnet-4-20250514',
+      reasoningEffort: 'medium',
+      permissionMode: 'ask',
+    }));
+    mockNativeRuntimeDescriptors = [{
+      id: 'claude',
+      name: 'Claude Code',
+      kind: 'claude',
+      status: 'available',
+      capabilities: {},
+    }];
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="review this diff" />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const selectButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Claude Native') as HTMLButtonElement;
+    await act(async () => {
+      selectButton.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(host.querySelector('[data-native-runtime-options]')).not.toBeNull();
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedAcpAgent).toBeNull();
+    expect(requestBody.selectedRuntime).toEqual({ id: 'claude', name: 'Claude Code', kind: 'claude' });
+    expect(requestBody).not.toHaveProperty('providerOverride');
+    expect(requestBody).not.toHaveProperty('modelOverride');
+    expect(requestBody.permissionMode).toBe('ask');
+    expect(requestBody.runtimeOptions).toEqual({
+      modelOverride: 'claude-sonnet-4-20250514',
+      reasoningEffort: 'medium',
+    });
+    expect(mockSetSessionAgentRuntimeBinding).toHaveBeenCalledWith({ id: 'claude', name: 'Claude Code', kind: 'claude' });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('keeps failed native runtime bindings visible but does not submit them as resumable runtime ids', async () => {
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      binaryPath: '/usr/local/bin/codex',
+      status: 'available',
+      capabilities: {},
+    }];
+    mockActiveSession = {
+      id: 's-codex-failed',
+      title: 'Codex failed thread',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      defaultAgentRuntime: { id: 'codex', name: 'Codex', kind: 'codex' },
+      runtimeSessionBinding: {
+        kind: 'codex-thread',
+        runtime: 'codex',
+        runtimeId: 'codex',
+        externalSessionId: 'thread_failed',
+        cwd: '/tmp/mind',
+        status: 'failed',
+        updatedAt: 2,
+      },
+    };
+    mockSessions = [mockActiveSession];
+    mockActiveSessionId = mockActiveSession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="continue safely" />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.runtimeBinding).toMatchObject({
+      kind: 'codex-thread',
+      runtime: 'codex',
+      runtimeId: 'codex',
+      externalSessionId: 'thread_failed',
+      status: 'failed',
+    });
+    expect(requestBody.selectedRuntime).toEqual({ id: 'codex', name: 'Codex', kind: 'codex', binaryPath: '/usr/local/bin/codex' });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('shows only Claude Code sessions in the runtime history', async () => {
+    const mindosSession: ChatSession = {
+      id: 's-mindos',
+      title: 'MindOS planning',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'plan' }],
+    };
+    const linkedClaudeSession: ChatSession = {
+      id: 's-claude-linked',
+      title: 'Linked Claude review',
+      createdAt: 2,
+      updatedAt: 2,
+      messages: [{ role: 'user', content: 'review' }],
+      defaultAgentRuntime: { id: 'claude', name: 'Claude Code', kind: 'claude' },
+      runtimeSessionBinding: {
+        kind: 'claude-session',
+        runtime: 'claude',
+        runtimeId: 'claude',
+        externalSessionId: 'claude-session-1',
+        status: 'active',
+        updatedAt: 2,
+      },
+    };
+    mockSessions = [mindosSession, linkedClaudeSession];
+    mockActiveSession = mindosSession;
+    mockActiveSessionId = mindosSession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+
+    const selectButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Claude Native') as HTMLButtonElement;
+    await act(async () => {
+      selectButton.click();
+    });
+
+    expect(mockLoadSession).toHaveBeenCalledWith('s-claude-linked');
+    expect(host.querySelector('[data-testid="header-session-list"]')?.textContent).toContain('Linked Claude review');
+    expect(host.querySelector('[data-testid="header-session-list"]')?.textContent).toContain('MindOS planning');
+
+    const toggleHistoryButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Toggle History') as HTMLButtonElement;
+    await act(async () => {
+      toggleHistoryButton.click();
+    });
+
+    expect(host.querySelector('[data-testid="history-session-list"]')?.textContent).toContain('Linked Claude review');
+    expect(host.querySelector('[data-testid="history-session-list"]')?.textContent).not.toContain('MindOS planning');
+    expect(globalThis.fetch).not.toHaveBeenCalledWith('/api/agent-runtimes/claude/sessions', expect.anything());
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('loads Codex runtime sessions in history and attaches without starting a turn', async () => {
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      status: 'available',
+      capabilities: {},
+    }];
+    mockSessions = [{
+      id: 's-mindos',
+      title: 'MindOS planning',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'plan' }],
+    }];
+    mockActiveSession = mockSessions[0];
+    mockActiveSessionId = 's-mindos';
+    const codexThread = {
+      id: 'thread_existing',
+      name: 'Runtime fix thread',
+      preview: 'Continue native runtime work',
+      cwd: '/tmp/repo',
+      updatedAt: 123,
+    };
+    const turnTimestamp = '2026-06-29T00:00:00.000Z';
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).startsWith('/api/agent-runtimes/codex/threads?')) {
+        return {
+          ok: true,
+          json: async () => ({ data: [codexThread], nextCursor: null, backwardsCursor: null }),
+        };
+      }
+      if (String(url) === '/api/agent-runtimes/codex/threads/thread_existing?includeTurns=1') {
+        return {
+          ok: true,
+          json: async () => ({
+            thread: {
+              ...codexThread,
+              turns: [{
+                timestamp: turnTimestamp,
+                input: [{ type: 'text', text: 'previous user prompt' }],
+                output: [{
+                  type: 'message',
+                  role: 'assistant',
+                  content: [{ type: 'output_text', text: 'previous assistant answer' }],
+                }],
+              }],
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        body: new ReadableStream(),
+        json: async () => ({}),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+
+    const selectCodex = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectCodex.click();
+    });
+
+    const toggleHistoryButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Toggle History') as HTMLButtonElement;
+    await act(async () => {
+      toggleHistoryButton.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/agent-runtimes/codex/threads?'))).toBe(true);
+    expect(host.querySelector('[data-testid="history-session-list"]')?.textContent).toContain('Runtime fix thread');
+
+    const attach = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Attach Runtime fix thread') as HTMLButtonElement;
+    await act(async () => {
+      attach.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(fetchMock.mock.calls.some(([url]) => (
+      String(url) === '/api/agent-runtimes/codex/threads/thread_existing?includeTurns=1'
+    ))).toBe(true);
+    expect(mockAttachRuntimeSession).toHaveBeenCalledWith(
+      { id: 'codex', name: 'Codex', kind: 'codex' },
+      {
+        externalSessionId: 'thread_existing',
+        cwd: '/tmp/repo',
+        status: 'active',
+        updatedAt: 123,
+      },
+      {
+        title: 'Runtime fix thread',
+        messages: [
+          {
+            role: 'user',
+            content: 'previous user prompt',
+            timestamp: Date.parse(turnTimestamp),
+            agentId: 'codex',
+            agentName: 'Codex',
+            agentKind: 'codex',
+          },
+          {
+            role: 'assistant',
+            content: 'previous assistant answer',
+            timestamp: Date.parse(turnTimestamp),
+            agentId: 'codex',
+            agentName: 'Codex',
+            agentKind: 'codex',
+          },
+        ],
+      },
+    );
+    expect(fetchMock.mock.calls.some(([url]) => isAgentTurnUrl(url))).toBe(false);
+    expect(host.querySelector('[data-testid="history-session-list"]')).toBeNull();
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('loads history for an already bound empty Codex session row', async () => {
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      status: 'available',
+      capabilities: {},
+    }];
+    const turnTimestamp = '2026-06-29T01:00:00.000Z';
+    const boundCodexSession: ChatSession = {
+      id: 's-codex-empty',
+      title: 'Scanned Codex thread',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      defaultAgentRuntime: { id: 'codex', name: 'Codex', kind: 'codex' },
+      runtimeSessionBinding: {
+        kind: 'codex-thread',
+        runtime: 'codex',
+        runtimeId: 'codex',
+        externalSessionId: 'thread_scanned',
+        cwd: '/tmp/repo',
+        status: 'active',
+        updatedAt: 123,
+      },
+    };
+    mockSessions = [boundCodexSession];
+    mockActiveSession = boundCodexSession;
+    mockActiveSessionId = boundCodexSession.id;
+
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).startsWith('/api/agent-runtimes/codex/threads?')) {
+        return {
+          ok: true,
+          json: async () => ({ data: [], nextCursor: null, backwardsCursor: null }),
+        };
+      }
+      if (String(url) === '/api/agent-runtimes/codex/threads/thread_scanned?includeTurns=1') {
+        return {
+          ok: true,
+          json: async () => ({
+            thread: {
+              id: 'thread_scanned',
+              name: 'Scanned Codex thread',
+              cwd: '/tmp/repo',
+              updatedAt: 123,
+              turns: [{
+                timestamp: turnTimestamp,
+                input: [{ type: 'text', text: 'scanned user prompt' }],
+                output: [{
+                  type: 'message',
+                  role: 'assistant',
+                  content: [{ type: 'output_text', text: 'scanned assistant answer' }],
+                }],
+              }],
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        body: new ReadableStream(),
+        json: async () => ({}),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+
+    const toggleHistoryButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Toggle History') as HTMLButtonElement;
+    await act(async () => {
+      toggleHistoryButton.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const load = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Load Scanned Codex thread') as HTMLButtonElement;
+    await act(async () => {
+      load.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mockLoadSession).toHaveBeenCalledWith('s-codex-empty');
+    expect(fetchMock.mock.calls.some(([url]) => (
+      String(url) === '/api/agent-runtimes/codex/threads/thread_scanned?includeTurns=1'
+    ))).toBe(true);
+    expect(mockAttachRuntimeSession).toHaveBeenCalledWith(
+      { id: 'codex', name: 'Codex', kind: 'codex' },
+      {
+        externalSessionId: 'thread_scanned',
+        cwd: '/tmp/repo',
+        status: 'active',
+        updatedAt: 123,
+      },
+      {
+        title: 'Scanned Codex thread',
+        messages: [
+          {
+            role: 'user',
+            content: 'scanned user prompt',
+            timestamp: Date.parse(turnTimestamp),
+            agentId: 'codex',
+            agentName: 'Codex',
+            agentKind: 'codex',
+          },
+          {
+            role: 'assistant',
+            content: 'scanned assistant answer',
+            timestamp: Date.parse(turnTimestamp),
+            agentId: 'codex',
+            agentName: 'Codex',
+            agentKind: 'codex',
+          },
+        ],
+      },
+    );
+    expect(fetchMock.mock.calls.some(([url]) => isAgentTurnUrl(url))).toBe(false);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('loads ACP runtime sessions for the active cwd and attaches exposed message history without starting a turn', async () => {
+    mockRuntimeDescriptors = [{
+      id: 'opencode',
+      name: 'OpenCode',
+      kind: 'acp',
+      status: 'available',
+      capabilities: {},
+      lifecycle: {},
+      compatibility: {},
+    }];
+    const activeSession: ChatSession = {
+      id: 's-open',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      workDir: {
+        source: 'manual',
+        path: '/tmp/repo',
+        label: 'repo',
+      },
+    };
+    mockSessions = [activeSession];
+    mockActiveSession = activeSession;
+    mockActiveSessionId = activeSession.id;
+    const updatedAt = '2026-06-29T03:00:00.000Z';
+    const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url) === '/api/acp/session') {
+        return {
+          ok: true,
+          json: async () => ({
+            sessions: [{
+              sessionId: 'opencode-session-1',
+              title: 'OpenCode session',
+              cwd: '/tmp/repo',
+              updatedAt,
+              messages: [
+                { role: 'user', content: 'previous acp prompt' },
+                { role: 'assistant', content: 'previous acp answer' },
+              ],
+            }],
+          }),
+        };
+      }
+      return {
+        ok: true,
+        body: new ReadableStream(),
+        json: async () => ({}),
+        init,
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+
+    const selectOpenCode = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select OpenCode') as HTMLButtonElement;
+    await act(async () => {
+      selectOpenCode.click();
+    });
+
+    const toggleHistoryButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Toggle History') as HTMLButtonElement;
+    await act(async () => {
+      toggleHistoryButton.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const acpSessionCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/acp/session');
+    expect(acpSessionCall).toBeTruthy();
+    expect(JSON.parse(String(acpSessionCall?.[1]?.body))).toMatchObject({
+      action: 'list_sessions',
+      agentId: 'opencode',
+      cwd: '/tmp/repo',
+    });
+    expect(host.querySelector('[data-testid="history-session-list"]')?.textContent).toContain('OpenCode session');
+
+    const attach = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Attach OpenCode session') as HTMLButtonElement;
+    await act(async () => {
+      attach.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mockAttachRuntimeSession).toHaveBeenCalledWith(
+      { id: 'opencode', name: 'OpenCode', kind: 'acp' },
+      {
+        externalSessionId: 'opencode-session-1',
+        cwd: '/tmp/repo',
+        status: 'active',
+        updatedAt,
+      },
+      {
+        title: 'OpenCode session',
+        messages: [
+          {
+            role: 'user',
+            content: 'previous acp prompt',
+            timestamp: Date.parse(updatedAt),
+            agentId: 'opencode',
+            agentName: 'OpenCode',
+            agentKind: 'acp',
+          },
+          {
+            role: 'assistant',
+            content: 'previous acp answer',
+            timestamp: Date.parse(updatedAt),
+            agentId: 'opencode',
+            agentName: 'OpenCode',
+            agentKind: 'acp',
+          },
+        ],
+      },
+    );
+    expect(fetchMock.mock.calls.some(([url]) => isAgentTurnUrl(url))).toBe(false);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('forks a Codex local thread and attaches the returned thread without starting a turn', async () => {
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      status: 'available',
+      capabilities: {},
+    }];
+    mockSessions = [{
+      id: 's-mindos',
+      title: 'MindOS planning',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'plan' }],
+    }];
+    mockActiveSession = mockSessions[0];
+    mockActiveSessionId = 's-mindos';
+    const codexThread = {
+      id: 'thread_existing',
+      name: 'Runtime fix thread',
+      cwd: '/tmp/repo',
+      updatedAt: 123,
+    };
+    const forkedThread = {
+      id: 'thread_forked',
+      name: 'Forked runtime fix',
+      cwd: '/tmp/repo',
+      updatedAt: 456,
+    };
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).startsWith('/api/agent-runtimes/codex/threads?')) {
+        return {
+          ok: true,
+          json: async () => ({ data: [codexThread], nextCursor: null, backwardsCursor: null }),
+        };
+      }
+      if (String(url) === '/api/agent-runtimes/codex/threads/thread_existing/fork') {
+        return {
+          ok: true,
+          json: async () => ({ thread: forkedThread }),
+        };
+      }
+      return {
+        ok: true,
+        body: new ReadableStream(),
+        json: async () => ({}),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+    const selectCodex = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectCodex.click();
+    });
+    const toggleHistoryButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Toggle History') as HTMLButtonElement;
+    await act(async () => {
+      toggleHistoryButton.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const fork = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Fork Runtime fix thread') as HTMLButtonElement;
+    await act(async () => {
+      fork.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/agent-runtimes/codex/threads/thread_existing/fork')).toBe(true);
+    expect(mockAttachRuntimeSession).toHaveBeenCalledWith(
+      { id: 'codex', name: 'Codex', kind: 'codex' },
+      {
+        externalSessionId: 'thread_forked',
+        cwd: '/tmp/repo',
+        status: 'active',
+        updatedAt: 456,
+      },
+      { title: 'Forked runtime fix' },
+    );
+    expect(fetchMock.mock.calls.some(([url]) => isAgentTurnUrl(url))).toBe(false);
+    expect(host.querySelector('[data-testid="history-session-list"]')).toBeNull();
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('passes detected ACP runtimes to the header agent switcher', async () => {
+    mockRuntimeDescriptors = [
+      {
+        id: 'opencode',
+        name: 'OpenCode',
+        kind: 'acp',
+        status: 'available',
+        description: 'ACP coding agent.',
+        binaryPath: '/tmp/opencode',
+      },
+      {
+        id: 'cursor-agent',
+        name: 'Cursor Agent',
+        kind: 'acp',
+        status: 'signed-out',
+        availability: {
+          checkedAt: '2026-06-09T00:00:00.000Z',
+          sources: ['acp-detect'],
+          reason: 'Cursor Agent needs sign-in.',
+        },
+      },
+    ];
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+
+    expect(mockAskHeaderProps).toHaveBeenLastCalledWith(expect.objectContaining({
+      acpRuntimes: expect.arrayContaining([
+        expect.objectContaining({ id: 'opencode', name: 'OpenCode', kind: 'acp', status: 'available' }),
+        expect.objectContaining({ id: 'cursor-agent', name: 'Cursor Agent', kind: 'acp', status: 'signed-out' }),
+      ]),
+    }));
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('selects an available ACP runtime from the header and submits through the runtime lane', async () => {
+    mockPersistedProviderModel = { provider: 'openai', model: 'gpt-test' };
+    mockRuntimeDescriptors = [
+      {
+        id: 'opencode',
+        name: 'OpenCode',
+        kind: 'acp',
+        status: 'available',
+        description: 'ACP coding agent.',
+        binaryPath: '/tmp/opencode',
+      },
+    ];
+    mockActiveSession = emptySession;
+    mockSessions = [emptySession];
+    mockActiveSessionId = emptySession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="use opencode" />);
+    });
+
+    const selectOpenCode = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select OpenCode') as HTMLButtonElement;
+    await act(async () => {
+      selectOpenCode.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('OpenCode');
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const agentTurnCall = fetchMock.mock.calls.find(([url]) => isAgentTurnUrl(url));
+    expect(agentTurnCall).toBeTruthy();
+    const requestBody = JSON.parse(String((agentTurnCall?.[1] as RequestInit | undefined)?.body));
+    expect(requestBody.selectedAcpAgent).toEqual({ id: 'opencode', name: 'OpenCode' });
+    expect(requestBody.selectedRuntime).toEqual({ id: 'opencode', name: 'OpenCode', kind: 'acp', binaryPath: '/tmp/opencode' });
+    expect(requestBody).not.toHaveProperty('providerOverride');
+    expect(requestBody).not.toHaveProperty('modelOverride');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('blocks sending when the selected ACP runtime is explicitly unavailable', async () => {
+    mockRuntimeDescriptors = [
+      {
+        id: 'cursor-agent',
+        name: 'Cursor Agent',
+        kind: 'acp',
+        status: 'signed-out',
+        description: 'ACP coding agent.',
+        availability: {
+          checkedAt: '2026-06-09T00:00:00.000Z',
+          sources: ['acp-detect'],
+          reason: 'Cursor Agent needs sign-in.',
+        },
+      },
+    ];
+    mockActiveSession = emptySession;
+    mockSessions = [emptySession];
+    mockActiveSessionId = emptySession.id;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="use cursor" />);
+    });
+
+    const selectCursor = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Cursor Agent') as HTMLButtonElement;
+    await act(async () => {
+      selectCursor.click();
+    });
+
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Cursor Agent');
+    expect(host.textContent).toContain('Cursor Agent is signed out. Cursor Agent needs sign-in.');
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([url]) => isAgentTurnUrl(url))).toBe(false);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('shows a concise composer status and blocks sending while the selected native runtime is still being checked', async () => {
+    mockDetectionLoading = true;
+    mockNativeLoadingByKind = { codex: true, claude: false };
+    mockSessions = [{
+      id: 's-mindos',
+      title: 'MindOS planning',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'plan' }],
+    }];
+    mockActiveSession = mockSessions[0];
+    mockActiveSessionId = 's-mindos';
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="summarize this repo" />);
+    });
+
+    const selectButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectButton.click();
+    });
+
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+    expect(mockAskHeaderProps).toHaveBeenLastCalledWith(expect.objectContaining({
+      agentLoading: false,
+      agentLoadingByKind: { codex: true, claude: false },
+    }));
+    expect(host.textContent).toContain('Checking Codex status...');
+    expect(host.textContent).not.toContain('Local runtime cold starts can take up to 20 seconds.');
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([url]) => isAgentTurnUrl(url))).toBe(false);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('blocks sending when the selected runtime is unavailable', async () => {
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      status: 'signed-out',
+      capabilities: {},
+      availability: {
+        checkedAt: '2026-06-09T00:00:00.000Z',
+        sources: ['native-health'],
+        reason: 'Run codex login first.',
+      },
+    }];
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="summarize this repo" />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const selectButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectButton.click();
+    });
+
+    expect(host.textContent).toContain('Codex is signed out. Run codex login first.');
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([url]) => isAgentTurnUrl(url))).toBe(false);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('blocks sending when native runtime cache was available but background revalidation failed', async () => {
+    mockNativeRuntimeDescriptors = [{
+      id: 'claude',
+      name: 'Claude Code',
+      kind: 'claude',
+      status: 'available',
+      capabilities: {},
+    }];
+    mockNativeLoadingByKind = { claude: false };
+    mockNativeErrorByKind = { claude: 'Detection failed' };
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="summarize this repo" />);
+    });
+
+    const selectButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Claude Native') as HTMLButtonElement;
+    await act(async () => {
+      selectButton.click();
+    });
+
+    expect(host.textContent).toContain('Claude Code is unavailable. Detection failed');
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([url]) => isAgentTurnUrl(url))).toBe(false);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('refuses a runtime switch while the active session is running, then allows it on a run-less session', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    // Submit in s1 — the mocked stream never resolves, so s1 keeps a live run.
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="long running task" />);
+    });
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    expect(fetchMock.mock.calls.some(([url]) => isAgentTurnUrl(url))).toBe(true);
+
+    // Switching runtime while the *active* session runs is refused.
+    const selectCodex = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectCodex.click();
+    });
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Claude Code');
+
+    // Activate a session without a run — the same switch now goes through.
+    mockSessions = [sessionWithClaude, emptySession];
+    mockActiveSession = emptySession;
+    mockActiveSessionId = emptySession.id;
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+    const selectCodexAgain = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectCodexAgain.click();
+    });
+    expect(host.querySelector('[data-testid="runtime-switcher"]')?.textContent).toBe('Codex');
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('surfaces the running-session message when attaching a Codex thread is refused', async () => {
+    mockAttachRuntimeSession.mockReturnValueOnce(false);
+    mockNativeRuntimeDescriptors = [{
+      id: 'codex',
+      name: 'Codex',
+      kind: 'codex',
+      status: 'available',
+      capabilities: {},
+    }];
+    mockSessions = [{
+      id: 's-mindos',
+      title: 'MindOS planning',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [{ role: 'user', content: 'plan' }],
+    }];
+    mockActiveSession = mockSessions[0];
+    mockActiveSessionId = 's-mindos';
+    const codexThread = { id: 'thread_busy', name: 'Busy thread', cwd: '/tmp/repo', updatedAt: 123 };
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).startsWith('/api/agent-runtimes/codex/threads?')) {
+        return { ok: true, json: async () => ({ data: [codexThread], nextCursor: null, backwardsCursor: null }) };
+      }
+      return { ok: true, body: new ReadableStream(), json: async () => ({}) };
+    }));
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" />);
+    });
+    const selectCodex = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Select Codex') as HTMLButtonElement;
+    await act(async () => {
+      selectCodex.click();
+    });
+    const toggleHistoryButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Toggle History') as HTMLButtonElement;
+    await act(async () => {
+      toggleHistoryButton.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const attach = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Attach Busy thread') as HTMLButtonElement;
+    await act(async () => {
+      attach.click();
+    });
+
+    // Refusal keeps the panel open and shows the retry hint instead of switching.
+    expect(host.querySelector('[data-testid="history-session-list"]')?.textContent)
+      .toContain('That session is still running. Try again after it finishes.');
 
     await act(async () => {
       root.unmount();

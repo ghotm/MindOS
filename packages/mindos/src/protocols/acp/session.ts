@@ -6,6 +6,7 @@
 
 import type {
   ClientSideConnection,
+  McpServer,
   SessionNotification,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
@@ -22,18 +23,36 @@ import type {
   AcpStopReason,
   AcpAuthMethod,
   AcpContentBlock,
+  AcpAvailableCommand,
+  AcpPermissionEvent,
+  AcpSessionSnapshot,
+  AcpToolCallFull,
+  AcpSessionMcpServerSummary,
 } from './types.js';
+import { isAcpCapabilitySupported } from './types.js';
 import {
   spawnAndConnect,
   killAgent,
   type AcpConnection,
   type AcpLaunchOptions,
+  type AcpPermissionMode,
   type AcpProcess,
 } from './subprocess.js';
 import { findAcpAgent } from './registry.js';
+import { resolveConfiguredAcpAgentEntry } from './agent-descriptors.js';
+import {
+  buildAcpSessionMcpInheritancePlan,
+  type AcpSessionMcpConfigLike,
+} from './mcp-session-inheritance.js';
+import { rememberAcpHandshakeHealth } from './handshake-health.js';
+import { recordArtifactsFromAcpToolCall } from '../../agent/ledger/artifact-ledger.js';
+import { redactSensitiveText } from '../../agent/redaction.js';
 
 export interface AcpSessionOptions extends AcpLaunchOptions {
   clientVersion?: string;
+  inheritMcpServers?: boolean;
+  mcpConfig?: AcpSessionMcpConfigLike | null;
+  mcpServers?: McpServer[];
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -50,6 +69,10 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
       },
     );
   });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 /* ── Error diagnosis ───────────────────────────────────────────────────── */
@@ -89,6 +112,46 @@ function getMindosVersion(options?: AcpSessionOptions): string {
   return options?.clientVersion ?? process.env.npm_package_version ?? '1.0.0';
 }
 
+function clientCapabilitiesForPermissionMode(mode: AcpPermissionMode | undefined) {
+  const readonly = mode === 'readonly';
+  return {
+    fs: { readTextFile: true, writeTextFile: !readonly },
+    terminal: !readonly,
+  };
+}
+
+function resolveSessionMcpInheritance(
+  options: AcpSessionOptions | undefined,
+  agentCapabilities: AcpAgentCapabilities | undefined,
+): { servers: McpServer[]; summaries: AcpSessionMcpServerSummary[] } {
+  if (options?.mcpServers) {
+    return {
+      servers: options.mcpServers,
+      summaries: options.mcpServers.map((server) => ({
+        name: server.name,
+        type: 'type' in server && server.type === 'http'
+          ? 'http'
+          : 'type' in server && server.type === 'sse'
+            ? 'sse'
+            : 'type' in server && server.type === 'acp'
+              ? 'acp'
+              : 'stdio',
+      })),
+    };
+  }
+  if (options?.inheritMcpServers === false || !options?.mcpConfig) {
+    return { servers: [], summaries: [] };
+  }
+  const plan = buildAcpSessionMcpInheritancePlan({
+    config: options.mcpConfig,
+    agentCapabilities,
+  });
+  return {
+    servers: plan.servers,
+    summaries: plan.summaries,
+  };
+}
+
 /* ── State ─────────────────────────────────────────────────────────────── */
 
 const sessions = new Map<string, AcpSession>();
@@ -96,6 +159,58 @@ const sessionConnections = new Map<string, AcpConnection>();
 
 const MAX_SESSIONS_PER_AGENT = 3;
 const MAX_TOTAL_SESSIONS = 10;
+
+type InitializedAcpConnection = {
+  conn: AcpConnection;
+  agentCapabilities?: AcpAgentCapabilities;
+  authMethods?: AcpAuthMethod[];
+};
+
+async function initializeAcpConnection(
+  entry: AcpRegistryEntry,
+  options: AcpSessionOptions | undefined,
+  startedAt: number,
+): Promise<InitializedAcpConnection> {
+  const conn = spawnAndConnect(entry, options);
+
+  let agentCapabilities: AcpAgentCapabilities | undefined;
+  let authMethods: AcpAuthMethod[] | undefined;
+
+  try {
+    const initResult = await conn.connection.initialize({
+      protocolVersion: 1,
+      clientCapabilities: clientCapabilitiesForPermissionMode(options?.permissionMode),
+      clientInfo: { name: 'mindos', version: getMindosVersion(options) },
+    });
+
+    agentCapabilities = parseAgentCapabilities(initResult.agentCapabilities);
+    authMethods = parseAuthMethods(initResult.authMethods);
+  } catch (err) {
+    // Wait briefly for stderr/exit info before diagnosing.
+    await new Promise(r => setTimeout(r, 200));
+    const message = diagnoseInitFailure(conn.process, err as Error);
+    rememberAcpHandshakeHealth({
+      agentId: entry.id,
+      status: 'failed',
+      stage: 'initialize',
+      startedAt,
+      message,
+    });
+    killAgent(conn.process);
+    throw new Error(message);
+  }
+
+  const firstAuthMethod = authMethods?.[0];
+  if (firstAuthMethod) {
+    try {
+      await conn.connection.authenticate({ methodId: firstAuthMethod.id });
+    } catch {
+      // Best-effort auth.
+    }
+  }
+
+  return { conn, agentCapabilities, authMethods };
+}
 
 /* ── Public API — Session Lifecycle ───────────────────────────────────── */
 
@@ -106,7 +221,8 @@ export async function createSession(
   agentId: string,
   options?: AcpSessionOptions,
 ): Promise<AcpSession> {
-  const entry = await findAcpAgent(agentId);
+  const entry = resolveConfiguredAcpAgentEntry(agentId, options?.overrides)
+    ?? await findAcpAgent(agentId);
   if (!entry) {
     throw new Error(`ACP agent not found in registry: ${agentId}`);
   }
@@ -122,67 +238,42 @@ export async function createSessionFromEntry(
 ): Promise<AcpSession> {
   checkSessionLimits(entry.id);
 
+  const startedAt = Date.now();
   const sessionCwd = options?.cwd ?? process.cwd();
-  const conn = spawnAndConnect(entry, options);
-
-  let agentCapabilities: AcpAgentCapabilities | undefined;
-  let authMethods: AcpAuthMethod[] | undefined;
-
-  // Phase 1: Initialize
-  try {
-    const initResult = await conn.connection.initialize({
-      protocolVersion: 1,
-      clientCapabilities: {
-        fs: { readTextFile: true, writeTextFile: true },
-        terminal: true,
-      },
-      clientInfo: { name: 'mindos', version: getMindosVersion(options) },
-    });
-
-    agentCapabilities = parseAgentCapabilities(initResult.agentCapabilities);
-    authMethods = parseAuthMethods(initResult.authMethods);
-  } catch (err) {
-    // Wait briefly for stderr/exit info before diagnosing
-    await new Promise(r => setTimeout(r, 200));
-    const message = diagnoseInitFailure(conn.process, err as Error);
-    killAgent(conn.process);
-    throw new Error(message);
-  }
-
-  // Phase 2: Authenticate (if agent declares auth methods)
-  const firstAuthMethod = authMethods?.[0];
-  if (firstAuthMethod) {
-    try {
-      await conn.connection.authenticate({ methodId: firstAuthMethod.id });
-    } catch {
-      // Best-effort auth
-    }
-  }
+  const { conn, agentCapabilities, authMethods } = await initializeAcpConnection(entry, options, startedAt);
 
   // Phase 3: session/new
   let modes: AcpMode[] | undefined;
   let configOptions: AcpConfigOption[] | undefined;
+  let currentModeId: string | undefined;
   let agentSessionId: string | undefined;
+  const mcpInheritance = resolveSessionMcpInheritance(options, agentCapabilities);
 
   try {
     const newResult = await conn.connection.newSession({
       cwd: sessionCwd,
-      mcpServers: [],
+      mcpServers: mcpInheritance.servers,
     });
 
     if (typeof newResult.sessionId === 'string') {
       agentSessionId = newResult.sessionId;
     }
     modes = parseModes(newResult.modes);
+    currentModeId = parseCurrentModeId(newResult.modes);
     configOptions = parseConfigOptions(newResult.configOptions);
+    currentModeId ??= currentModeFromConfig(configOptions);
   } catch (sessionErr) {
     const msg = (sessionErr as Error).message ?? '';
-    if (/auth/i.test(msg)) {
-      killAgent(conn.process);
-      throw new Error(`${entry.id}: ${msg}`);
-    }
-    // Non-auth errors: log and continue (session may still be usable)
-    console.warn(`ACP session/new warning for ${entry.id}: ${msg}`);
+    rememberAcpHandshakeHealth({
+      agentId: entry.id,
+      status: 'failed',
+      stage: 'session-new',
+      startedAt,
+      message: msg,
+      capabilities: agentCapabilities,
+    });
+    killAgent(conn.process);
+    throw new Error(`${entry.id}: session/new failed: ${msg}`);
   }
 
   reapStaleSessions();
@@ -199,11 +290,21 @@ export async function createSessionFromEntry(
     agentCapabilities,
     modes,
     configOptions,
+    currentModeId,
     authMethods,
+    mcpServers: mcpInheritance.summaries,
   };
 
   sessions.set(sessionId, session);
   sessionConnections.set(sessionId, conn);
+  rememberAcpHandshakeHealth({
+    agentId: entry.id,
+    status: 'ready',
+    stage: 'session-new',
+    startedAt,
+    capabilities: agentCapabilities,
+    session,
+  });
   return session;
 }
 
@@ -215,50 +316,55 @@ export async function loadSession(
   existingSessionId: string,
   options?: AcpSessionOptions,
 ): Promise<AcpSession> {
-  const entry = await findAcpAgent(agentId);
+  const startedAt = Date.now();
+  const entry = resolveConfiguredAcpAgentEntry(agentId, options?.overrides)
+    ?? await findAcpAgent(agentId);
   if (!entry) {
     throw new Error(`ACP agent not found in registry: ${agentId}`);
   }
 
   const loadCwd = options?.cwd ?? process.cwd();
-  const conn = spawnAndConnect(entry, options);
-
-  let agentCapabilities: AcpAgentCapabilities | undefined;
-
-  try {
-    const initResult = await conn.connection.initialize({
-      protocolVersion: 1,
-      clientCapabilities: {
-        fs: { readTextFile: true, writeTextFile: true },
-        terminal: true,
-      },
-      clientInfo: { name: 'mindos', version: getMindosVersion(options) },
-    });
-    agentCapabilities = parseAgentCapabilities(initResult.agentCapabilities);
-  } catch (err) {
-    await new Promise(r => setTimeout(r, 200));
-    const message = diagnoseInitFailure(conn.process, err as Error);
-    killAgent(conn.process);
-    throw new Error(message);
-  }
+  const { conn, agentCapabilities } = await initializeAcpConnection(entry, options, startedAt);
 
   if (!agentCapabilities?.loadSession) {
+    rememberAcpHandshakeHealth({
+      agentId: entry.id,
+      status: 'failed',
+      stage: 'session-load',
+      startedAt,
+      message: `Agent ${agentId} does not support session/load`,
+      capabilities: agentCapabilities,
+    });
     killAgent(conn.process);
     throw new Error(`Agent ${agentId} does not support session/load`);
   }
 
   let modes: AcpMode[] | undefined;
   let configOptions: AcpConfigOption[] | undefined;
+  let currentModeId: string | undefined;
+  const mcpInheritance = resolveSessionMcpInheritance(options, agentCapabilities);
+  let loadedInfo: AcpSessionInfo = { sessionId: existingSessionId };
 
   try {
     const loadResult = await conn.connection.loadSession({
       sessionId: existingSessionId,
       cwd: loadCwd,
-      mcpServers: [],
+      mcpServers: mcpInheritance.servers,
     });
     modes = parseModes(loadResult.modes);
+    currentModeId = parseCurrentModeId(loadResult.modes);
     configOptions = parseConfigOptions(loadResult.configOptions);
+    currentModeId ??= currentModeFromConfig(configOptions);
+    loadedInfo = normalizeAcpSessionInfo(loadResult, existingSessionId);
   } catch (err) {
+    rememberAcpHandshakeHealth({
+      agentId: entry.id,
+      status: 'failed',
+      stage: 'session-load',
+      startedAt,
+      message: (err as Error).message,
+      capabilities: agentCapabilities,
+    });
     killAgent(conn.process);
     throw new Error(`session/load failed: ${(err as Error).message}`);
   }
@@ -274,10 +380,32 @@ export async function loadSession(
     agentCapabilities,
     modes,
     configOptions,
+    currentModeId,
+    mcpServers: mcpInheritance.summaries,
+    ...(loadedInfo.title ? { title: loadedInfo.title } : {}),
+    ...(loadedInfo.preview ? { preview: loadedInfo.preview } : {}),
+    ...(loadedInfo.messageCount !== undefined ? { messageCount: loadedInfo.messageCount } : {}),
+    ...(loadedInfo.turnCount !== undefined ? { turnCount: loadedInfo.turnCount } : {}),
+    ...(loadedInfo.messages ? { messages: loadedInfo.messages } : {}),
+    ...(loadedInfo.turns ? { turns: loadedInfo.turns } : {}),
+    ...(loadedInfo.title || loadedInfo.updatedAt ? {
+      sessionInfo: {
+        ...(loadedInfo.title ? { title: loadedInfo.title } : {}),
+        ...(loadedInfo.updatedAt ? { updatedAt: loadedInfo.updatedAt } : {}),
+      },
+    } : {}),
   };
 
   sessions.set(existingSessionId, session);
   sessionConnections.set(existingSessionId, conn);
+  rememberAcpHandshakeHealth({
+    agentId: entry.id,
+    status: 'ready',
+    stage: 'session-load',
+    startedAt,
+    capabilities: agentCapabilities,
+    session,
+  });
   return session;
 }
 
@@ -290,7 +418,7 @@ export async function listSessions(
 ): Promise<{ sessions: AcpSessionInfo[]; nextCursor?: string }> {
   const { session, conn } = getSessionAndConn(sessionId);
 
-  if (!session.agentCapabilities?.sessionCapabilities?.list) {
+  if (!isAcpCapabilitySupported(session.agentCapabilities?.sessionCapabilities?.list)) {
     throw new Error('Agent does not support session/list');
   }
 
@@ -300,19 +428,74 @@ export async function listSessions(
   });
 
   return {
-    sessions: (result.sessions ?? []).map(s => ({
-      sessionId: s.sessionId ?? '',
-      title: s.title ?? undefined,
-      cwd: s.cwd ?? undefined,
-      updatedAt: s.updatedAt ?? undefined,
-    })),
+    sessions: (result.sessions ?? []).map(s => normalizeAcpSessionInfo(s)),
     nextCursor: result.nextCursor ?? undefined,
   };
+}
+
+export async function listSessionsForAgent(
+  agentId: string,
+  options?: AcpSessionOptions & { cursor?: string; cwd?: string },
+): Promise<{ sessions: AcpSessionInfo[]; nextCursor?: string }> {
+  const startedAt = Date.now();
+  const entry = resolveConfiguredAcpAgentEntry(agentId, options?.overrides)
+    ?? await findAcpAgent(agentId);
+  if (!entry) {
+    throw new Error(`ACP agent not found in registry: ${agentId}`);
+  }
+
+  const { conn, agentCapabilities } = await initializeAcpConnection(entry, options, startedAt);
+
+  if (!isAcpCapabilitySupported(agentCapabilities?.sessionCapabilities?.list)) {
+    rememberAcpHandshakeHealth({
+      agentId: entry.id,
+      status: 'failed',
+      stage: 'session-list',
+      startedAt,
+      message: 'Agent does not support session/list',
+      capabilities: agentCapabilities,
+    });
+    killAgent(conn.process);
+    throw new Error('Agent does not support session/list');
+  }
+
+  try {
+    const result = await conn.connection.listSessions({
+      ...(options?.cursor ? { cursor: options.cursor } : {}),
+      ...(options?.cwd ? { cwd: options.cwd } : {}),
+    });
+    rememberAcpHandshakeHealth({
+      agentId: entry.id,
+      status: 'ready',
+      stage: 'session-list',
+      startedAt,
+      capabilities: agentCapabilities,
+    });
+    return {
+      sessions: (result.sessions ?? []).map(s => normalizeAcpSessionInfo(s)),
+      nextCursor: result.nextCursor ?? undefined,
+    };
+  } catch (err) {
+    rememberAcpHandshakeHealth({
+      agentId: entry.id,
+      status: 'failed',
+      stage: 'session-list',
+      startedAt,
+      message: (err as Error).message,
+      capabilities: agentCapabilities,
+    });
+    throw new Error(`session/list failed: ${(err as Error).message}`);
+  } finally {
+    killAgent(conn.process);
+  }
 }
 
 /* ── Public API — Prompt ──────────────────────────────────────────────── */
 
 const PROMPT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const TOOL_RAW_TEXT_LIMIT = 4000;
+const INLINE_IMAGE_RESULT_LIMIT = 64 * 1024;
+const INLINE_IMAGE_PREFIX_RE = /^(?:data:image\/|iVBORw0KGgo|\/9j\/|UklGR)/;
 
 /**
  * Send a prompt and collect the full response.
@@ -334,9 +517,16 @@ export async function prompt(
   let notificationText = '';
   conn.callbacks.onSessionUpdate = (params) => {
     const update = sdkNotificationToUpdate(sessionId, params);
+    applySessionUpdate(session, update);
     if ((update.type === 'agent_message_chunk' || update.type === 'text') && update.text) {
       notificationText += update.text;
     }
+  };
+  conn.callbacks.onPermissionRequest = (event) => {
+    applySessionUpdate(session, { sessionId, type: 'permission_request', permission: event });
+  };
+  conn.callbacks.onPermissionResolved = (event) => {
+    applySessionUpdate(session, { sessionId, type: 'permission_resolved', permission: event });
   };
 
   try {
@@ -361,6 +551,8 @@ export async function prompt(
     throw err;
   } finally {
     conn.callbacks.onSessionUpdate = undefined;
+    conn.callbacks.onPermissionRequest = undefined;
+    conn.callbacks.onPermissionResolved = undefined;
   }
 }
 
@@ -384,14 +576,22 @@ export async function promptStream(
   let aggregatedText = '';
   conn.callbacks.onSessionUpdate = (params) => {
     const update = sdkNotificationToUpdate(sessionId, params);
+    applySessionUpdate(session, update);
     onUpdate(update);
 
     if ((update.type === 'agent_message_chunk' || update.type === 'text') && update.text) {
       aggregatedText += update.text;
     }
-    if (update.type === 'config_option_update' && update.configOptions) {
-      session.configOptions = update.configOptions;
-    }
+  };
+  conn.callbacks.onPermissionRequest = (event) => {
+    const update: AcpSessionUpdate = { sessionId, type: 'permission_request', permission: event };
+    applySessionUpdate(session, update);
+    onUpdate(update);
+  };
+  conn.callbacks.onPermissionResolved = (event) => {
+    const update: AcpSessionUpdate = { sessionId, type: 'permission_resolved', permission: event };
+    applySessionUpdate(session, update);
+    onUpdate(update);
   };
 
   try {
@@ -417,6 +617,8 @@ export async function promptStream(
     throw err;
   } finally {
     conn.callbacks.onSessionUpdate = undefined;
+    conn.callbacks.onPermissionRequest = undefined;
+    conn.callbacks.onPermissionResolved = undefined;
   }
 }
 
@@ -439,6 +641,7 @@ export async function setMode(sessionId: string, modeId: string): Promise<void> 
   const { session, conn } = getSessionAndConn(sessionId);
   const wireSessionId = session.agentSessionId ?? sessionId;
   await conn.connection.setSessionMode({ sessionId: wireSessionId, modeId });
+  session.currentModeId = modeId;
   session.lastActivityAt = new Date().toISOString();
 }
 
@@ -457,21 +660,29 @@ export async function setConfigOption(
   });
 
   const configOptions = parseConfigOptions(result.configOptions);
-  if (configOptions) session.configOptions = configOptions;
+  if (configOptions) {
+    session.configOptions = configOptions;
+    session.currentModeId = currentModeFromConfig(configOptions) ?? session.currentModeId;
+  }
   session.lastActivityAt = new Date().toISOString();
   return session.configOptions ?? [];
 }
 
-export async function closeSession(sessionId: string): Promise<void> {
+export async function closeSession(
+  sessionId: string,
+  options: { closeAgentSession?: boolean } = {},
+): Promise<void> {
   const session = sessions.get(sessionId);
   const conn = sessionConnections.get(sessionId);
 
   if (conn?.process.alive) {
     const wireSessionId = session?.agentSessionId ?? sessionId;
-    try {
-      await conn.connection.unstable_closeSession({ sessionId: wireSessionId });
-    } catch {
-      // Best-effort — many agents don't support session/close
+    if (options.closeAgentSession !== false) {
+      try {
+        await closeAgentSession(conn.connection, wireSessionId);
+      } catch {
+        // Best-effort — many agents don't support session/close
+      }
     }
     killAgent(conn.process);
   }
@@ -489,6 +700,16 @@ export function getSession(sessionId: string): AcpSession | undefined {
 export function getActiveSessions(): AcpSession[] {
   reapStaleSessions();
   return [...sessions.values()];
+}
+
+export function getSessionSnapshot(sessionId: string): AcpSessionSnapshot | undefined {
+  const session = sessions.get(sessionId);
+  return session ? buildAcpSessionSnapshot(session) : undefined;
+}
+
+export function getActiveSessionSnapshots(): AcpSessionSnapshot[] {
+  reapStaleSessions();
+  return [...sessions.values()].map(buildAcpSessionSnapshot);
 }
 
 export async function closeAllSessions(): Promise<void> {
@@ -514,6 +735,78 @@ function getSessionAndConn(sessionId: string): { session: AcpSession; conn: AcpC
 function updateSessionState(session: AcpSession, state: AcpSessionState): void {
   session.state = state;
   session.lastActivityAt = new Date().toISOString();
+}
+
+export function buildAcpSessionSnapshot(session: AcpSession): AcpSessionSnapshot {
+  const modes = session.modes ?? [];
+  const configOptions = session.configOptions ?? [];
+  const toolCalls = session.toolCalls ?? [];
+  const permissionEvents = session.permissionEvents ?? [];
+  return {
+    schemaVersion: 1,
+    sessionId: session.id,
+    agentId: session.agentId,
+    ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+    state: session.state,
+    ...(session.cwd ? { cwd: session.cwd } : {}),
+    createdAt: session.createdAt,
+    lastActivityAt: session.lastActivityAt,
+    ...(session.agentCapabilities ? { agentCapabilities: session.agentCapabilities } : {}),
+    authMethods: session.authMethods ?? [],
+    modes,
+    ...(session.currentModeId ? { currentModeId: session.currentModeId } : {}),
+    configOptions,
+    controls: {
+      model: buildControlSnapshot(configOptions, 'model'),
+      mode: buildModeControlSnapshot(configOptions, modes, session.currentModeId),
+      thoughtLevel: buildControlSnapshot(configOptions, 'thought_level'),
+    },
+    availableCommands: session.availableCommands ?? [],
+    toolCalls,
+    toolSummary: summarizeToolCalls(toolCalls),
+    permissionEvents,
+    pendingPermissions: permissionEvents.filter((event) => event.status === 'pending'),
+    ...(session.sessionInfo ? { sessionInfo: session.sessionInfo } : {}),
+    mcpServers: session.mcpServers ?? [],
+  };
+}
+
+function applySessionUpdate(session: AcpSession, update: AcpSessionUpdate): void {
+  session.lastActivityAt = new Date().toISOString();
+  if (update.type === 'available_commands_update') {
+    session.availableCommands = parseAvailableCommands(update.availableCommands);
+    return;
+  }
+  if (update.type === 'current_mode_update' && update.currentModeId) {
+    session.currentModeId = update.currentModeId;
+    return;
+  }
+  if (update.type === 'config_option_update' && update.configOptions) {
+    session.configOptions = update.configOptions;
+    session.currentModeId = currentModeFromConfig(update.configOptions) ?? session.currentModeId;
+    return;
+  }
+  if ((update.type === 'tool_call' || update.type === 'tool_call_update') && update.toolCall) {
+    session.toolCalls = upsertToolCall(session.toolCalls, update.toolCall);
+    recordArtifactsFromAcpToolCall({
+      runtimeId: session.agentId,
+      sessionId: session.id,
+      ...(session.agentSessionId ? { externalSessionId: session.agentSessionId } : {}),
+      ...(session.cwd ? { cwd: session.cwd } : {}),
+      toolCall: update.toolCall,
+    });
+    return;
+  }
+  if (update.type === 'session_info_update' && update.sessionInfo) {
+    session.sessionInfo = {
+      ...session.sessionInfo,
+      ...update.sessionInfo,
+    };
+    return;
+  }
+  if ((update.type === 'permission_request' || update.type === 'permission_resolved') && update.permission) {
+    session.permissionEvents = upsertPermissionEvent(session.permissionEvents, update.permission);
+  }
 }
 
 /* ── Internal — SDK notification → MindOS update ──────────────────────── */
@@ -547,13 +840,20 @@ function sdkNotificationToUpdate(
     case 'tool_call':
     case 'tool_call_update': {
       const tc = update as Record<string, unknown>;
+      const rawOutputPointers = extractRawOutputPointers(tc.rawOutput ?? tc.raw_output);
+      const locations = [
+        ...parseToolCallLocations(tc.locations),
+        ...rawOutputPointers.locations,
+      ];
       base.toolCall = {
         toolCallId: String(tc.toolCallId ?? ''),
         title: typeof tc.title === 'string' ? tc.title : undefined,
         status: (tc.status as 'pending' | 'in_progress' | 'completed' | 'failed') ?? 'pending',
         kind: tc.kind as AcpSessionUpdate['toolCall'] extends { kind: infer K } ? K : undefined,
-        rawInput: typeof tc.rawInput === 'string' ? tc.rawInput : undefined,
-        rawOutput: typeof tc.rawOutput === 'string' ? tc.rawOutput : undefined,
+        rawInput: safeToolRawText(tc.rawInput),
+        rawOutput: safeToolRawText(tc.rawOutput ?? tc.raw_output),
+        content: parseToolCallContent(tc.content),
+        ...(locations.length > 0 ? { locations } : {}),
       };
       break;
     }
@@ -595,6 +895,153 @@ function sdkNotificationToUpdate(
   return base;
 }
 
+function safeToolRawText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (
+    trimmed.length > INLINE_IMAGE_RESULT_LIMIT
+    && INLINE_IMAGE_PREFIX_RE.test(trimmed)
+  ) {
+    return undefined;
+  }
+  const redacted = redactSensitiveText(trimmed);
+  return redacted.length > TOOL_RAW_TEXT_LIMIT
+    ? `${redacted.slice(0, TOOL_RAW_TEXT_LIMIT)}...`
+    : redacted;
+}
+
+function parseToolCallLocations(value: unknown): NonNullable<AcpToolCallFull['locations']> {
+  if (!Array.isArray(value)) return [];
+  const locations: NonNullable<AcpToolCallFull['locations']> = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const rawPath = typeof record.path === 'string'
+      ? record.path
+      : typeof record.uri === 'string' && record.uri.startsWith('file://')
+        ? record.uri.slice('file://'.length)
+        : '';
+    const path = rawPath.trim();
+    if (!path) continue;
+    const line = typeof record.line === 'number' && Number.isFinite(record.line)
+      ? Math.max(1, Math.floor(record.line))
+      : undefined;
+    const key = `${path}:${line ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    locations.push({ path, ...(line ? { line } : {}) });
+    if (locations.length >= 50) break;
+  }
+  return locations;
+}
+
+function parseToolCallContent(value: unknown): AcpContentBlock[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const blocks: AcpContentBlock[] = [];
+  for (const item of value) {
+    const block = parseToolCallContentBlock(item);
+    if (block) blocks.push(block);
+    if (blocks.length >= 50) break;
+  }
+  return blocks.length > 0 ? blocks : undefined;
+}
+
+function parseToolCallContentBlock(value: unknown): AcpContentBlock | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (record.type === 'resource_link' && typeof record.uri === 'string') {
+    return {
+      type: 'resource_link',
+      uri: record.uri,
+      name: typeof record.name === 'string' && record.name.trim() ? record.name : 'resource',
+    };
+  }
+  if (record.type === 'resource') {
+    const resource = record.resource;
+    if (!resource || typeof resource !== 'object' || Array.isArray(resource)) return null;
+    const resourceRecord = resource as Record<string, unknown>;
+    if (typeof resourceRecord.uri !== 'string') return null;
+    return {
+      type: 'resource',
+      resource: {
+        uri: resourceRecord.uri,
+        ...(typeof resourceRecord.text === 'string' ? { text: safeToolRawText(resourceRecord.text) ?? '' } : {}),
+      },
+    };
+  }
+  return null;
+}
+
+function extractRawOutputPointers(value: unknown): {
+  locations: NonNullable<AcpToolCallFull['locations']>;
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { locations: [] };
+  const record = value as Record<string, unknown>;
+  const candidates = [
+    record.saved_path,
+    record.savedPath,
+    readNestedString(record.image, 'path'),
+    readNestedString(record.artifact, 'path'),
+  ];
+  const locations = candidates
+    .filter((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0)
+    .map((candidate) => ({ path: candidate.trim() }));
+  return { locations };
+}
+
+function readNestedString(value: unknown, key: string): string | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) && typeof (value as Record<string, unknown>)[key] === 'string'
+    ? (value as Record<string, string>)[key]
+    : undefined;
+}
+
+function stringField(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return undefined;
+}
+
+function numberField(record: Record<string, unknown>, keys: readonly string[]): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.floor(value);
+  }
+  return undefined;
+}
+
+function normalizeAcpSessionInfo(value: unknown, fallbackSessionId?: string): AcpSessionInfo {
+  const record = isRecord(value) ? value : {};
+  const sessionId = stringField(record, ['sessionId', 'session_id', 'id', 'externalSessionId'])
+    ?? fallbackSessionId
+    ?? '';
+  const info: AcpSessionInfo = { sessionId };
+
+  const title = stringField(record, ['title', 'name', 'summary']);
+  if (title) info.title = title;
+  const preview = stringField(record, ['preview', 'description', 'subtitle']);
+  if (preview) info.preview = preview;
+  const cwd = stringField(record, ['cwd', 'workDir', 'workingDirectory']);
+  if (cwd) info.cwd = cwd;
+  const createdAt = stringField(record, ['createdAt', 'created_at']);
+  if (createdAt) info.createdAt = createdAt;
+  const updatedAt = stringField(record, ['updatedAt', 'updated_at', 'lastActivityAt']);
+  if (updatedAt) info.updatedAt = updatedAt;
+  const status = stringField(record, ['status', 'state']);
+  if (status) info.status = status;
+
+  const messageCount = numberField(record, ['messageCount', 'messagesCount', 'message_count']);
+  if (messageCount !== undefined) info.messageCount = messageCount;
+  const turnCount = numberField(record, ['turnCount', 'turnsCount', 'turn_count']);
+  if (turnCount !== undefined) info.turnCount = turnCount;
+
+  if (Array.isArray(record.messages)) info.messages = record.messages;
+  if (Array.isArray(record.turns)) info.turns = record.turns;
+  return info;
+}
+
 /* ── Internal — Parsers ───────────────────────────────────────────────── */
 
 function parseAgentCapabilities(raw: unknown): AcpAgentCapabilities | undefined {
@@ -602,10 +1049,57 @@ function parseAgentCapabilities(raw: unknown): AcpAgentCapabilities | undefined 
   const obj = raw as Record<string, unknown>;
   return {
     loadSession: obj.loadSession === true,
-    mcpCapabilities: typeof obj.mcpCapabilities === 'object' ? obj.mcpCapabilities as AcpAgentCapabilities['mcpCapabilities'] : undefined,
+    mcpCapabilities: parseMcpCapabilities(obj.mcpCapabilities),
     promptCapabilities: typeof obj.promptCapabilities === 'object' ? obj.promptCapabilities as AcpAgentCapabilities['promptCapabilities'] : undefined,
-    sessionCapabilities: typeof obj.sessionCapabilities === 'object' ? obj.sessionCapabilities as AcpAgentCapabilities['sessionCapabilities'] : undefined,
+    sessionCapabilities: parseSessionCapabilities(obj.sessionCapabilities),
   };
+}
+
+type SessionCloseConnection = ClientSideConnection & {
+  closeSession?: (params: { sessionId: string }) => Promise<unknown>;
+  unstable_closeSession?: (params: { sessionId: string }) => Promise<unknown>;
+};
+
+function closeAgentSession(connection: ClientSideConnection, sessionId: string): Promise<unknown> {
+  const closable = connection as SessionCloseConnection;
+  const close = typeof closable.closeSession === 'function'
+    ? closable.closeSession
+    : closable.unstable_closeSession;
+  return close ? close.call(closable, { sessionId }) : Promise.resolve();
+}
+
+function parseMcpCapabilities(raw: unknown): AcpAgentCapabilities['mcpCapabilities'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  return compactBooleans({
+    stdio: capabilityFlag(obj.stdio),
+    http: capabilityFlag(obj.http),
+    sse: capabilityFlag(obj.sse),
+    acp: capabilityFlag(obj.acp),
+  });
+}
+
+function parseSessionCapabilities(raw: unknown): AcpAgentCapabilities['sessionCapabilities'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  return compactBooleans({
+    list: capabilityFlag(obj.list),
+    delete: capabilityFlag(obj.delete),
+    resume: capabilityFlag(obj.resume),
+    fork: capabilityFlag(obj.fork),
+    close: capabilityFlag(obj.close),
+  });
+}
+
+function capabilityFlag(value: unknown): boolean | undefined {
+  if (value === true || isAcpCapabilitySupported(value)) return true;
+  if (value === false) return false;
+  return undefined;
+}
+
+function compactBooleans<T extends Record<string, boolean | undefined>>(value: T): { [K in keyof T]?: boolean } | undefined {
+  const entries = Object.entries(value).filter((entry): entry is [keyof T & string, boolean] => typeof entry[1] === 'boolean');
+  return entries.length > 0 ? Object.fromEntries(entries) as { [K in keyof T]?: boolean } : undefined;
 }
 
 function parseAuthMethods(raw: unknown): AcpAuthMethod[] | undefined {
@@ -638,6 +1132,18 @@ function parseModes(raw: unknown): AcpMode[] | undefined {
     .filter(m => m.id && m.name);
 }
 
+function parseCurrentModeId(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.currentModeId === 'string' && obj.currentModeId.trim()) return obj.currentModeId.trim();
+  const currentMode = obj.currentMode;
+  if (currentMode && typeof currentMode === 'object' && !Array.isArray(currentMode)) {
+    const id = (currentMode as Record<string, unknown>).id;
+    if (typeof id === 'string' && id.trim()) return id.trim();
+  }
+  return undefined;
+}
+
 function parseConfigOptions(raw: unknown): AcpConfigOption[] | undefined {
   if (!Array.isArray(raw) || raw.length === 0) return undefined;
   return raw
@@ -646,14 +1152,181 @@ function parseConfigOptions(raw: unknown): AcpConfigOption[] | undefined {
       type: 'select' as const,
       configId: String(o.configId ?? o.id ?? ''),
       category: String(o.category ?? 'other'),
-      label: typeof o.label === 'string' ? o.label : undefined,
+      label: typeof o.label === 'string' ? o.label : typeof o.name === 'string' ? o.name : undefined,
       currentValue: String(o.currentValue ?? ''),
-      options: Array.isArray(o.options) ? o.options.map((opt: unknown) => {
-        const optObj = opt as Record<string, unknown>;
-        return { id: String(optObj.id ?? ''), label: String(optObj.label ?? '') };
-      }) : [],
+      options: parseConfigOptionEntries(o.options),
     }))
     .filter(o => o.configId);
+}
+
+function parseConfigOptionEntries(raw: unknown): AcpConfigOption['options'] {
+  if (!Array.isArray(raw)) return [];
+  const entries: AcpConfigOption['options'] = [];
+  const pushEntry = (option: unknown) => {
+    if (!option || typeof option !== 'object' || Array.isArray(option)) return;
+    const record = option as Record<string, unknown>;
+    const id = String(record.id ?? record.value ?? '').trim();
+    const label = String(record.label ?? record.name ?? id).trim();
+    if (id) entries.push({ id, label: label || id });
+  };
+  for (const item of raw) {
+    if (item && typeof item === 'object' && !Array.isArray(item) && Array.isArray((item as Record<string, unknown>).options)) {
+      for (const nested of (item as Record<string, unknown>).options as unknown[]) {
+        pushEntry(nested);
+      }
+      continue;
+    }
+    pushEntry(item);
+  }
+  return entries;
+}
+
+function parseAvailableCommands(raw: unknown): AcpAvailableCommand[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const commands: AcpAvailableCommand[] = [];
+  for (const entry of raw) {
+    const command = normalizeAvailableCommand(entry);
+    if (!command || seen.has(command.id)) continue;
+    seen.add(command.id);
+    commands.push(command);
+    if (commands.length >= 100) break;
+  }
+  return commands;
+}
+
+function normalizeAvailableCommand(entry: unknown): AcpAvailableCommand | null {
+  if (typeof entry === 'string') {
+    const name = entry.trim().replace(/^\//, '');
+    return name ? { id: name, name } : null;
+  }
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const record = entry as Record<string, unknown>;
+  const rawName = record.name ?? record.id ?? record.command ?? record.title;
+  if (typeof rawName !== 'string') return null;
+  const name = rawName.trim().replace(/^\//, '');
+  if (!name) return null;
+  const id = typeof record.id === 'string' && record.id.trim()
+    ? record.id.trim().replace(/^\//, '')
+    : name;
+  const description = typeof record.description === 'string' && record.description.trim()
+    ? record.description.trim().slice(0, 300)
+    : undefined;
+  return {
+    id,
+    name,
+    ...(description ? { description } : {}),
+  };
+}
+
+function currentModeFromConfig(configOptions: AcpConfigOption[] | undefined): string | undefined {
+  const option = findConfigOption(configOptions ?? [], 'mode');
+  return option?.currentValue?.trim() || undefined;
+}
+
+function buildControlSnapshot(configOptions: AcpConfigOption[], category: string): AcpSessionSnapshot['controls']['model'] {
+  const option = findConfigOption(configOptions, category);
+  if (!option) {
+    return {
+      status: 'unavailable',
+      source: 'unavailable',
+      options: [],
+    };
+  }
+  return {
+    status: 'available',
+    source: 'observed',
+    configId: option.configId,
+    currentValue: option.currentValue,
+    options: option.options,
+  };
+}
+
+function buildModeControlSnapshot(
+  configOptions: AcpConfigOption[],
+  modes: AcpMode[],
+  currentModeId: string | undefined,
+): AcpSessionSnapshot['controls']['mode'] {
+  const option = findConfigOption(configOptions, 'mode');
+  if (option) {
+    return {
+      status: 'available',
+      source: 'observed',
+      configId: option.configId,
+      ...(currentModeId ?? option.currentValue ? { currentValue: currentModeId ?? option.currentValue } : {}),
+      options: option.options,
+    };
+  }
+  if (modes.length === 0) {
+    return {
+      status: 'unavailable',
+      source: 'unavailable',
+      options: [],
+    };
+  }
+  return {
+    status: 'available',
+    source: currentModeId ? 'observed' : 'declared',
+    ...(currentModeId ? { currentValue: currentModeId } : {}),
+    options: modes.map((mode) => ({ id: mode.id, label: mode.name })),
+  };
+}
+
+function findConfigOption(configOptions: AcpConfigOption[], category: string): AcpConfigOption | undefined {
+  return configOptions.find((option) => {
+    const optionCategory = option.category.toLowerCase();
+    const configId = option.configId.toLowerCase();
+    if (category === 'thought_level') {
+      return optionCategory === 'thought_level'
+        || optionCategory === 'reasoning'
+        || configId === 'thought_level'
+        || configId === 'thinking'
+        || configId === 'reasoning_effort';
+    }
+    return optionCategory === category || configId === category;
+  });
+}
+
+function upsertToolCall(
+  existing: AcpToolCallFull[] | undefined,
+  update: AcpToolCallFull,
+): AcpToolCallFull[] {
+  if (!update.toolCallId) return existing ?? [];
+  const next = [...(existing ?? [])];
+  const index = next.findIndex((toolCall) => toolCall.toolCallId === update.toolCallId);
+  if (index === -1) return [...next, update].slice(-100);
+  next[index] = {
+    ...next[index],
+    ...update,
+    status: update.status ?? next[index]!.status,
+  };
+  return next;
+}
+
+function summarizeToolCalls(toolCalls: AcpToolCallFull[]): AcpSessionSnapshot['toolSummary'] {
+  return {
+    total: toolCalls.length,
+    pending: toolCalls.filter((toolCall) => toolCall.status === 'pending').length,
+    inProgress: toolCalls.filter((toolCall) => toolCall.status === 'in_progress').length,
+    completed: toolCalls.filter((toolCall) => toolCall.status === 'completed').length,
+    failed: toolCalls.filter((toolCall) => toolCall.status === 'failed').length,
+  };
+}
+
+function upsertPermissionEvent(
+  existing: AcpPermissionEvent[] | undefined,
+  update: AcpPermissionEvent,
+): AcpPermissionEvent[] {
+  const next = [...(existing ?? [])];
+  const index = next.findIndex((event) => event.requestId === update.requestId);
+  if (index === -1) return [...next, update].slice(-100);
+  next[index] = {
+    ...next[index],
+    ...update,
+    options: update.options.length > 0 ? update.options : next[index]!.options,
+    requestedAt: next[index]!.requestedAt || update.requestedAt,
+  };
+  return next;
 }
 
 /* ── Internal — Session limits ─────────────────────────────────────────── */

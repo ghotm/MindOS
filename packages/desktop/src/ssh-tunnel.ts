@@ -4,9 +4,11 @@
  */
 import { ChildProcess, execFile, execFileSync, spawn } from 'child_process';
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'fs';
+import { randomBytes } from 'crypto';
 import { promisify } from 'util';
 import path from 'path';
 import { app } from 'electron';
+import { getDesktopConfigDir, getDesktopHome } from './desktop-home';
 
 const execFileAsync = promisify(execFile);
 
@@ -14,20 +16,25 @@ const execFileAsync = promisify(execFile);
 export const PASSPHRASE_NEEDED = '__PASSPHRASE_NEEDED__';
 
 // PID file for SSH tunnel — allows cleanup of orphaned tunnels on next launch
-const SSH_TUNNEL_PID_FILE = path.join(app.getPath('home'), '.mindos', 'ssh-tunnel.pid');
+function getSshTunnelPidFile(): string {
+  return path.join(getDesktopConfigDir(), 'ssh-tunnel.pid');
+}
 
 type ExecFileSyncLike = (
   command: string,
   args: string[],
-  options: { stdio?: 'ignore' | 'pipe'; encoding?: BufferEncoding; timeout: number },
+  options: { stdio?: 'ignore' | 'pipe'; encoding?: BufferEncoding; timeout: number; windowsHide?: boolean },
 ) => unknown;
 
 function getWindowsSshCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
   return [
     'ssh.exe',
+    // Windows built-in OpenSSH lives in System32 — covers PATHs stripped by launchers
+    ...(env.SystemRoot ? [path.join(env.SystemRoot, 'System32', 'OpenSSH', 'ssh.exe')] : []),
     ...(env.ProgramFiles ? [path.join(env.ProgramFiles, 'OpenSSH', 'ssh.exe')] : []),
     ...(env.ProgramFiles ? [path.join(env.ProgramFiles, 'Git', 'usr', 'bin', 'ssh.exe')] : []),
     ...(env.ProgramFiles ? [path.join(env.ProgramFiles, 'Git', 'bin', 'ssh.exe')] : []),
+    ...(env['ProgramFiles(x86)'] ? [path.join(env['ProgramFiles(x86)'], 'Git', 'usr', 'bin', 'ssh.exe')] : []),
     ...(env.USERPROFILE ? [path.join(env.USERPROFILE, 'scoop', 'shims', 'ssh.exe')] : []),
   ];
 }
@@ -40,13 +47,33 @@ export function resolveSshCommandForPlatform(
   const candidates = platform === 'win32' ? getWindowsSshCandidates(env) : ['ssh'];
   for (const candidate of candidates) {
     try {
-      execFile(candidate, ['-V'], { stdio: 'ignore', timeout: 3000 });
+      execFile(candidate, ['-V'], { stdio: 'ignore', timeout: 3000, windowsHide: true });
       return candidate;
     } catch {
       // Try next candidate.
     }
   }
   return null;
+}
+
+/**
+ * Resolve ssh-add next to the resolved ssh binary. A bare 'ssh-add' fails on
+ * exactly the machines where ssh itself was only found via the candidate list
+ * (e.g. Git for Windows without its bin dir on PATH).
+ */
+export function resolveSshAddPath(
+  sshCmd: string | null,
+  platform: NodeJS.Platform = process.platform,
+  fileExists: (p: string) => boolean = existsSync,
+): string {
+  // Platform-specific path semantics: win32 candidates use backslashes and
+  // drive letters that posix path treats as relative
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  if (sshCmd && p.isAbsolute(sshCmd)) {
+    const sibling = p.join(p.dirname(sshCmd), platform === 'win32' ? 'ssh-add.exe' : 'ssh-add');
+    if (fileExists(sibling)) return sibling;
+  }
+  return 'ssh-add';
 }
 
 function shellSingleQuote(value: string): string {
@@ -71,12 +98,42 @@ export function buildWindowsAskpassScript(passphrase: string): string {
 
 /** Write SSH child PID to disk so we can clean up orphans on next launch */
 function writeTunnelPid(pid: number): void {
-  try { writeFileSync(SSH_TUNNEL_PID_FILE, String(pid), 'utf-8'); } catch { /* best effort */ }
+  try { writeFileSync(getSshTunnelPidFile(), String(pid), 'utf-8'); } catch { /* best effort */ }
 }
 
 /** Remove PID file when tunnel is intentionally stopped */
 function clearTunnelPid(): void {
-  try { if (existsSync(SSH_TUNNEL_PID_FILE)) unlinkSync(SSH_TUNNEL_PID_FILE); } catch { /* best effort */ }
+  const pidFile = getSshTunnelPidFile();
+  try { if (existsSync(pidFile)) unlinkSync(pidFile); } catch { /* best effort */ }
+}
+
+/**
+ * Verify a PID belongs to an ssh process — prevents killing an unrelated
+ * process when the PID was reused since the tunnel pid file was written.
+ * Conservative: any verification failure returns false (don't kill).
+ */
+export function verifyPidIsSshProcess(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+  execFile: ExecFileSyncLike = execFileSync,
+): boolean {
+  try {
+    if (platform === 'win32') {
+      const out = String(execFile('powershell.exe', [
+        '-NoProfile', '-Command',
+        `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -ErrorAction SilentlyContinue).Name`,
+      ], { encoding: 'utf-8', timeout: 3000, windowsHide: true }));
+      return out.toLowerCase().includes('ssh');
+    }
+    const comm = String(execFile('ps', ['-p', String(pid), '-o', 'comm='], {
+      encoding: 'utf-8',
+      timeout: 2000,
+      windowsHide: true,
+    })).trim();
+    return comm.includes('ssh');
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -85,25 +142,17 @@ function clearTunnelPid(): void {
  */
 export function cleanupOrphanedSshTunnel(): void {
   try {
-    if (!existsSync(SSH_TUNNEL_PID_FILE)) return;
-    const pid = parseInt(readFileSync(SSH_TUNNEL_PID_FILE, 'utf-8').trim(), 10);
+    const pidFile = getSshTunnelPidFile();
+    if (!existsSync(pidFile)) return;
+    const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
     if (!pid || isNaN(pid)) { clearTunnelPid(); return; }
     // Check if process is alive
     try {
       process.kill(pid, 0); // signal 0 = existence check
       // Verify it's actually an ssh process (avoid killing unrelated PID reuse)
-      if (process.platform !== 'win32') {
-        try {
-          const comm = String(execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
-            encoding: 'utf-8',
-            timeout: 2000,
-          })).trim();
-          if (!comm.includes('ssh')) {
-            // PID was reused by a non-ssh process — don't kill it
-            clearTunnelPid();
-            return;
-          }
-        } catch { /* ps failed — conservative: don't kill */ clearTunnelPid(); return; }
+      if (!verifyPidIsSshProcess(pid)) {
+        clearTunnelPid();
+        return;
       }
       console.warn(`[MindOS] Killing orphaned SSH tunnel (PID ${pid})`);
       process.kill(pid, 'SIGTERM');
@@ -130,7 +179,7 @@ export interface SshHost {
  * Excludes wildcard entries (* patterns).
  */
 export function parseSshConfig(): SshHost[] {
-  const configPath = path.join(app.getPath('home'), '.ssh', 'config');
+  const configPath = path.join(getDesktopHome(), '.ssh', 'config');
   if (!existsSync(configPath)) return [];
 
   try {
@@ -138,6 +187,17 @@ export function parseSshConfig(): SshHost[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Expand a leading `~/` (or bare `~`) to the home directory.
+ * `~user/...` forms are passed through untouched — slicing them would mangle
+ * the username; ssh resolves them natively.
+ */
+export function expandSshTilde(value: string, home: string): string {
+  if (value === '~') return home;
+  if (value.startsWith('~/')) return path.join(home, value.slice(2));
+  return value;
 }
 
 /** Parse a single SSH config file, recursively resolving Include directives. */
@@ -152,7 +212,7 @@ function parseSshConfigFile(filePath: string, visited: Set<string>): SshHost[] {
   const content = readFileSync(resolved, 'utf-8');
   const hosts: SshHost[] = [];
   let current: SshHost | null = null;
-  const home = app.getPath('home');
+  const home = getDesktopHome();
 
   for (const rawLine of content.split('\n')) {
     const line = rawLine.trim();
@@ -167,9 +227,7 @@ function parseSshConfigFile(filePath: string, visited: Set<string>): SshHost[] {
     // Handle Include directive — resolve paths relative to ~/.ssh/
     if (k === 'include') {
       // Expand tilde and normalize path separators for this platform
-      let expandedPath = value.startsWith('~')
-        ? value === '~' ? home : path.join(home, value.slice(2))
-        : value;
+      const expandedPath = expandSshTilde(value, home);
       // If not absolute, resolve relative to the directory of the current config file
       const absPattern = path.isAbsolute(expandedPath) ? expandedPath : path.join(path.dirname(resolved), expandedPath);
       try {
@@ -207,9 +265,7 @@ function parseSshConfigFile(filePath: string, visited: Set<string>): SshHost[] {
         case 'port': current.port = parseInt(value, 10) || 22; break;
         case 'identityfile':
           // Expand tilde and normalize path separators for this platform
-          current.identityFile = value.startsWith('~')
-            ? value === '~' ? home : path.join(home, value.slice(2))
-            : value;
+          current.identityFile = expandSshTilde(value, home);
           break;
       }
     }
@@ -232,7 +288,7 @@ export async function isSshAgentLoaded(host: string, sshCmd: string = 'ssh'): Pr
       '-o', 'StrictHostKeyChecking=accept-new',
       host,
       'exit',
-    ], { timeout: 8000 });
+    ], { timeout: 8000, windowsHide: true });
     return true;
   } catch {
     return false;
@@ -245,17 +301,24 @@ export async function isSshAgentLoaded(host: string, sshCmd: string = 'ssh'): Pr
  * Returns true on success, false on failure.
  */
 export async function addKeyToAgent(keyPath: string, passphrase: string): Promise<{ ok: boolean; error?: string }> {
-  const home = app.getPath('home');
+  const home = getDesktopHome();
   // Resolve keyPath if relative
   const resolvedKey = path.isAbsolute(keyPath) ? keyPath : path.join(home, '.ssh', keyPath);
+  // ssh-add must come from the same install as ssh — bare 'ssh-add' fails when
+  // ssh was only found via the candidate list
+  const sshAdd = resolveSshAddPath(resolveSshCommandForPlatform());
+  // Random name + exclusive create: a predictable name in the shared temp dir
+  // could be pre-planted (symlink) by another local user
+  const askpassName = `mindos-askpass-${randomBytes(16).toString('hex')}`;
 
   if (process.platform === 'win32') {
     // On Windows, avoid putting the passphrase in cmd.exe syntax.
-    const tmpScript = path.join(app.getPath('temp'), `mindos-askpass-${Date.now()}.bat`);
+    const tmpScript = path.join(app.getPath('temp'), `${askpassName}.bat`);
     try {
-      writeFileSync(tmpScript, buildWindowsAskpassScript(passphrase), 'utf-8');
-      await execFileAsync('ssh-add', [resolvedKey], {
+      writeFileSync(tmpScript, buildWindowsAskpassScript(passphrase), { encoding: 'utf-8', flag: 'wx' });
+      await execFileAsync(sshAdd, [resolvedKey], {
         timeout: 10000,
+        windowsHide: true,
         env: { ...process.env, SSH_ASKPASS: tmpScript, SSH_ASKPASS_REQUIRE: 'force', DISPLAY: ':0' },
       });
       return { ok: true };
@@ -267,12 +330,14 @@ export async function addKeyToAgent(keyPath: string, passphrase: string): Promis
   }
 
   // Unix/macOS: use a temporary script as SSH_ASKPASS
-  const tmpScript = path.join(app.getPath('temp'), `mindos-askpass-${Date.now()}.sh`);
+  const tmpScript = path.join(app.getPath('temp'), `${askpassName}.sh`);
   try {
     // Create a script that outputs the passphrase without echo option parsing.
-    writeFileSync(tmpScript, buildUnixAskpassScript(passphrase), { mode: 0o700 });
-    await execFileAsync('ssh-add', [resolvedKey], {
+    // 0o700: must stay executable — ssh invokes it as SSH_ASKPASS.
+    writeFileSync(tmpScript, buildUnixAskpassScript(passphrase), { mode: 0o700, flag: 'wx' });
+    await execFileAsync(sshAdd, [resolvedKey], {
       timeout: 10000,
+      windowsHide: true,
       env: { ...process.env, SSH_ASKPASS: tmpScript, SSH_ASKPASS_REQUIRE: 'force', DISPLAY: ':0' },
     });
     return { ok: true };
@@ -293,7 +358,7 @@ export function isSshAgentRunning(): boolean {
   if (process.platform === 'win32') {
     // On Windows, check if the OpenSSH agent service is running
     try {
-      const out = String(execFileSync('sc', ['query', 'ssh-agent'], { encoding: 'utf-8', timeout: 3000 }));
+      const out = String(execFileSync('sc', ['query', 'ssh-agent'], { encoding: 'utf-8', timeout: 3000, windowsHide: true }));
       return out.includes('RUNNING');
     } catch {
       return false;
@@ -371,6 +436,7 @@ export class SshTunnel {
       this.process = spawn(sshCmd, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         env: process.env,  // Inherit env so SSH_AUTH_SOCK is available for ssh-agent
+        windowsHide: true, // long-lived ssh -N would otherwise pin a visible console window
       });
 
       // Write PID to disk for orphan cleanup on next launch

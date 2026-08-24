@@ -2,6 +2,20 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, st
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { resolveExistingSafe } from '../../foundation/security/index.js';
 import { json, type MindosServerResponse } from '../response.js';
+import {
+  buildSkillMatrix,
+  disableNativeSkill,
+  enableNativeSkill,
+  linkSkillToAgent,
+  unlinkSkillFromAgent,
+  type MindosSkillLinkAgent,
+  type MindosSkillLinkOutcome,
+  type MindosSkillMatrix,
+} from './skill-links.js';
+import {
+  parseSkillMarkdownMetadata,
+  type MindosSkillRuntimeRequirements,
+} from './skill-metadata.js';
 
 export type MindosSkillSource = 'builtin' | 'user';
 export type MindosSkillOrigin = 'app-builtin' | 'mindos-user' | 'mindos-global' | 'agents-global' | 'custom' | 'project-builtin';
@@ -21,6 +35,7 @@ export type MindosSkillInfo = {
   enabled: boolean;
   editable: boolean;
   origin: MindosSkillOrigin;
+  runtimeRequirements: MindosSkillRuntimeRequirements;
 };
 
 export type SkillsHandlerServices = {
@@ -45,7 +60,11 @@ export type SkillsPostAction =
   | 'toggle'
   | 'read'
   | 'read-native'
-  | 'record-install';
+  | 'record-install'
+  | 'link'
+  | 'unlink'
+  | 'disable-native'
+  | 'enable-native';
 
 export type SkillsPostPayload = {
   action?: SkillsPostAction | string;
@@ -61,8 +80,11 @@ export type SkillsPostPayload = {
 export type SkillsPostHandlerServices = {
   mindRoot: string;
   skillRoots: MindosSkillRoot[];
+  trustedNativeSkillRoots?: string[];
   readSettings(): MindosSkillsSettings;
   writeSettings(settings: MindosSkillsSettings): void;
+  /** Downstream agents eligible for skill linking (present, skill-capable). Required for link/unlink. */
+  listLinkAgents?(): MindosSkillLinkAgent[];
 };
 
 export type SkillsPayload = {
@@ -71,18 +93,20 @@ export type SkillsPayload = {
 
 export function handleSkillsGet(services: SkillsHandlerServices): MindosServerResponse<SkillsPayload> {
   const disabled = new Set(services.disabledSkills ?? []);
-  const byName = new Map<string, MindosSkillInfo>();
+  return json({ skills: collectSkillInfos(services.skillRoots, disabled) }, {
+    headers: { 'Cache-Control': 'no-store' },
+  });
+}
 
-  for (const root of services.skillRoots) {
+/** Scan all skill roots and de-duplicate by name (first root wins). */
+export function collectSkillInfos(skillRoots: MindosSkillRoot[], disabled: Set<string>): MindosSkillInfo[] {
+  const byName = new Map<string, MindosSkillInfo>();
+  for (const root of skillRoots) {
     for (const skill of readSkillsFromRoot(root, disabled)) {
       if (!byName.has(skill.name)) byName.set(skill.name, skill);
     }
   }
-
-  const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-  return json({ skills }, {
-    headers: { 'Cache-Control': 'no-store' },
-  });
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function handleSkillsPost(
@@ -149,14 +173,74 @@ export function handleSkillsPost(
       if (!name || !payload.sourcePath) {
         return json({ error: 'name and sourcePath required' }, { status: 400 });
       }
-      return readNativeSkill(name, payload.sourcePath, services.skillRoots);
+      return readNativeSkill(name, payload.sourcePath, services.skillRoots, services.trustedNativeSkillRoots);
 
     case 'record-install':
       return recordSkillInstall(payload, settings, services);
 
+    case 'link':
+    case 'unlink':
+    case 'disable-native':
+    case 'enable-native':
+      if (!name || !payload.agentKey) {
+        return json({ error: 'name and agentKey required' }, { status: 400 });
+      }
+      return setSkillLinked(action, name, payload.agentKey, services);
+
     default:
       return json({ error: `Unknown action: ${String(action)}` }, { status: 400 });
   }
+}
+
+/* ── Unified write interface for the (skill × agent) matrix (spec 4.3) ── */
+
+function setSkillLinked(
+  action: 'link' | 'unlink' | 'disable-native' | 'enable-native',
+  name: string,
+  agentKey: string,
+  services: SkillsPostHandlerServices,
+): MindosServerResponse<{ ok: true; result: string } | { error: string }> {
+  const agents = services.listLinkAgents?.() ?? [];
+  const agent = agents.find((candidate) => candidate.key === agentKey);
+  if (!agent) {
+    return json({ error: `Unknown or unavailable agent: ${agentKey}` }, { status: 404 });
+  }
+  const outcome = action === 'link'
+    ? linkSkillToAgent(name, agent, services.skillRoots)
+    : action === 'unlink'
+      ? unlinkSkillFromAgent(name, agent, services.skillRoots)
+      : action === 'disable-native'
+        ? disableNativeSkill(name, agent)
+        : enableNativeSkill(name, agent);
+  return skillLinkOutcomeResponse(outcome);
+}
+
+function skillLinkOutcomeResponse(
+  outcome: MindosSkillLinkOutcome,
+): MindosServerResponse<{ ok: true; result: string } | { error: string }> {
+  if (outcome.ok) return json({ ok: true, result: outcome.result });
+  const status = outcome.code === 'skill-not-found' ? 404 : outcome.code === 'conflict' ? 409 : 500;
+  return json({ error: outcome.message }, { status });
+}
+
+/* ── Unified read model for the (skill × agent) matrix (spec 4.2) ── */
+
+export type SkillMatrixHandlerServices = {
+  disabledSkills?: string[];
+  skillRoots: MindosSkillRoot[];
+  listLinkAgents(): MindosSkillLinkAgent[];
+};
+
+export function handleSkillMatrixGet(
+  services: SkillMatrixHandlerServices,
+): MindosServerResponse<MindosSkillMatrix> {
+  const disabled = new Set(services.disabledSkills ?? []);
+  const matrix = buildSkillMatrix({
+    skills: collectSkillInfos(services.skillRoots, disabled),
+    agents: services.listLinkAgents(),
+    disabledSkills: services.disabledSkills,
+  });
+  return json(matrix, { headers: { 'Cache-Control': 'no-store' } });
 }
 
 function resolveUserSkillsDirForWrite(mindRoot: string):
@@ -183,7 +267,7 @@ function readSkillsFromRoot(root: MindosSkillRoot, disabled: Set<string>): Mindo
     const skillFile = join(root.path, entry.name, 'SKILL.md');
     if (!existsSync(skillFile) || !statSync(skillFile).isFile()) continue;
     const content = readFileSync(skillFile, 'utf-8');
-    const parsed = parseSkillMd(content);
+    const parsed = parseSkillMarkdownMetadata(content);
     const name = parsed.name || entry.name;
     skills.push({
       name,
@@ -193,6 +277,7 @@ function readSkillsFromRoot(root: MindosSkillRoot, disabled: Set<string>): Mindo
       enabled: !disabled.has(name),
       editable: root.editable,
       origin: root.origin,
+      runtimeRequirements: parsed.runtimeRequirements,
     });
   }
 
@@ -203,7 +288,7 @@ function readDirectSkillFromRoot(root: MindosSkillRoot, disabled: Set<string>): 
   const skillFile = join(root.path, 'SKILL.md');
   if (!existsSync(skillFile) || !statSync(skillFile).isFile()) return null;
   const content = readFileSync(skillFile, 'utf-8');
-  const parsed = parseSkillMd(content);
+  const parsed = parseSkillMarkdownMetadata(content);
   const name = parsed.name || basename(root.path);
   return {
     name,
@@ -213,6 +298,7 @@ function readDirectSkillFromRoot(root: MindosSkillRoot, disabled: Set<string>): 
     enabled: !disabled.has(name),
     editable: root.editable,
     origin: root.origin,
+    runtimeRequirements: parsed.runtimeRequirements,
   };
 }
 
@@ -231,22 +317,6 @@ function isSkillDirectoryEntry(root: MindosSkillRoot, entry: import('node:fs').D
 function resolveUserSkillsDir(mindRoot: string): string {
   if (!existsSync(mindRoot)) return join(mindRoot, '.skills');
   return resolveExistingSafe(mindRoot, '.skills');
-}
-
-function parseSkillMd(content: string): { name?: string; description?: string } {
-  const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
-  if (!match) return {};
-  const frontmatter = match[1] ?? '';
-  const result: { name?: string; description?: string } = {};
-  for (const line of frontmatter.split(/\r?\n/)) {
-    const separator = line.indexOf(':');
-    if (separator < 0) continue;
-    const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim().replace(/^['"]|['"]$/g, '');
-    if (key === 'name') result.name = value;
-    if (key === 'description') result.description = value;
-  }
-  return result;
 }
 
 function normalizeSkillsPostPayload(body: unknown): SkillsPostPayload {
@@ -350,7 +420,7 @@ function readSkillByName(
     const directSkillFile = join(root.path, 'SKILL.md');
     if (!existsSync(directSkillFile)) continue;
     const content = readFileSync(directSkillFile, 'utf-8');
-    const parsed = parseSkillMd(content);
+    const parsed = parseSkillMarkdownMetadata(content);
     if ((parsed.name || basename(root.path)) === name) return json({ content });
   }
   return json({ error: 'Skill not found' }, { status: 404 });
@@ -360,9 +430,10 @@ function readNativeSkill(
   name: string,
   sourcePath: string,
   skillRoots: MindosSkillRoot[],
+  trustedNativeSkillRoots: string[] = [],
 ): MindosServerResponse<{ content: string; description?: string } | { error: string }> {
   const nativeBase = resolve(sourcePath);
-  if (!isRegisteredSkillRoot(nativeBase, skillRoots)) {
+  if (!isRegisteredSkillRoot(nativeBase, skillRoots, trustedNativeSkillRoots)) {
     return json({ error: 'Invalid sourcePath' }, { status: 400 });
   }
   const nativeSkillFile = resolve(nativeBase, name, 'SKILL.md');
@@ -374,18 +445,19 @@ function readNativeSkill(
     const directSkillFile = resolve(nativeBase, 'SKILL.md');
     if (!existsSync(directSkillFile)) return json({ error: 'Skill not found' }, { status: 404 });
     const directContent = readFileSync(directSkillFile, 'utf-8');
-    const parsed = parseSkillMd(directContent);
+    const parsed = parseSkillMarkdownMetadata(directContent);
     if ((parsed.name || basename(nativeBase)) !== name) {
       return json({ error: 'Skill not found' }, { status: 404 });
     }
     return json({ content: directContent, description: parsed.description });
   }
   const content = readFileSync(nativeSkillFile, 'utf-8');
-  return json({ content, description: parseSkillMd(content).description });
+  return json({ content, description: parseSkillMarkdownMetadata(content).description });
 }
 
-function isRegisteredSkillRoot(sourcePath: string, skillRoots: MindosSkillRoot[]): boolean {
-  return skillRoots.some((root) => resolve(root.path) === sourcePath);
+function isRegisteredSkillRoot(sourcePath: string, skillRoots: MindosSkillRoot[], trustedNativeSkillRoots: string[]): boolean {
+  if (skillRoots.some((root) => resolve(root.path) === sourcePath)) return true;
+  return trustedNativeSkillRoots.some((root) => resolve(root) === sourcePath);
 }
 
 function recordSkillInstall(

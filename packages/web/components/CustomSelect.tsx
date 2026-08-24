@@ -32,6 +32,8 @@ function flatOptions(items: SelectItem[]): SelectOption[] {
 }
 
 interface CustomSelectProps {
+  id?: string;
+  ariaLabel?: string;
   value: string;
   onChange: (value: string) => void;
   options: SelectItem[];
@@ -42,6 +44,8 @@ interface CustomSelectProps {
 }
 
 export default function CustomSelect({
+  id,
+  ariaLabel,
   value,
   onChange,
   options,
@@ -154,8 +158,8 @@ export default function CustomSelect({
   const isSm = size === 'sm';
 
   const triggerCls = isSm
-    ? `inline-flex items-center gap-1 appearance-none rounded-md border border-border bg-background text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring transition-colors text-2xs px-1.5 py-0.5 pr-5 ${className}`
-    : `w-full flex items-center gap-2 appearance-none rounded-lg border border-border bg-background text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring transition-colors text-sm px-3 py-2 pr-8 ${className}`;
+    ? `relative inline-flex items-center gap-1 appearance-none rounded-md border border-border bg-background text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring transition-colors text-2xs px-1.5 py-0.5 pr-5 ${className}`
+    : `relative w-full flex items-center gap-2 appearance-none rounded-lg border border-border bg-background text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring transition-colors text-sm px-3 py-2 pr-8 ${className}`;
 
   const chevronCls = isSm
     ? 'absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none'
@@ -233,9 +237,11 @@ export default function CustomSelect({
   return (
     <div className="relative">
       <button
+        id={id}
         ref={btnRef}
         type="button"
         onClick={() => setOpen(v => !v)}
+        aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
         className={triggerCls}

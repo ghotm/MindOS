@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -13,6 +13,25 @@ const requiredRuntimeFiles = [
   'packages/web/.next/standalone/server.js',
   'packages/web/.next/standalone/node_modules/next/package.json',
   'packages/web/.next/standalone/node_modules/@sinclair/typebox/package.json',
+  'packages/web/.next/standalone/node_modules/@earendil-works/pi-ai/package.json',
+  'packages/web/.next/standalone/node_modules/@larksuiteoapi/node-sdk/package.json',
+  'packages/web/.next/standalone/node_modules/@slack/web-api/package.json',
+  'packages/web/.next/standalone/node_modules/discord.js/package.json',
+  'packages/web/.next/standalone/node_modules/grammy/package.json',
+  'packages/web/.next/standalone/node_modules/pi-web-access/index.ts',
+  'packages/web/.next/standalone/node_modules/pi-subagents/src/extension/index.ts',
+  'packages/web/.next/standalone/node_modules/pi-subagents/agents',
+  'packages/web/.next/standalone/node_modules/pi-mcp-adapter/index.ts',
+  'packages/web/.next/standalone/node_modules/pi-schedule-prompt/src/tool.ts',
+  'packages/web/.next/standalone/node_modules/pi-schedule-prompt/src/storage.ts',
+  'packages/web/.next/standalone/node_modules/pi-schedule-prompt/src/scheduler.ts',
+  'packages/web/.next/standalone/node_modules/@juicesharp/rpiv-ask-user-question/index.ts',
+  'packages/web/.next/standalone/lib/agent/kb-extension.ts',
+  'packages/web/.next/standalone/lib/agent/ask-user-question-bridge-extension.ts',
+  'packages/web/.next/standalone/lib/agent/mindos-mcp-adapter-extension.ts',
+  'packages/web/.next/standalone/lib/agent/subagent-ledger-extension.ts',
+  'packages/web/.next/standalone/lib/schedule-prompt/index.ts',
+  'packages/web/.next/standalone/lib/im/index.ts',
   'dist/protocols/mcp-server/index.cjs',
   'bin/cli.js',
   'src/cli.js',
@@ -31,6 +50,19 @@ const fatalMainPatterns = [
   /mcp-server["']?\),\s*["']dist["'],\s*["']index\.cjs["']/,
 ];
 
+const fatalRuntimeSourcePatterns = [
+  {
+    rel: 'src/session/index.ts',
+    pattern: /session\.newSession\s*\(/,
+    message: 'runtime session adapter still calls AgentSession.newSession; history must be appended to SessionManager before createAgentSession',
+  },
+  {
+    rel: 'src/session/index.ts',
+    pattern: /MindosPiAgentSessionWithHistory/,
+    message: 'runtime session adapter still requires AgentSession.newSession in its type contract',
+  },
+];
+
 const fatalLogPatterns = [
   'MCP bundle not found',
   'ERR_MODULE_NOT_FOUND',
@@ -39,6 +71,11 @@ const fatalLogPatterns = [
   'A JavaScript error occurred in the main process',
   'path.join is not a function',
 ];
+
+const prunedStandaloneDependencies = new Set([
+  'caniuse-lite',
+  'typescript',
+]);
 
 const failures = [];
 
@@ -52,6 +89,10 @@ if (process.env.MINDOS_BUNDLE_LOCAL_EMBEDDING_RUNTIME !== '1') {
   }
 }
 
+for (const rel of findClaudeAgentSdkNativePackages(runtimeRoot)) {
+  failures.push(`Claude Agent SDK native runtime must not be bundled: ${rel}`);
+}
+
 if (existsSync(mainBundle)) {
   const source = readFileSync(mainBundle, 'utf-8');
   for (const pattern of fatalMainPatterns) {
@@ -60,6 +101,13 @@ if (existsSync(mainBundle)) {
   if (!source.includes('resolveMcpBundlePath')) {
     failures.push('main bundle does not include resolveMcpBundlePath');
   }
+}
+
+for (const { rel, pattern, message } of fatalRuntimeSourcePatterns) {
+  const file = join(runtimeRoot, rel);
+  if (!existsSync(file)) continue;
+  const source = readFileSync(file, 'utf-8');
+  if (pattern.test(source)) failures.push(`${message}: ${rel}`);
 }
 
 const standaloneNodeModules = join(runtimeRoot, 'packages/web/.next/standalone/node_modules');
@@ -93,6 +141,7 @@ function findMissingDependencyClosure(nodeModulesDir) {
 
     for (const dependencyName of Object.keys(pkg.dependencies ?? {})) {
       if (dependencyName.startsWith('node:')) continue;
+      if (isPrunedStandaloneDependency(dependencyName)) continue;
       const nested = join(packageDir, 'node_modules', dependencyName, 'package.json');
       const topLevel = join(nodeModulesDir, dependencyName, 'package.json');
       if (!existsSync(nested) && !existsSync(topLevel)) {
@@ -101,6 +150,10 @@ function findMissingDependencyClosure(nodeModulesDir) {
     }
   }
   return missing;
+}
+
+function isPrunedStandaloneDependency(packageName) {
+  return packageName.startsWith('@types/') || prunedStandaloneDependencies.has(packageName);
 }
 
 function listPackageNames(nodeModulesDir) {
@@ -117,6 +170,28 @@ function listPackageNames(nodeModulesDir) {
     packageNames.push(entry.name);
   }
   return packageNames;
+}
+
+function findClaudeAgentSdkNativePackages(rootDir) {
+  const found = [];
+  if (!existsSync(rootDir)) return found;
+  for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
+    const full = join(rootDir, entry.name);
+    if (!entry.isDirectory()) continue;
+    if (isClaudeAgentSdkNativePackageDir(full, entry.name)) {
+      found.push(relative(runtimeRoot, full));
+      continue;
+    }
+    found.push(...findClaudeAgentSdkNativePackages(full));
+  }
+  return found;
+}
+
+function isClaudeAgentSdkNativePackageDir(dir, name) {
+  return (
+    basename(dirname(dir)) === '@anthropic-ai'
+    && name.startsWith('claude-agent-sdk-')
+  ) || name.startsWith('@anthropic-ai+claude-agent-sdk-');
 }
 
 function dirSize(dir) {

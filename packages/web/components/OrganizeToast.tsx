@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useRouter } from 'next/navigation';
 import {
   Check, X, Loader2, Sparkles, AlertCircle, Undo2,
   ChevronDown, FilePlus, FileEdit, ExternalLink,
@@ -15,6 +14,8 @@ import {
   appendEntry, updateEntry, generateEntryId,
   type OrganizeHistoryEntry,
 } from '@/lib/organize-history';
+import { notifyFilesChanged } from '@/lib/files-changed';
+import { useSmoothRouterPush } from '@/hooks/useSmoothRouterPush';
 
 const AUTO_DISMISS_MS = 3 * 60 * 1000; // 3 minutes
 const THINKING_TIMEOUT_MS = 5000;
@@ -41,7 +42,7 @@ function stageText(
 function useOrganizeTimer(isOrganizing: boolean, stageHint: AiOrganize['stageHint']) {
   const [elapsed, setElapsed] = useState(0);
   const [thinkingOverride, setThinkingOverride] = useState(false);
-  const lastEventRef = useRef(Date.now());
+  const lastEventRef = useRef(0);
 
   useEffect(() => {
     lastEventRef.current = Date.now();
@@ -78,7 +79,7 @@ export default function OrganizeToast({
   aiOrganize, onDismiss, onCancel, onHistoryUpdate,
 }: OrganizeToastProps) {
   const { t } = useLocale();
-  const router = useRouter();
+  const smoothPush = useSmoothRouterPush();
   const fi = t.fileImport as Record<string, unknown>;
 
   const isOrganizing = aiOrganize.phase === 'organizing';
@@ -108,6 +109,9 @@ export default function OrganizeToast({
     if (isDone && !historyIdRef.current) {
       const id = generateEntryId();
       historyIdRef.current = id;
+      const status: OrganizeHistoryEntry['status'] = aiOrganize.changes.some(c => !c.ok)
+        ? 'partial'
+        : 'completed';
       appendEntry({
         id,
         timestamp: Date.now(),
@@ -118,7 +122,7 @@ export default function OrganizeToast({
           ok: c.ok,
           undone: c.undone,
         })),
-        status: 'completed',
+        status,
         source: aiOrganize.source,
         durationMs: aiOrganize.durationMs,
       });
@@ -151,7 +155,7 @@ export default function OrganizeToast({
     const ok = await aiOrganize.undoOne(path);
     setUndoing(false);
     if (ok) {
-      window.dispatchEvent(new Event('mindos:files-changed'));
+      notifyFilesChanged([path]);
       // History sync deferred to next render when aiOrganize.changes is updated
       setTimeout(() => {
         if (historyIdRef.current) {
@@ -176,7 +180,7 @@ export default function OrganizeToast({
     const reverted = await aiOrganize.undoAll();
     setUndoing(false);
     if (reverted > 0) {
-      window.dispatchEvent(new Event('mindos:files-changed'));
+      notifyFilesChanged(aiOrganize.changes.flatMap((change) => change.ok ? [change.path] : []));
       if (historyIdRef.current) {
         updateEntry(historyIdRef.current, {
           files: aiOrganize.changes.map(c => ({
@@ -192,12 +196,16 @@ export default function OrganizeToast({
 
   const handleViewFile = useCallback((path: string) => {
     handleUserAction();
-    router.push(`/view/${encodePath(path)}`);
-  }, [router, handleUserAction]);
+    smoothPush(`/view/${encodePath(path)}`);
+  }, [smoothPush, handleUserAction]);
 
   const handleDismiss = useCallback(() => {
     onDismiss();
   }, [onDismiss]);
+
+  const handleCancel = useCallback(() => {
+    onCancel();
+  }, [onCancel]);
 
   if (!isActive) return null;
 
@@ -531,8 +539,10 @@ export default function OrganizeToast({
           </button>
           <button
             type="button"
-            onClick={handleDismiss}
+            onClick={handleCancel}
             className="text-muted-foreground/50 hover:text-muted-foreground transition-colors shrink-0"
+            title={fi.organizeCancel as string}
+            aria-label={fi.organizeCancel as string}
           >
             <X size={14} />
           </button>

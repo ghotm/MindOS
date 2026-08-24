@@ -48,6 +48,10 @@ export function validateManifest(manifest: unknown): PluginManifest {
     version: m.version,
   };
 
+  if (m.minAppVersion && typeof m.minAppVersion === 'string') {
+    result.minAppVersion = m.minAppVersion;
+  }
+
   if (m.minMindOsVersion && typeof m.minMindOsVersion === 'string') {
     result.minMindOsVersion = m.minMindOsVersion;
   }
@@ -64,12 +68,12 @@ export function validateManifest(manifest: unknown): PluginManifest {
     result.authorUrl = m.authorUrl;
   }
 
-  if (m.fundingUrl && typeof m.fundingUrl === 'string') {
+  if (m.fundingUrl && isValidFundingUrl(m.fundingUrl)) {
     result.fundingUrl = m.fundingUrl;
   }
 
-  if (m.isDesktopOnly === true) {
-    result.isDesktopOnly = true;
+  if (typeof m.isDesktopOnly === 'boolean') {
+    result.isDesktopOnly = m.isDesktopOnly;
   }
 
   return result;
@@ -87,4 +91,10 @@ function isValidId(id: string): boolean {
  */
 function isValidSemver(version: string): boolean {
   return /^\d+\.\d+\.\d+$/.test(version);
+}
+
+function isValidFundingUrl(value: unknown): value is string | Record<string, string> {
+  if (typeof value === 'string') return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value).every((url) => typeof url === 'string');
 }

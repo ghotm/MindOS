@@ -6,6 +6,9 @@ import { useRouter } from 'next/navigation';
 import { useLocale } from '@/lib/stores/locale-store';
 import { encodePath } from '@/lib/utils';
 import { revertSpaceInitAction } from '@/lib/actions';
+import { openTab } from '@/lib/workspace-tabs';
+import { notifyFilesChanged } from '@/lib/files-changed';
+import { useSmoothRouterPush } from '@/hooks/useSmoothRouterPush';
 
 type InitState = 'working' | 'done' | 'reverted' | 'error';
 
@@ -31,6 +34,7 @@ export default function SpaceInitToast() {
   const [visible, setVisible] = useState(false);
   const [reverting, startRevert] = useTransition();
   const router = useRouter();
+  const smoothPush = useSmoothRouterPush();
   const { t } = useLocale();
 
   const dismiss = useCallback(() => {
@@ -59,8 +63,10 @@ export default function SpaceInitToast() {
   const handleReview = useCallback(() => {
     if (!info) return;
     dismiss();
-    router.push(`/view/${encodePath(info.spacePath + '/')}`);
-  }, [info, dismiss, router]);
+    const viewPath = info.spacePath.endsWith('/') ? info.spacePath : `${info.spacePath}/`;
+    openTab('doc', viewPath, info.spaceName || info.spacePath);
+    smoothPush(`/view/${encodePath(viewPath)}`);
+  }, [info, dismiss, smoothPush]);
 
   const handleDiscard = useCallback(() => {
     if (!info) return;
@@ -68,7 +74,7 @@ export default function SpaceInitToast() {
       await revertSpaceInitAction(info.spacePath, info.spaceName, info.description);
       setInfo((prev) => prev ? { ...prev, state: 'reverted' } : null);
       router.refresh();
-      window.dispatchEvent(new Event('mindos:files-changed'));
+      notifyFilesChanged([info.spacePath]);
       setTimeout(dismiss, 2000);
     });
   }, [info, router, dismiss]);

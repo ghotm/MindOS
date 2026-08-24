@@ -47,29 +47,68 @@ describe('MindOS runtime product kernel contract', () => {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
       name?: string;
       dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
       exports?: Record<string, unknown>;
       scripts?: Record<string, string>;
     };
 
     expect(manifest.name).toBe('@geminilight/mindos');
-    expect(manifest.scripts?.build).toBe('tsc && pnpm run build:protocols');
+    expect(manifest.scripts?.build).toBe('tsc && node ../../scripts/copy-mindos-agent-assets.mjs && pnpm run build:protocols');
     expect(manifest.scripts?.['build:protocols']).toBe('node ../../scripts/build-product-protocols.mjs');
-    expect(Object.keys(manifest.dependencies ?? {}).sort()).toEqual(['chokidar', 'pino', 'pino-pretty', 'zod']);
+    expect(Object.keys(manifest.dependencies ?? {}).sort()).toEqual([
+      '@anthropic-ai/sdk',
+      '@modelcontextprotocol/sdk',
+      // kb-tools value-imports TypeBox at runtime (Wave 3, agent-core consolidation)
+      '@sinclair/typebox',
+      'chokidar',
+      'pino',
+      'pino-pretty',
+      'zod',
+    ]);
+    expect(manifest.devDependencies).toHaveProperty('@anthropic-ai/claude-agent-sdk');
     expect(Object.keys(manifest.exports ?? {}).sort()).toEqual([
       '.',
       './agent',
+      './agent/*',
+      './agent/bridges',
+      './agent/bridges/*',
+      './agent/ledger',
+      './agent/ledger/*',
+      './agent/mindos-pi',
+      './agent/mindos-pi/*',
+      './agent/mindos-pi/extension',
+      './agent/mindos-pi/extension/*',
+      './agent/mindos-pi/permission',
+      './agent/mindos-pi/permission/*',
+      './agent/permission',
+      './agent/permission/*',
+      './agent/prompt',
+      './agent/prompt/*',
+      './agent/runtime',
+      './agent/runtime/*',
+      './agent/runtime/adapters',
+      './agent/runtime/adapters/*',
+      './agent/runtime/adapters/session-transcripts',
+      './agent/runtime/adapters/session-transcripts/*',
+      './agent/stream',
+      './agent/stream/*',
+      './agent/subagent',
+      './agent/subagent/*',
+      './agent/tool',
+      './agent/tool/*',
+      './agent/turn',
+      './agent/turn/*',
       './capabilities',
       './cli',
       './client',
       './foundation',
+      './intelligence',
       './knowledge',
       './plugin',
       './protocols',
       './protocols/acp',
       './retrieval',
       './server',
-      './session',
-      './session/pi-coding-agent',
       './tool',
     ]);
   });
@@ -98,7 +137,8 @@ describe('MindOS runtime product kernel contract', () => {
     expect(existsSync(resolve(root, 'packages/web/app/api/file/operation-kernel.ts'))).toBe(false);
     expect(existsSync(resolve(root, 'packages/web/app/api/file/handlers.ts'))).toBe(false);
 
-    expect(webSecurity).toContain("from '@geminilight/mindos'");
+    expect(webSecurity).toContain("from '@geminilight/mindos/foundation'");
+    expect(webSecurity).not.toContain("from '@geminilight/mindos'");
     expect(webSecurity).not.toContain("from '@mindos/security'");
   });
 
@@ -136,6 +176,7 @@ describe('MindOS runtime product kernel contract', () => {
 
   it('owns foundation and knowledge capabilities behind product subpath exports', () => {
     const foundation = read('packages/mindos/src/foundation.ts');
+    const intelligence = read('packages/mindos/src/intelligence.ts');
     const knowledge = read('packages/mindos/src/knowledge.ts');
     const capabilities = read('packages/mindos/src/capabilities.ts');
 
@@ -154,8 +195,12 @@ describe('MindOS runtime product kernel contract', () => {
     expect(knowledge).toContain("from './knowledge/git/index.js'");
     expect(knowledge).toContain("from './knowledge/knowledge-ops/index.js'");
 
+    expect(intelligence).toContain("from './intelligence/index.js'");
+    expect(intelligence).toContain("storage and audit stay in knowledge");
+
     expect(capabilities).toContain("domain: 'foundation'");
     expect(capabilities).toContain("domain: 'knowledge'");
+    expect(capabilities).toContain("domain: 'intelligence'");
     expect(capabilities).toContain("domain: 'retrieval'");
     expect(capabilities).toContain("domain: 'protocols'");
     expect(capabilities).toContain("owner: '@geminilight/mindos'");

@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import { execFile, execFileSync } from 'child_process';
 import { findUserOverride, getDetectableAgents, resolveAgentCommand } from './agent-descriptors.js';
-import type { AcpAgentOverride } from './agent-descriptors.js';
+import type { AcpAgentAdapterMetadata, AcpAgentOverride } from './agent-descriptors.js';
 
 export interface InstalledAgent {
   id: string;
@@ -14,6 +14,7 @@ export interface InstalledAgent {
     args: string[];
     source: 'user-override' | 'descriptor' | 'registry';
   };
+  adapterMetadata?: AcpAgentAdapterMetadata;
 }
 
 export interface NotInstalledAgent {
@@ -70,6 +71,163 @@ function parseResolvedPath(stdout: string): string | null {
   return null;
 }
 
+function parseResolvedPaths(stdout: string): string[] {
+  const resolved: string[] = [];
+  const add = (candidate: string) => {
+    const expanded = expandHome(candidate);
+    if (!isPathLikeCommand(expanded)) return;
+    if (!resolved.includes(expanded)) resolved.push(expanded);
+  };
+  for (const line of stdout.split(/\r?\n/)) {
+    const candidate = line.trim();
+    if (candidate) add(candidate);
+  }
+  return resolved;
+}
+
+function dedupePathEntries(entries: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of entries) {
+    const trimmed = entry.trim().replace(/^"|"$/g, '');
+    if (!trimmed) continue;
+    const key = process.platform === 'win32' ? trimmed.toLowerCase() : trimmed;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function isExistingDirectory(dirPath: string): boolean {
+  try {
+    return fs.statSync(dirPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isExecutableFile(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return false;
+    if (process.platform === 'win32') return true;
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function envPathValue(env: NodeJS.ProcessEnv = process.env): string {
+  return env.PATH ?? env.Path ?? env.path ?? '';
+}
+
+function splitEnvPath(value: string): string[] {
+  return value.split(path.delimiter).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function pathFromHome(...segments: string[]): string | null {
+  try {
+    const home = os.homedir();
+    return home ? path.join(home, ...segments) : null;
+  } catch {
+    return null;
+  }
+}
+
+function collectChildBinDirs(parentDir: string | null): string[] {
+  if (!parentDir || !isExistingDirectory(parentDir)) return [];
+  try {
+    return fs.readdirSync(parentDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(parentDir, entry.name, 'bin'))
+      .filter(isExistingDirectory)
+      .sort()
+      .reverse();
+  } catch {
+    return [];
+  }
+}
+
+function supplementalPathEntries(env: NodeJS.ProcessEnv = process.env): string[] {
+  const entries = [
+    pathFromHome('.local', 'bin'),
+    pathFromHome('bin'),
+    pathFromHome('.npm-global', 'bin'),
+    pathFromHome('.cargo', 'bin'),
+    pathFromHome('.bun', 'bin'),
+    pathFromHome('.deno', 'bin'),
+    pathFromHome('.volta', 'bin'),
+    pathFromHome('.asdf', 'shims'),
+    pathFromHome('.nodenv', 'shims'),
+    pathFromHome('.pyenv', 'shims'),
+    pathFromHome('.local', 'share', 'pnpm'),
+    pathFromHome('Library', 'pnpm'),
+    pathFromHome('.codex', 'bin'),
+    pathFromHome('.claude', 'bin'),
+    pathFromHome('.claude', 'local'),
+    pathFromHome('.gemini', 'bin'),
+    pathFromHome('.qwen', 'bin'),
+    pathFromHome('.kimi-code', 'bin'),
+    ...collectChildBinDirs(pathFromHome('.nvm', 'versions', 'node')),
+  ].filter((entry): entry is string => Boolean(entry));
+
+  if (process.platform === 'win32') {
+    const userProfile = env.USERPROFILE ?? env.HOME;
+    const appData = env.APPDATA ?? (userProfile ? path.win32.join(userProfile, 'AppData', 'Roaming') : undefined);
+    const localAppData = env.LOCALAPPDATA ?? (userProfile ? path.win32.join(userProfile, 'AppData', 'Local') : undefined);
+    entries.push(
+      ...(appData ? [path.win32.join(appData, 'npm')] : []),
+      ...(localAppData ? [path.win32.join(localAppData, 'pnpm')] : []),
+      ...(userProfile ? [
+        path.win32.join(userProfile, 'scoop', 'shims'),
+        path.win32.join(userProfile, '.cargo', 'bin'),
+        path.win32.join(userProfile, '.bun', 'bin'),
+        path.win32.join(userProfile, '.deno', 'bin'),
+        path.win32.join(userProfile, '.volta', 'bin'),
+      ] : []),
+    );
+  } else {
+    entries.push('/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin');
+  }
+
+  return dedupePathEntries(entries).filter(isExistingDirectory);
+}
+
+function commandSearchPaths(env: NodeJS.ProcessEnv = process.env): string[] {
+  return dedupePathEntries([
+    ...splitEnvPath(envPathValue(env)),
+    ...supplementalPathEntries(env),
+  ]);
+}
+
+function commandFileNames(command: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  if (process.platform !== 'win32') return [command];
+  if (path.win32.extname(command)) return [command];
+  const extensions = (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return dedupePathEntries([command, ...extensions.map((extension) => `${command}${extension}`)]);
+}
+
+function lookupCommandPathFromSearchPaths(command: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  return lookupCommandPathCandidatesFromSearchPaths(command, env)[0] ?? null;
+}
+
+function lookupCommandPathCandidatesFromSearchPaths(command: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  const candidates: string[] = [];
+  for (const dir of commandSearchPaths(env)) {
+    for (const fileName of commandFileNames(command, env)) {
+      const candidate = path.join(dir, fileName);
+      if (!isExecutableFile(candidate)) continue;
+      if (!candidates.includes(candidate)) candidates.push(candidate);
+    }
+  }
+  return candidates;
+}
+
 function shellEscape(command: string): string {
   return `'${command.replace(/'/g, `'\\''`)}'`;
 }
@@ -109,6 +267,11 @@ async function lookupCommandPathCurrentEnv(command: string): Promise<string | nu
   return stdout ? parseResolvedPath(stdout) : null;
 }
 
+async function lookupCommandPathCandidatesCurrentEnv(command: string): Promise<string[]> {
+  const stdout = await execFileText(process.platform === 'win32' ? 'where' : 'which', process.platform === 'win32' ? [command] : ['-a', command]);
+  return stdout ? parseResolvedPaths(stdout) : [];
+}
+
 function lookupCommandPathCurrentEnvSync(command: string): string | null {
   const stdout = execFileTextSync(process.platform === 'win32' ? 'where' : 'which', [command]);
   return stdout ? parseResolvedPath(stdout) : null;
@@ -122,6 +285,18 @@ async function lookupCommandPathLoginShell(command: string): Promise<string | nu
     if (resolved) return resolved;
   }
   return null;
+}
+
+async function lookupCommandPathCandidatesLoginShell(command: string): Promise<string[]> {
+  const candidates: string[] = [];
+  for (const shell of getLoginShells()) {
+    const stdout = await execFileText(shell, ['-lic', `which -a ${shellEscape(command)}`]);
+    if (!stdout) continue;
+    for (const candidate of parseResolvedPaths(stdout)) {
+      if (!candidates.includes(candidate)) candidates.push(candidate);
+    }
+  }
+  return candidates;
 }
 
 function lookupCommandPathLoginShellSync(command: string): string | null {
@@ -140,7 +315,27 @@ export async function resolveCommandPath(command: string | undefined): Promise<s
   if (direct) return direct;
   const trimmed = command.trim();
   if (!trimmed || isPathLikeCommand(trimmed)) return null;
-  return await lookupCommandPathCurrentEnv(trimmed) ?? await lookupCommandPathLoginShell(trimmed);
+  return await lookupCommandPathCurrentEnv(trimmed)
+    ?? await lookupCommandPathLoginShell(trimmed)
+    ?? lookupCommandPathFromSearchPaths(trimmed);
+}
+
+export async function resolveCommandPathCandidates(command: string | undefined): Promise<string[]> {
+  if (!command) return [];
+  const direct = resolveDirectCommandPath(command);
+  if (direct) return [direct];
+  const trimmed = command.trim();
+  if (!trimmed || isPathLikeCommand(trimmed)) return [];
+
+  const candidates: string[] = [];
+  for (const candidate of [
+    ...await lookupCommandPathCandidatesCurrentEnv(trimmed),
+    ...await lookupCommandPathCandidatesLoginShell(trimmed),
+    ...lookupCommandPathCandidatesFromSearchPaths(trimmed),
+  ]) {
+    if (!candidates.includes(candidate)) candidates.push(candidate);
+  }
+  return candidates;
 }
 
 export function resolveCommandPathSync(command: string | undefined): string | null {
@@ -149,7 +344,9 @@ export function resolveCommandPathSync(command: string | undefined): string | nu
   if (direct) return direct;
   const trimmed = command.trim();
   if (!trimmed || isPathLikeCommand(trimmed)) return null;
-  return lookupCommandPathCurrentEnvSync(trimmed) ?? lookupCommandPathLoginShellSync(trimmed);
+  return lookupCommandPathCurrentEnvSync(trimmed)
+    ?? lookupCommandPathLoginShellSync(trimmed)
+    ?? lookupCommandPathFromSearchPaths(trimmed);
 }
 
 async function lookupCommandPaths(commands: string[]): Promise<Map<string, string | null>> {
@@ -161,7 +358,7 @@ async function lookupCommandPaths(commands: string[]): Promise<Map<string, strin
 export async function detectLocalAcpAgents(
   options: LocalAcpDetectionOptions = {},
 ): Promise<{ installed: InstalledAgent[]; notInstalled: NotInstalledAgent[] }> {
-  const agents = getDetectableAgents();
+  const agents = getDetectableAgents(options.overrides);
 
   const plans = agents.map((agent) => {
     const userOverride = findUserOverride(agent.id, options.overrides);
@@ -174,19 +371,23 @@ export async function detectLocalAcpAgents(
     return { agent, resolved, directOverridePath, presenceCommands };
   });
 
-  const presenceLookup = await lookupCommandPaths(plans.flatMap((plan) => plan.presenceCommands));
-  const launchLookup = await lookupCommandPaths(plans.map((plan) => plan.resolved.cmd));
+  const commandLookup = await lookupCommandPaths([
+    ...plans.flatMap((plan) => plan.presenceCommands),
+    ...plans.map((plan) => plan.resolved.cmd),
+  ]);
 
   const installed: InstalledAgent[] = [];
   const notInstalled: NotInstalledAgent[] = [];
 
   for (const { agent, resolved, directOverridePath, presenceCommands } of plans) {
-    const detectedCommandPath = presenceCommands.map((command) => presenceLookup.get(command) ?? null).find(Boolean);
+    if (!resolved.enabled) continue;
+
+    const detectedCommandPath = presenceCommands.map((command) => commandLookup.get(command) ?? null).find(Boolean);
     const presencePath = directOverridePath
       ?? detectedCommandPath
       ?? resolveExistingPresenceDir(agent.presenceDirs);
     const launchPath = directOverridePath
-      ?? launchLookup.get(resolved.cmd)
+      ?? commandLookup.get(resolved.cmd)
       ?? (presenceCommands.includes(resolved.cmd) ? detectedCommandPath : null)
       ?? null;
 
@@ -196,6 +397,7 @@ export async function detectLocalAcpAgents(
         name: agent.name,
         binaryPath: launchPath,
         resolvedCommand: { cmd: resolved.cmd, args: resolved.args, source: resolved.source },
+        ...(agent.adapterMetadata ? { adapterMetadata: agent.adapterMetadata } : {}),
       });
     } else {
       const packageName = agent.installCmd?.match(/npm install -g (.+)/)?.[1];

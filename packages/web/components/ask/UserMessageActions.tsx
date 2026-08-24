@@ -22,7 +22,8 @@ interface UserMessageActionsProps {
  * Hover action buttons for user message bubbles.
  * - Copy: always visible
  * - Edit + Resend: only on the last user message
- * Desktop: fade-in on hover; Mobile: always visible.
+ * Visibility and positioning are owned by MessageList's floating dock so these
+ * controls never take space inside the message bubble.
  */
 export default function UserMessageActions({
   content,
@@ -51,16 +52,17 @@ export default function UserMessageActions({
     onResend?.();
   }, [onResend, isLoading]);
 
-  const btnBase = 'inline-flex h-7 w-7 items-center justify-center rounded-md bg-card border border-border/60 shadow-sm text-muted-foreground transition-colors duration-75 touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
+  const btnBase = 'hit-target-box inline-flex h-7 w-7 items-center justify-center text-muted-foreground transition-colors duration-75 touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-bg:transparent] [--hit-target-radius:var(--radius-sm)]';
 
   return (
-    <div className="absolute -bottom-3 left-1 z-10 flex items-center gap-1 opacity-100 transition-opacity duration-75 md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">
+    <div className="flex items-center gap-0.5">
       {/* Copy */}
       <ActionTooltip label={labels.copy}>
         <button
           type="button"
           onClick={handleCopy}
-          className={`${btnBase} hover:bg-muted hover:text-foreground`}
+          aria-label={labels.copy}
+          className={`${btnBase} hover:text-foreground [--hit-target-hover-bg:var(--muted)]`}
         >
           {copied
             ? <Check size={11} className="text-success" />
@@ -74,7 +76,8 @@ export default function UserMessageActions({
           <button
             type="button"
             onClick={onEdit}
-            className={`${btnBase} hover:bg-muted hover:text-foreground`}
+            aria-label={labels.edit}
+            className={`${btnBase} hover:text-foreground [--hit-target-hover-bg:var(--muted)]`}
           >
             <PenLine size={11} />
           </button>
@@ -87,7 +90,8 @@ export default function UserMessageActions({
           <button
             type="button"
             onClick={handleResend}
-            className={`${btnBase} hover:bg-[var(--amber)]/10 hover:text-[var(--amber)]`}
+            aria-label={labels.regenerate}
+            className={`${btnBase} hover:text-[var(--amber)] [--hit-target-hover-bg:color-mix(in_srgb,var(--amber)_10%,transparent)]`}
           >
             <RotateCcw size={11} />
           </button>

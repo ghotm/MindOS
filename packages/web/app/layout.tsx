@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
-import { getFileTree } from '@/lib/fs';
+import { getFileTree, getMindRoot } from '@/lib/fs';
+import { listMindSystemSlots, type MindSystemSlot } from '@/lib/mind-system';
 import ShellLayout from '@/components/ShellLayout';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import LocaleStoreInit from '@/lib/stores/LocaleStoreInit';
@@ -10,7 +11,9 @@ import RegisterSW from './register-sw';
 import UpdateOverlay from '@/components/UpdateOverlay';
 import UpdateToast from '@/components/UpdateToast';
 import { cookies, headers } from 'next/headers';
+import { createHash } from 'crypto';
 import type { Locale } from '@/lib/i18n';
+import { shouldLoadShellData } from '@/lib/shell-route';
 import '@/lib/renderers/index'; // globally register built-in renderers once
 
 export const metadata: Metadata = {
@@ -37,10 +40,21 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   let fileTree: import('@/lib/types').FileNode[] = [];
-  try {
-    fileTree = getFileTree();
-  } catch (err) {
-    console.error('[RootLayout] Failed to load file tree:', err);
+  let mindSystemSlots: MindSystemSlot[] = [];
+  // Workspace-tab sets are namespaced per mind root (spec-titlebar-row Phase 2):
+  // a stable opaque id keeps vault-relative doc keys from leaking across roots.
+  let mindRootId = 'default';
+  const headerStore = await headers();
+  const pathname = headerStore.get('x-pathname');
+  if (shouldLoadShellData(pathname)) {
+    try {
+      fileTree = getFileTree();
+      const mindRoot = getMindRoot();
+      mindSystemSlots = listMindSystemSlots(mindRoot);
+      mindRootId = createHash('sha256').update(mindRoot).digest('hex').slice(0, 12);
+    } catch (err) {
+      console.error('[RootLayout] Failed to load file tree:', err);
+    }
   }
 
   // Read locale from cookie, or infer from Accept-Language header
@@ -54,13 +68,12 @@ export default async function RootLayout({
   } else if (cookieLocale !== 'en') {
     // Cookie not set or invalid — infer from Accept-Language header
     // (matches client: navigator.language.startsWith('zh') ? 'zh' : 'en')
-    const headerStore = await headers();
     const acceptLanguage = headerStore.get('Accept-Language') || '';
     ssrLocale = acceptLanguage.includes('zh') ? 'zh' : 'en';
   }
 
   return (
-    <html lang={ssrLocale} suppressHydrationWarning style={{ backgroundColor: '#f8f6f1', color: '#1c1a17' }}>
+    <html lang={ssrLocale} suppressHydrationWarning data-mind-root-id={mindRootId} style={{ backgroundColor: '#f8f6f1', color: '#1c1a17' }}>
       <head>
         <meta name="theme-color" content="#c8873a" />
         {/* Patch Node.removeChild/insertBefore to swallow errors caused by browser
@@ -71,10 +84,11 @@ export default async function RootLayout({
             __html: `(function(){if(typeof Node!=='undefined'){var o=Node.prototype.removeChild;Node.prototype.removeChild=function(c){if(c.parentNode!==this){try{return o.call(c.parentNode,c)}catch(e){return c}}return o.call(this,c)};var i=Node.prototype.insertBefore;Node.prototype.insertBefore=function(n,r){if(r&&r.parentNode!==this){try{return i.call(r.parentNode,n,r)}catch(e){return i.call(this,n,null)}}return i.call(this,n,r)}}})();`,
           }}
         />
-        {/* Electron macOS: set data-electron-mac before first paint so sidebar clears traffic lights */}
+        {/* Electron macOS: set data-electron-mac before first paint so sidebar clears traffic lights.
+            data-mac-titlebar-row only when the shell declares the capability (new shells, preload mindosShell) */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{if(/electron/i.test(navigator.userAgent)&&/macintosh/i.test(navigator.userAgent)){document.documentElement.setAttribute('data-electron-mac','')}}catch(e){}})();`,
+            __html: `(function(){try{if(/electron/i.test(navigator.userAgent)&&/macintosh/i.test(navigator.userAgent)){document.documentElement.setAttribute('data-electron-mac','')}if(window.mindosShell&&window.mindosShell.macTitlebarRow){document.documentElement.setAttribute('data-mac-titlebar-row','')}}catch(e){}})();`,
           }}
         />
         {/* Apply user appearance settings before first paint, preventing flash */}
@@ -91,7 +105,7 @@ export default async function RootLayout({
         <LocaleStoreInit ssrLocale={ssrLocale} />
           <TooltipProvider delay={300}>
             <ErrorBoundary>
-              <ShellLayout fileTree={fileTree}>
+              <ShellLayout fileTree={fileTree} mindSystemSlots={mindSystemSlots}>
                 {children}
               </ShellLayout>
             </ErrorBoundary>

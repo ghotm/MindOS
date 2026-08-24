@@ -39,6 +39,7 @@ MindOS 配置存储在 `~/.mindos/config.json`，`mindos onboard` 时自动生�
 | `mcpPort` | `8781` | 可选。MCP 服务端口 |
 | `authToken` | — | 可选。保护 App `/api/*` 和 MCP `/mcp` 的 Bearer Token 认证。供 Agent / MCP 客户端使用，暴露到网络时建议设置 |
 | `webPassword` | — | 可选。为 Web UI 添加登录密码保护。供浏览器访问，与 `authToken` 相互独立 |
+| `webSessionSecret` | 自动生成 / 迁移 | 内部字段。用于签发浏览器登录会话；老配置会从既有 `webPassword` 迁移以保留旧会话，之后重置 `webPassword` 时保持不变 |
 | `startMode` | `start` | 启动模式：`daemon`（后台服务，开机自启）、`start`（前台）或 `dev` |
 | `ai.provider` | `anthropic` | 当前使用的 provider：`anthropic` 或 `openai` |
 | `ai.providers.anthropic.apiKey` | — | Anthropic API Key |
@@ -59,3 +60,4 @@ MindOS 配置存储在 `~/.mindos/config.json`，`mindos onboard` 时自动生�
 - Shell 环境变量（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 等）优先级高于配置文件。
 - 运行 `mindos config set <key> <val>` 可更新单个字段，无需手动编辑文件。
 - 运行 `mindos config show` 可查看当前配置（API Key 脱敏显示）。
+- 如果忘记 Web UI 登录密码，在运行 MindOS 的机器上执行 `mindos auth reset-web-password`；这只重置本机网页登录门禁，不会删除或加密本地 Markdown，也不会让已有浏览器会话失效。如需临时关闭登录保护，可执行 `mindos config unset webPassword` 后重启。

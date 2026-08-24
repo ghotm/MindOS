@@ -1,5 +1,10 @@
 import { randomBytes } from 'node:crypto';
+import {
+  parseAgentRuntimeEnvironmentSettings,
+  type AgentRuntimeEnvironmentSettings,
+} from '../../agent/runtime/runtime-env.js';
 import { errorResponse, json, type MindosServerResponse } from '../response.js';
+import { normalizeSearchIgnoredPaths } from '../search-ignore.js';
 
 export type MindosSettingsAi = {
   activeProvider?: string;
@@ -24,12 +29,15 @@ export type MindosServerSettings = {
   embedding?: MindosEmbeddingSettings;
   mindRoot?: string;
   webPassword?: string;
+  webSessionSecret?: string;
   authToken?: string;
   allowNetworkAccess?: boolean;
   port?: number;
   mcpPort?: number;
   agent?: unknown;
   skillPaths?: Record<string, unknown>;
+  searchIgnoredPaths?: string[];
+  agentRuntimeEnv?: AgentRuntimeEnvironmentSettings;
   startMode?: string;
   connectionMode?: MindosConnectionMode;
   baseUrlCompat?: Record<string, unknown>;
@@ -54,9 +62,11 @@ export type MindosSettingsServices = {
   writeSettings(settings: MindosServerSettings): void;
   readWebSearchConfig(): MindosWebSearchConfig;
   writeWebSearchConfig(config: MindosWebSearchConfig): void;
-  parseProviders(providers: unknown): unknown;
+  parseProviders(providers: unknown, activeProvider?: unknown): unknown;
   getEmbeddingStatus(): unknown;
   invalidateCache(): void;
+  readSearchIgnoreFile?(mindRoot?: string): string[];
+  writeSearchIgnoreFile?(mindRoot: string, ignoredPaths: string[]): void;
   providerEnv: MindosProviderEnvServices;
 };
 
@@ -88,6 +98,8 @@ export type MindosSettingsPayload = {
   mcpPort: number;
   agent: unknown;
   skillPaths: Record<string, unknown>;
+  searchIgnoredPaths: string[];
+  agentRuntimeEnv: AgentRuntimeEnvironmentSettings;
   envOverrides: Record<string, boolean>;
   envValues: Record<string, string>;
 };
@@ -101,8 +113,24 @@ function maskToken(token: string | undefined): string {
   return token.length > 8 ? `${token.slice(0, 4)}••••••••${token.slice(-4)}` : '***set***';
 }
 
+function ensureWebSessionSecret(settings: MindosServerSettings, legacySessionSecret?: unknown): void {
+  if (typeof settings.webPassword !== 'string' || !settings.webPassword) return;
+  if (typeof settings.webSessionSecret === 'string' && settings.webSessionSecret.trim()) return;
+  settings.webSessionSecret = typeof legacySessionSecret === 'string' && legacySessionSecret
+    ? legacySessionSecret
+    : randomBytes(32).toString('base64url');
+}
+
 function maskWebSearchKey(value: string | undefined) {
   return value ? '••••••' : '';
+}
+
+function maskSecret(value: string | undefined): string {
+  return value ? '••••••' : '';
+}
+
+function isMaskedSecret(value: string): boolean {
+  return value.includes('••');
 }
 
 function defaultEmbedding(): MindosEmbeddingSettings {
@@ -147,6 +175,18 @@ function resolveSkillPathsPatch(current: Record<string, unknown> | undefined, in
   return next;
 }
 
+function resolveSearchIgnoredPaths(
+  current: unknown,
+  fromFile: unknown,
+  incoming: unknown,
+): string[] {
+  if (incoming !== undefined) return normalizeSearchIgnoredPaths(incoming);
+  return normalizeSearchIgnoredPaths([
+    ...normalizeSearchIgnoredPaths(current),
+    ...normalizeSearchIgnoredPaths(fromFile),
+  ]);
+}
+
 function resolveWebSearchPatch(incoming: unknown, current: MindosWebSearchConfig): MindosWebSearchConfig | undefined {
   if (!incoming || typeof incoming !== 'object') return undefined;
   const ws = incoming as Record<string, unknown>;
@@ -158,10 +198,38 @@ function resolveWebSearchPatch(incoming: unknown, current: MindosWebSearchConfig
   return { ...current, ...patch };
 }
 
+function normalizeActiveProvider(activeProvider: unknown, providers: unknown): string {
+  if (!Array.isArray(providers)) {
+    return typeof activeProvider === 'string' ? activeProvider : '';
+  }
+
+  const entries = providers
+    .filter((provider): provider is { id: string; protocol?: string } => (
+      !!provider
+      && typeof provider === 'object'
+      && typeof (provider as Record<string, unknown>).id === 'string'
+      && ((provider as Record<string, unknown>).id as string).startsWith('p_')
+    ));
+  const active = typeof activeProvider === 'string' ? activeProvider : '';
+
+  if (active && entries.some((provider) => provider.id === active)) {
+    return active;
+  }
+
+  if (active) {
+    const byProtocol = entries.find((provider) => provider.protocol === active);
+    if (byProtocol) return byProtocol.id;
+  }
+
+  return entries[0]?.id ?? '';
+}
+
 export function handleSettingsGet(services: MindosSettingsServices): MindosServerResponse<MindosSettingsPayload | { error: string }> {
   try {
     const settings = services.readSettings();
     const ai = settings.ai ?? {};
+    const providers = services.parseProviders(ai.providers ?? [], ai.activeProvider);
+    const activeProvider = normalizeActiveProvider(ai.activeProvider, providers);
     const env = services.env ?? {};
     const envOverrides: Record<string, boolean> = {
       AI_PROVIDER: !!env.AI_PROVIDER,
@@ -181,10 +249,11 @@ export function handleSettingsGet(services: MindosSettingsServices): MindosServe
     }
 
     const webSearch = services.readWebSearchConfig();
+    const fileIgnoredPaths = services.readSearchIgnoreFile?.(settings.mindRoot) ?? [];
     return json({
       ai: {
-        activeProvider: ai.activeProvider ?? '',
-        providers: ai.providers ?? [],
+        activeProvider,
+        providers,
       },
       embedding: settings.embedding ?? defaultEmbedding(),
       embeddingStatus: services.getEmbeddingStatus(),
@@ -195,13 +264,15 @@ export function handleSettingsGet(services: MindosSettingsServices): MindosServe
         geminiApiKey: maskWebSearchKey(webSearch.geminiApiKey),
       },
       mindRoot: settings.mindRoot,
-      webPassword: settings.webPassword ?? '',
+      webPassword: maskSecret(settings.webPassword),
       authToken: maskToken(settings.authToken),
       allowNetworkAccess: settings.allowNetworkAccess === true,
       port: Number(env.MINDOS_WEB_PORT) || settings.port || 3456,
       mcpPort: settings.mcpPort ?? 8781,
       agent: settings.agent ?? {},
       skillPaths: settings.skillPaths ?? {},
+      searchIgnoredPaths: resolveSearchIgnoredPaths(settings.searchIgnoredPaths, fileIgnoredPaths, undefined),
+      agentRuntimeEnv: settings.agentRuntimeEnv ?? {},
       envOverrides,
       envValues,
     });
@@ -217,23 +288,38 @@ export function handleSettingsPost(
   try {
     const current = services.readSettings();
     const resolvedAi = { ...(current.ai ?? {}) };
+    resolvedAi.providers = services.parseProviders(resolvedAi.providers ?? [], resolvedAi.activeProvider);
     if (body.ai) {
       if (body.ai.activeProvider !== undefined) resolvedAi.activeProvider = body.ai.activeProvider;
-      if (body.ai.providers !== undefined) resolvedAi.providers = services.parseProviders(body.ai.providers);
+      if (body.ai.providers !== undefined) resolvedAi.providers = services.parseProviders(body.ai.providers, resolvedAi.activeProvider);
     }
+    resolvedAi.activeProvider = normalizeActiveProvider(resolvedAi.activeProvider, resolvedAi.providers);
 
     const currentWebSearch = services.readWebSearchConfig();
     const nextWebSearch = resolveWebSearchPatch(body.webSearch, currentWebSearch);
     if (nextWebSearch) services.writeWebSearchConfig(nextWebSearch);
+    const currentFileIgnoredPaths = services.readSearchIgnoreFile?.(current.mindRoot) ?? [];
+    const nextSearchIgnoredPaths = resolveSearchIgnoredPaths(
+      current.searchIgnoredPaths,
+      currentFileIgnoredPaths,
+      body.searchIgnoredPaths,
+    );
 
     const resolvedAuthToken = body.authToken === '' ? '' : current.authToken;
+    const resolvedWebPassword = typeof body.webPassword === 'string'
+      ? (isMaskedSecret(body.webPassword) ? current.webPassword : body.webPassword)
+      : current.webPassword;
     const next: MindosServerSettings = {
       ai: resolvedAi,
       embedding: body.embedding && typeof body.embedding === 'object' ? resolveEmbedding(body.embedding) : current.embedding,
       mindRoot: body.mindRoot ?? current.mindRoot ?? process.env.MIND_ROOT,
       agent: body.agent ?? current.agent,
       skillPaths: resolveSkillPathsPatch(current.skillPaths, body.skillPaths),
-      webPassword: body.webPassword ?? current.webPassword,
+      searchIgnoredPaths: nextSearchIgnoredPaths,
+      agentRuntimeEnv: Object.prototype.hasOwnProperty.call(body, 'agentRuntimeEnv')
+        ? (parseAgentRuntimeEnvironmentSettings(body.agentRuntimeEnv) ?? {})
+        : current.agentRuntimeEnv,
+      webPassword: resolvedWebPassword,
       authToken: resolvedAuthToken,
       allowNetworkAccess: typeof body.allowNetworkAccess === 'boolean'
         ? body.allowNetworkAccess
@@ -243,16 +329,25 @@ export function handleSettingsPost(
       startMode: body.startMode ?? current.startMode,
       connectionMode: resolveConnectionMode(current.connectionMode, body.connectionMode),
       baseUrlCompat: current.baseUrlCompat,
+      webSessionSecret: current.webSessionSecret,
     };
+    ensureWebSessionSecret(next, current.webPassword);
 
     services.writeSettings(next);
+    if (body.searchIgnoredPaths !== undefined && next.mindRoot) {
+      services.writeSearchIgnoreFile?.(next.mindRoot, nextSearchIgnoredPaths);
+    }
     if (JSON.stringify(next.ai) !== JSON.stringify(current.ai)) {
       const latest = services.readSettings();
       if (latest.baseUrlCompat && Object.keys(latest.baseUrlCompat).length > 0) {
         services.writeSettings({ ...latest, baseUrlCompat: {} });
       }
     }
-    if (next.mindRoot !== current.mindRoot) services.invalidateCache();
+    if (
+      next.mindRoot !== current.mindRoot
+      || body.searchIgnoredPaths !== undefined
+      || JSON.stringify(nextSearchIgnoredPaths) !== JSON.stringify(resolveSearchIgnoredPaths(current.searchIgnoredPaths, currentFileIgnoredPaths, undefined))
+    ) services.invalidateCache();
 
     return json({ ok: true });
   } catch (error) {

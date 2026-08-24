@@ -9,10 +9,16 @@ vi.mock('@/lib/stores/locale-store', () => ({
     t: {
       search: {
         placeholder: 'Search files...',
+        clear: 'Clear',
+        close: 'Close',
+        emptyTitle: 'Search your knowledge base',
+        emptyHint: 'Find notes, tables, and commands.',
         noResults: 'No results found',
+        noResultsHint: 'Try another query.',
         prompt: 'Type to search',
         navigate: 'navigate',
         open: 'open',
+        dragToChat: 'drag to chat',
       },
     },
   }),
@@ -36,8 +42,10 @@ vi.mock('@/lib/api', () => ({
 }));
 
 vi.mock('next/navigation', () => ({
+  usePathname: () => '/wiki',
   useRouter: () => ({
     push: vi.fn(),
+    refresh: vi.fn(),
   }),
 }));
 
@@ -115,6 +123,28 @@ describe('SearchPanel Drag-Drop Tests', () => {
       const button = item.querySelector('button') as HTMLButtonElement;
       expect(button.draggable).toBe(true);
     }
+  });
+
+  it('renders the polished search shell and empty state', async () => {
+    const { default: SearchPanel } = await import('@/components/panels/SearchPanel');
+
+    await act(async () => {
+      root.render(
+        <SearchPanel
+          active={true}
+          onNavigate={() => {}}
+        />
+      );
+    });
+
+    const input = host.querySelector('input[type="text"]') as HTMLInputElement;
+    const inputShell = input.parentElement as HTMLElement;
+
+    expect(inputShell.className).not.toContain('focus-within:shadow-[inset_3px_0_0_var(--amber)]');
+    expect(inputShell.className).toContain('focus-within:border-[var(--amber)]/45');
+    expect(inputShell.className).toContain('rounded-lg');
+    expect(host.textContent).toContain('Search your knowledge base');
+    expect(host.textContent).toContain('Find notes, tables, and commands.');
   });
 
   it('should set text/mindos-path data format on drag', async () => {
@@ -240,19 +270,19 @@ describe('SearchPanel Drag-Drop Tests', () => {
     }
   });
 
-  it('should be compatible with AskContent drop handler', async () => {
+  it('should be compatible with ChatContent drop handler', async () => {
     // Test data format compatibility
     const testData = {
       path: 'docs/test.md',
       type: 'file',
     };
 
-    // Simulate what AskContent does on drop
+    // Simulate what ChatContent does on drop
     const dt = new DataTransfer();
     dt.setData('text/mindos-path', testData.path);
     dt.setData('text/mindos-type', testData.type);
 
-    // AskContent should be able to retrieve this
+    // ChatContent should be able to retrieve this
     expect(dt.getData('text/mindos-path')).toBe('docs/test.md');
     expect(dt.getData('text/mindos-type')).toBe('file');
   });

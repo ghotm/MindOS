@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import { Field, Select } from '@/components/settings/Primitives';
 import type { SetupMessages, McpMessages, AgentEntry, AgentInstallStatus, ConnectionMode } from './types';
+import { cn } from '@/lib/utils';
+import { setupBadgeClass, setupChoiceCardClass, setupNoticeClass, setupOutlineButtonClass } from './setupStyles';
 
 const AGENT_INSTALL_URLS: Record<string, string> = {
   'claude-code': 'https://docs.anthropic.com/en/docs/claude-code/overview',
@@ -14,6 +16,8 @@ const AGENT_INSTALL_URLS: Record<string, string> = {
   'cline': 'https://github.com/cline/cline',
   'trae': 'https://www.trae.ai/',
   'gemini-cli': 'https://github.com/google-gemini/gemini-cli',
+  'kilo-code': 'https://kilo.ai/',
+  'warp': 'https://www.warp.dev/',
   'augment': 'https://www.augmentcode.com/',
 };
 
@@ -31,15 +35,18 @@ export interface StepAgentsProps {
   agentStatuses: Record<string, AgentInstallStatus>;
   s: SetupMessages;
   settingsMcp: McpMessages;
+  compact?: boolean;
 }
 
 export default function StepAgents({
   agents, agentsLoading, selectedAgents, setSelectedAgents,
   connectionMode, setConnectionMode,
   agentTransport, setAgentTransport, agentScope, setAgentScope,
-  agentStatuses, s, settingsMcp,
+  agentStatuses, s, settingsMcp, compact = false,
 }: StepAgentsProps) {
   const toggleAgent = (key: string) => {
+    const agent = agents.find(a => a.key === key);
+    if (!agent?.present) return;
     setSelectedAgents(prev => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key); else next.add(key);
@@ -59,48 +66,42 @@ export default function StepAgents({
     const st = agentStatuses[key];
     if (st) {
       if (st.state === 'installing') return (
-        <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--muted-foreground)' }}>
+        <span className="flex items-center gap-1 text-xs text-muted-foreground">
           <Loader2 size={10} className="animate-spin" /> {s.agentInstalling}
         </span>
       );
       if (st.state === 'ok') return (
-        <span className="flex items-center gap-1 text-xs px-1.5 py-0.5 rounded"
-          style={{ background: 'color-mix(in srgb, var(--success) 12%, transparent)', color: 'var(--success)' }}>
+        <span className={setupBadgeClass('success')}>
           <CheckCircle2 size={10} /> {s.agentStatusOk}
         </span>
       );
       if (st.state === 'error') return (
-        <span className="flex items-center gap-1 text-xs px-1.5 py-0.5 rounded"
-          style={{ background: 'color-mix(in srgb, var(--error) 10%, transparent)', color: 'var(--error)' }}>
+        <span className={setupBadgeClass('error')}>
           <XCircle size={10} /> {s.agentStatusError}
           {st.message && <span className="ml-1 text-2xs">({st.message})</span>}
         </span>
       );
     }
     if (agent.installed) return (
-      <span className="text-xs px-1.5 py-0.5 rounded"
-        style={{ background: 'color-mix(in srgb, var(--success) 12%, transparent)', color: 'var(--success)' }}>
+      <span className={setupBadgeClass('success')}>
         {settingsMcp.installed}
       </span>
     );
     if (agent.present) return (
-      <span className="text-xs px-1.5 py-0.5 rounded"
-        style={{ background: 'var(--amber-dim)', color: 'var(--amber)' }}>
+      <span className={setupBadgeClass('amber')}>
         {s.agentDetected}
       </span>
     );
     const installUrl = AGENT_INSTALL_URLS[key];
     return (
       <span className="flex items-center gap-1.5">
-        <span className="text-xs px-1.5 py-0.5 rounded"
-          style={{ background: 'color-mix(in srgb, var(--muted-foreground) 10%, transparent)', color: 'var(--muted-foreground)' }}>
+        <span className={setupBadgeClass('muted')}>
           {s.agentNotFound}
         </span>
         {installUrl && (
           <a href={installUrl} target="_blank" rel="noopener noreferrer"
             onClick={e => e.stopPropagation()}
-            className="text-2xs hover:underline"
-            style={{ color: 'var(--amber)' }}>
+            className="text-2xs text-[var(--amber)] hover:underline">
             {s.agentGetIt}
           </a>
         )}
@@ -115,22 +116,24 @@ export default function StepAgents({
 
   const renderAgentRow = (agent: AgentEntry, i: number) => (
     <label key={agent.key}
-      className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors"
-      style={{
-        background: i % 2 === 0 ? 'var(--card)' : 'transparent',
-        borderTop: i > 0 ? '1px solid var(--border)' : undefined,
-      }}>
+      className={cn(
+        'flex items-center gap-3 transition-colors',
+        compact ? 'px-3 py-2.5' : 'px-4 py-3',
+        i % 2 === 0 ? 'bg-card' : 'bg-transparent',
+        i > 0 && 'border-t border-border',
+        agent.present ? 'cursor-pointer hover:bg-muted/50' : 'cursor-not-allowed opacity-60',
+      )}
+    >
       <input
         type="checkbox"
         checked={selectedAgents.has(agent.key)}
         onChange={() => toggleAgent(agent.key)}
         className="form-check"
-        disabled={agentStatuses[agent.key]?.state === 'installing'}
+        disabled={!agent.present || agentStatuses[agent.key]?.state === 'installing'}
       />
-      <span className="text-sm flex-1" style={{ color: 'var(--foreground)' }}>{agent.name}</span>
+      <span className="flex-1 text-sm text-foreground">{agent.name}</span>
       {connectionMode.mcp && (
-        <span className="text-2xs px-1.5 py-0.5 rounded font-mono"
-          style={{ background: 'color-mix(in srgb, var(--muted-foreground) 8%, transparent)', color: 'var(--muted-foreground)' }}>
+        <span className="rounded bg-muted/70 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground">
           {getEffectiveTransport(agent)}
         </span>
       )}
@@ -139,51 +142,58 @@ export default function StepAgents({
   );
 
   return (
-    <div className="space-y-5">
+    <div className={compact ? 'space-y-3' : 'space-y-5'}>
       {/* Connection Mode Toggle */}
       <div className="space-y-2">
-        <p className="text-xs font-medium" style={{ color: 'var(--muted-foreground)' }}>
-          {s.connectionModeTitle}
-        </p>
-        <div className="grid grid-cols-2 gap-3">
+        {!compact && (
+          <p className="text-xs font-medium text-muted-foreground">
+            {s.connectionModeTitle}
+          </p>
+        )}
+        {compact && (
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {s.agentRecommendationHint}
+          </p>
+        )}
+        <div className={`grid grid-cols-2 ${compact ? 'gap-2' : 'gap-3'}`}>
           <label
-            className="flex items-start gap-3 px-4 py-3 rounded-xl border cursor-pointer transition-all"
-            style={{
-              borderColor: connectionMode.cli ? 'var(--amber)' : 'var(--border)',
-              background: connectionMode.cli ? 'color-mix(in srgb, var(--amber) 6%, transparent)' : 'transparent',
-            }}>
+            className={setupChoiceCardClass(connectionMode.cli, cn(
+              'flex cursor-pointer',
+              compact ? 'items-center gap-2 rounded-lg px-3 py-2' : 'items-start gap-3 rounded-xl px-4 py-3',
+            ))}
+          >
             <input
               type="checkbox"
               checked={connectionMode.cli}
               onChange={() => setConnectionMode(prev => ({ ...prev, cli: !prev.cli }))}
-              className="form-check mt-0.5"
+              className={compact ? 'form-check' : 'form-check mt-0.5'}
             />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-1.5 text-sm font-medium" style={{ color: 'var(--foreground)' }}>
-                <Terminal size={13} className="shrink-0" /> CLI
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+                <Terminal size={13} className={cn('shrink-0', connectionMode.cli ? 'text-[var(--amber)]' : 'text-muted-foreground')} /> CLI
               </div>
-              <p className="text-2xs mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
+              <p className={`${compact ? 'hidden sm:block' : 'block'} mt-0.5 text-2xs text-muted-foreground`}>
                 {s.connectionModeCliHint}
               </p>
             </div>
           </label>
           <label
-            className="flex items-start gap-3 px-4 py-3 rounded-xl border cursor-pointer transition-all"
-            style={{
-              borderColor: connectionMode.mcp ? 'var(--amber)' : 'var(--border)',
-              background: connectionMode.mcp ? 'color-mix(in srgb, var(--amber) 6%, transparent)' : 'transparent',
-            }}>
+            className={setupChoiceCardClass(connectionMode.mcp, cn(
+              'flex cursor-pointer',
+              compact ? 'items-center gap-2 rounded-lg px-3 py-2' : 'items-start gap-3 rounded-xl px-4 py-3',
+            ))}
+          >
             <input
               type="checkbox"
               checked={connectionMode.mcp}
               onChange={() => setConnectionMode(prev => ({ ...prev, mcp: !prev.mcp }))}
-              className="form-check mt-0.5"
+              className={compact ? 'form-check' : 'form-check mt-0.5'}
             />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-1.5 text-sm font-medium" style={{ color: 'var(--foreground)' }}>
-                <Plug size={13} className="shrink-0" /> MCP
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+                <Plug size={13} className={cn('shrink-0', connectionMode.mcp ? 'text-[var(--amber)]' : 'text-muted-foreground')} /> MCP
               </div>
-              <p className="text-2xs mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
+              <p className={`${compact ? 'hidden sm:block' : 'block'} mt-0.5 text-2xs text-muted-foreground`}>
                 {s.connectionModeMcpHint}
               </p>
             </div>
@@ -193,51 +203,68 @@ export default function StepAgents({
 
       {/* Hint — contextual based on connection mode */}
       {!connectionMode.cli && !connectionMode.mcp ? (
-        <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-xs"
-          style={{ background: 'color-mix(in srgb, var(--amber) 8%, transparent)', color: 'var(--amber)' }}>
+        <div className={setupNoticeClass('amber', 'flex items-center gap-2 px-3 py-2.5')}>
           <Brain size={13} className="shrink-0" />
           <span>{s.agentToolsHintNone}</span>
         </div>
       ) : (
-        <p className="text-sm" style={{ color: 'var(--muted-foreground)' }}>
-          {!connectionMode.mcp && connectionMode.cli ? s.agentToolsHintCliOnly : s.agentToolsHint}
-        </p>
+        (!compact || connectionMode.mcp) && (
+          <p className={compact ? 'text-xs leading-relaxed text-muted-foreground' : 'text-sm text-muted-foreground'}>
+            {!connectionMode.mcp && connectionMode.cli ? s.agentToolsHintCliOnly : s.agentToolsHint}
+          </p>
+        )
       )}
 
-      {agentsLoading ? (
-        <div className="flex items-center gap-2 py-4" style={{ color: 'var(--muted-foreground)' }}>
+      {!connectionMode.mcp ? (
+        connectionMode.cli && !compact ? (
+          <div className={`${compact ? 'rounded-lg px-3 py-2' : 'rounded-xl px-4 py-3'} flex items-start gap-3 border border-border bg-card`}>
+            <div className={`${compact ? 'h-6 w-6' : 'h-7 w-7'} flex shrink-0 items-center justify-center rounded-lg bg-success/10 text-success`}>
+              <Terminal size={compact ? 13 : 14} />
+            </div>
+            <div className="min-w-0">
+              <p className={`${compact ? 'text-xs' : 'text-sm'} font-medium text-foreground`}>
+                {s.agentCliModeTitle}
+              </p>
+              <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                {s.agentCliModeDesc}
+              </p>
+            </div>
+          </div>
+        ) : null
+      ) : agentsLoading ? (
+        <div className="flex items-center gap-2 py-4 text-muted-foreground">
           <Loader2 size={14} className="animate-spin" />
           <span className="text-sm">{s.agentToolsLoading}</span>
         </div>
       ) : agents.length === 0 ? (
-        <p className="text-sm py-4 text-center" style={{ color: 'var(--muted-foreground)' }}>
+        <p className="py-4 text-center text-sm text-muted-foreground">
           {s.agentToolsEmpty}
         </p>
       ) : (
         <>
           {/* Badge legend */}
-          <div className="flex items-center gap-4 text-2xs" style={{ color: 'var(--muted-foreground)' }}>
+          <div className="flex items-center gap-4 text-2xs text-muted-foreground">
             <span className="flex items-center gap-1">
-              <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: 'var(--success)' }} />
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-success" />
               {s.badgeInstalled}
             </span>
             <span className="flex items-center gap-1">
-              <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: 'var(--amber)' }} />
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--amber)]" />
               {s.badgeDetected}
             </span>
             <span className="flex items-center gap-1">
-              <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: 'var(--muted-foreground)' }} />
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-muted-foreground" />
               {s.badgeNotFound}
             </span>
           </div>
 
           {/* Detected agents — always visible */}
           {detected.length > 0 ? (
-            <div className="rounded-xl border overflow-hidden" style={{ borderColor: 'var(--border)' }}>
+            <div className="overflow-hidden rounded-xl border border-border">
               {detected.map((agent, i) => renderAgentRow(agent, i))}
             </div>
           ) : (
-            <p className="text-xs py-2" style={{ color: 'var(--muted-foreground)' }}>
+            <p className="py-2 text-xs text-muted-foreground">
               {s.agentNoneDetected}
             </p>
           )}
@@ -248,13 +275,12 @@ export default function StepAgents({
                 type="button"
                 onClick={() => setShowOtherAgents(!showOtherAgents)}
                 aria-expanded={showOtherAgents}
-                className="flex items-center gap-1.5 text-xs py-1.5 transition-colors"
-                style={{ color: 'var(--muted-foreground)' }}>
+                className="flex items-center gap-1.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <ChevronDown size={12} className={`transition-transform ${showOtherAgents ? 'rotate-180' : ''}`} />
                 {s.agentShowMore(other.length)}
               </button>
               {showOtherAgents && (
-                <div className="rounded-xl border overflow-hidden mt-1" style={{ borderColor: 'var(--border)' }}>
+                <div className="mt-1 overflow-hidden rounded-xl border border-border">
                   {other.map((agent, i) => renderAgentRow(agent, i))}
                 </div>
               )}
@@ -262,8 +288,7 @@ export default function StepAgents({
           )}
           {/* Hint when no agents selected — only relevant for MCP mode */}
           {connectionMode.mcp && selectedAgents.size === 0 && (
-            <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-xs"
-              style={{ background: 'color-mix(in srgb, var(--amber) 8%, transparent)', color: 'var(--amber)' }}>
+            <div className={setupNoticeClass('amber', 'flex items-center gap-2 px-3 py-2.5')}>
               <Brain size={13} className="shrink-0" />
               <span>{s.agentNoneSelected}</span>
             </div>
@@ -275,8 +300,7 @@ export default function StepAgents({
                 type="button"
                 onClick={() => setShowAdvanced(!showAdvanced)}
                 aria-expanded={showAdvanced}
-                className="flex items-center gap-1.5 text-xs py-1.5 transition-colors"
-                style={{ color: 'var(--muted-foreground)' }}>
+                className="flex items-center gap-1.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <ChevronDown size={12} className={`transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
                 {s.agentAdvanced}
               </button>
@@ -299,21 +323,19 @@ export default function StepAgents({
               )}
             </div>
           )}
-          <div className="flex gap-2 mt-1">
+          <div className="mt-1 flex gap-2">
             <button
               type="button"
               onClick={() => setSelectedAgents(new Set(
-                agents.filter(a => a.installed || a.present).map(a => a.key)
+                agents.filter(a => a.present).map(a => a.key)
               ))}
-              className="text-xs px-2.5 py-1 rounded-md border transition-colors hover:bg-muted/50"
-              style={{ borderColor: 'var(--amber)', color: 'var(--amber)' }}>
+              className={setupOutlineButtonClass('amber')}>
               {s.agentSelectDetected}
             </button>
             <button
               type="button"
               onClick={() => setSelectedAgents(new Set())}
-              className="text-xs px-2.5 py-1 rounded-md border transition-colors hover:bg-muted/50"
-              style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}>
+              className={setupOutlineButtonClass('neutral')}>
               {s.agentSkipLater}
             </button>
           </div>

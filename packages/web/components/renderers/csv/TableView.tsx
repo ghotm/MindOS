@@ -1,16 +1,18 @@
 'use client';
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { ChevronUp, ChevronDown, Plus, Trash2 } from 'lucide-react';
+import { ChevronUp, ChevronDown, ChevronsUpDown, Plus, Trash2 } from 'lucide-react';
 import type { TableConfig } from './types';
 import { serializeCSV } from './types';
 import { EditableCell, AddRowTr } from './EditableCell';
+import { cn } from '@/lib/utils';
 
-export function TableView({ headers, rows, cfg, saveAction }: {
+export function TableView({ headers, rows, cfg, saveAction, onSortChange }: {
   headers: string[];
   rows: string[][];
   cfg: TableConfig;
   saveAction: (content: string) => Promise<void>;
+  onSortChange?: (field: string, dir: TableConfig['sortDir']) => void;
 }) {
   const [localRows, setLocalRows] = useState(rows);
   const [showAdd, setShowAdd] = useState(false);
@@ -51,54 +53,98 @@ export function TableView({ headers, rows, cfg, saveAction }: {
   }, [processedRows, groupIdx]);
 
   async function commitCell(origRow: string[], colIdx: number, val: string) {
+    const previous = localRows;
     const updated = localRows.map(r => r === origRow ? r.map((c, ci) => ci === colIdx ? val : c) : r);
     setLocalRows(updated);
-    await saveAction(serializeCSV(headers, updated));
+    try {
+      await saveAction(serializeCSV(headers, updated));
+    } catch (err) {
+      setLocalRows(previous);
+      throw err;
+    }
   }
 
   async function deleteRow(origRow: string[]) {
+    const previous = localRows;
     const updated = localRows.filter(r => r !== origRow);
     setLocalRows(updated);
-    await saveAction(serializeCSV(headers, updated));
+    try {
+      await saveAction(serializeCSV(headers, updated));
+    } catch (err) {
+      setLocalRows(previous);
+      throw err;
+    }
   }
 
   async function addRow(newRow: string[]) {
+    const previous = localRows;
     const updated = [...localRows, newRow];
     setLocalRows(updated);
-    setShowAdd(false);
-    await saveAction(serializeCSV(headers, updated));
+    try {
+      await saveAction(serializeCSV(headers, updated));
+      setShowAdd(false);
+    } catch (err) {
+      setLocalRows(previous);
+      throw err;
+    }
   }
 
-  const thStyle: React.CSSProperties = {
-    borderBottom: '1px solid var(--border)',
-    fontSize: '0.72rem',
-    letterSpacing: '0.05em',
-    textTransform: 'uppercase',
-    color: 'var(--muted-foreground)',
-    fontWeight: 600,
-  };
+  function toggleColumnSort(field: string) {
+    if (!onSortChange) return;
+    if (cfg.sortField !== field) {
+      onSortChange(field, 'asc');
+      return;
+    }
+    if (cfg.sortDir === 'asc') {
+      onSortChange(field, 'desc');
+      return;
+    }
+    onSortChange('', 'asc');
+  }
 
   let rowCounter = 0;
 
   return (
-    <div className="rounded-xl overflow-hidden border" style={{ borderColor: 'var(--border)' }}>
+    <div className="overflow-hidden rounded-lg border border-border">
       <div className="overflow-x-auto">
         <table className="min-w-full text-sm border-collapse">
           <thead>
-            <tr style={{ background: 'var(--muted)' }}>
-              {visibleIndices.map(ci => (
-                <th key={ci} className="px-4 py-2.5 text-left whitespace-nowrap" style={thStyle}>
-                  <div className="flex items-center gap-1">
-                    {headers[ci]}
-                    {cfg.sortField === headers[ci] && (
-                      cfg.sortDir === 'asc'
-                        ? <ChevronUp size={10} style={{ color: 'var(--amber)' }} />
-                        : <ChevronDown size={10} style={{ color: 'var(--amber)' }} />
-                    )}
-                  </div>
-                </th>
-              ))}
-              <th className="w-8" style={{ ...thStyle, background: 'var(--muted)' }} />
+            <tr className="bg-muted">
+              {visibleIndices.map(ci => {
+                const header = headers[ci];
+                const isSorted = cfg.sortField === header;
+                const ariaSort = isSorted
+                  ? cfg.sortDir === 'asc' ? 'ascending' : 'descending'
+                  : 'none';
+                const nextSortLabel = !isSorted
+                  ? `Sort by ${header} ascending`
+                  : cfg.sortDir === 'asc'
+                    ? `Sort by ${header} descending`
+                    : `Clear sorting for ${header}`;
+                return (
+                  <th key={ci} aria-sort={ariaSort} className="border-b border-border px-0 py-0 text-left text-[0.72rem] font-semibold uppercase tracking-[0.05em] text-muted-foreground whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => toggleColumnSort(header)}
+                      aria-label={nextSortLabel}
+                      title={nextSortLabel}
+                      className={cn(
+                        'group flex w-full items-center gap-1 px-4 py-2.5 text-left transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
+                        isSorted && 'text-foreground',
+                      )}
+                    >
+                      <span>{header}</span>
+                      {isSorted
+                        ? cfg.sortDir === 'asc'
+                          ? <ChevronUp size={10} className="text-[var(--amber)]" />
+                          : <ChevronDown size={10} className="text-[var(--amber)]" />
+                        : <ChevronsUpDown size={10} className="text-muted-foreground/35 transition-colors group-hover:text-muted-foreground/70" />
+                      }
+                    </button>
+                  </th>
+                );
+              })}
+              <th className="w-8 border-b border-border bg-muted" />
             </tr>
           </thead>
           <tbody>
@@ -106,10 +152,8 @@ export function TableView({ headers, rows, cfg, saveAction }: {
               <React.Fragment key={section.key ?? `section-${si}`}>
                 {section.key !== null && (
                   <tr key={`grp-${section.key}`}>
-                    <td colSpan={visibleIndices.length + 1} className="px-4 py-1.5"
-                      style={{ background: 'var(--accent)', borderBottom: '1px solid var(--border)', borderTop: '1px solid var(--border)' }}
-                    >
-                      <span className="text-xs font-semibold font-display" style={{ color: 'var(--muted-foreground)' }}>
+                    <td colSpan={visibleIndices.length + 1} className="border-y border-border bg-accent px-4 py-1.5">
+                      <span className="font-mono text-xs font-semibold text-muted-foreground">
                         {section.key} · {section.rows.length}
                       </span>
                     </td>
@@ -118,20 +162,17 @@ export function TableView({ headers, rows, cfg, saveAction }: {
                 {section.rows.map(({ row, orig }) => {
                   const ri = rowCounter++;
                   return (
-                    <tr key={ri} className="group transition-colors"
-                      style={{ background: ri % 2 === 0 ? 'var(--background)' : 'var(--card)' }}
-                      onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                      onMouseLeave={e => (e.currentTarget.style.background = ri % 2 === 0 ? 'var(--background)' : 'var(--card)')}
-                    >
+                    <tr key={ri} className={cn('group transition-colors hover:bg-muted', ri % 2 === 0 ? 'bg-background' : 'bg-card')}>
                       {visibleIndices.map(ci => (
-                        <td key={ci} className="px-4 py-2 max-w-xs" style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td key={ci} className="max-w-xs border-b border-border px-4 py-2">
                           <EditableCell value={row[ci] ?? ''} onCommit={v => commitCell(orig, ci, v)} />
                         </td>
                       ))}
-                      <td className="px-2 py-2" style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td className="border-b border-border px-2 py-2">
                         <button onClick={() => deleteRow(orig)}
-                          className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-destructive/10"
-                          style={{ color: 'var(--muted-foreground)' }}
+                          className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-error group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          aria-label="Delete row"
+                          title="Delete row"
                         ><Trash2 size={12} /></button>
                       </td>
                     </tr>
@@ -145,17 +186,13 @@ export function TableView({ headers, rows, cfg, saveAction }: {
           </tbody>
         </table>
       </div>
-      <div className="px-4 py-2 flex items-center justify-between" style={{ background: 'var(--muted)', borderTop: '1px solid var(--border)' }}>
-        <span className="text-xs font-display" style={{ color: 'var(--muted-foreground)' }}>
+      <div className="flex items-center justify-between border-t border-border bg-muted px-4 py-2">
+        <span className="text-xs tabular-nums text-muted-foreground">
           {localRows.length} rows · {headers.length} cols
         </span>
         {!showAdd
-          ? <button onClick={() => setShowAdd(true)} className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-md"
-              style={{ color: 'var(--amber)', background: 'var(--amber-dim)' }}
-            ><Plus size={12} /> Add row</button>
-          : <button onClick={() => setShowAdd(false)} className="text-xs px-2.5 py-1 rounded-md"
-              style={{ color: 'var(--muted-foreground)' }}
-            >Cancel</button>
+          ? <button onClick={() => setShowAdd(true)} className="flex items-center gap-1 rounded-md bg-[var(--amber-dim)] px-2.5 py-1 text-xs text-[var(--amber-text)] transition-colors hover:bg-[var(--amber-subtle)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Plus size={12} /> Add row</button>
+          : <button onClick={() => setShowAdd(false)} className="rounded-md px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-background/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Cancel</button>
         }
       </div>
     </div>

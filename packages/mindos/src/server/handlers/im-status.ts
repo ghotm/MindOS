@@ -1,6 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import {
+  CHANNEL_CAPABILITIES,
+  isChannelPlatform,
+  validateChannelCredentials,
+} from '../channel-contract.js';
 import { json, type MindosServerResponse } from '../response.js';
 import type { ImPlatform } from './im-activity.js';
 
@@ -13,12 +18,27 @@ export type ImWebhookStatus = {
   lastError?: string;
 };
 
+export type ImOAuthStatus = {
+  state: 'disconnected' | 'pending' | 'connected';
+  expiresAt?: string;
+  user?: {
+    name?: string;
+    en_name?: string;
+    avatar_url?: string;
+    open_id?: string;
+    union_id?: string;
+    user_id?: string;
+    email?: string;
+  };
+};
+
 export type ImStatusPlatform = {
   platform: ImPlatform;
   connected: boolean;
   botName?: string;
   capabilities: string[];
   webhook?: ImWebhookStatus;
+  oauth?: ImOAuthStatus;
 };
 
 export type ImStatusConfig = {
@@ -31,31 +51,10 @@ export type ImStatusServices = {
   listConfiguredIM?(): Promise<ImStatusPlatform[]>;
   getPlatformConfig?(platform: ImPlatform): unknown;
   buildFeishuWebhookStatus?(config: unknown): ImWebhookStatus;
+  buildFeishuOAuthStatus?(config: unknown): ImOAuthStatus;
 };
 
 const DEFAULT_IM_CONFIG_PATH = join(homedir(), '.mindos', 'im.json');
-
-const PLATFORM_CAPABILITIES: Record<ImPlatform, string[]> = {
-  telegram: ['text', 'markdown'],
-  discord: ['text', 'markdown'],
-  feishu: ['text', 'markdown'],
-  slack: ['text', 'markdown'],
-  wecom: ['text', 'markdown'],
-  dingtalk: ['text', 'markdown'],
-  wechat: ['text'],
-  qq: ['text'],
-};
-
-const CONFIG_REQUIRED_FIELDS: Record<ImPlatform, string[][]> = {
-  telegram: [['bot_token']],
-  discord: [['bot_token']],
-  feishu: [['app_id', 'app_secret']],
-  slack: [['bot_token']],
-  wecom: [['webhook_key'], ['corp_id', 'corp_secret']],
-  dingtalk: [['webhook_url'], ['client_id', 'client_secret']],
-  wechat: [['bot_token']],
-  qq: [['app_id', 'app_secret']],
-};
 
 export async function handleImStatusGet(
   services: ImStatusServices = {},
@@ -73,11 +72,13 @@ export async function handleImStatusGet(
     const platforms = await listConfiguredIM();
     const getPlatformConfig = services.getPlatformConfig ?? ((platform: ImPlatform) => readConfig(services).providers[platform]);
     const buildFeishuWebhookStatus = services.buildFeishuWebhookStatus ?? defaultBuildFeishuWebhookStatus;
+    const buildFeishuOAuthStatus = services.buildFeishuOAuthStatus ?? defaultBuildFeishuOAuthStatus;
     const feishuConfig = getPlatformConfig('feishu');
     const feishuWebhook = buildFeishuWebhookStatus(feishuConfig);
+    const feishuOAuth = buildFeishuOAuthStatus(feishuConfig);
     const enriched = platforms.map((platform) => (
       platform.platform === 'feishu'
-        ? { ...platform, webhook: feishuWebhook }
+        ? { ...platform, webhook: feishuWebhook, oauth: feishuOAuth }
         : platform
     ));
 
@@ -101,23 +102,55 @@ export function handleImWebhookStatusGet(
   return json({ status: buildFeishuWebhookStatus(getPlatformConfig('feishu')) });
 }
 
+function defaultBuildFeishuOAuthStatus(config: unknown): ImOAuthStatus {
+  const feishuConfig = config && typeof config === 'object' ? config as Record<string, any> : undefined;
+  const oauth = feishuConfig?.oauth && typeof feishuConfig.oauth === 'object'
+    ? feishuConfig.oauth as Record<string, any>
+    : undefined;
+
+  if (!oauth) return { state: 'disconnected' };
+  if (oauth.status === 'connected') {
+    return {
+      state: 'connected',
+      expiresAt: typeof oauth.expires_at === 'string' ? oauth.expires_at : undefined,
+      user: pickOAuthUser(oauth.user),
+    };
+  }
+  if (oauth.pending && typeof oauth.pending === 'object') {
+    return {
+      state: 'pending',
+      expiresAt: typeof oauth.pending.expires_at === 'string' ? oauth.pending.expires_at : undefined,
+    };
+  }
+  return { state: 'disconnected' };
+}
+
+function pickOAuthUser(raw: unknown): ImOAuthStatus['user'] {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const source = raw as Record<string, unknown>;
+  const user: NonNullable<ImOAuthStatus['user']> = {};
+  for (const key of ['name', 'en_name', 'avatar_url', 'open_id', 'union_id', 'user_id', 'email'] as const) {
+    const value = source[key];
+    if (typeof value === 'string' && value) user[key] = value;
+  }
+  return Object.keys(user).length > 0 ? user : undefined;
+}
+
 function defaultListConfiguredIM(services: ImStatusServices): ImStatusPlatform[] {
   const config = readConfig(services);
   const platforms = Object.keys(config.providers).filter((platform) => isConfiguredPlatform(platform, config)) as ImPlatform[];
   return platforms.map((platform) => ({
     platform,
     connected: false,
-    capabilities: PLATFORM_CAPABILITIES[platform] ?? ['text'],
+    capabilities: CHANNEL_CAPABILITIES[platform] ?? ['text'],
   }));
 }
 
 function isConfiguredPlatform(platform: string, config: ImStatusConfig): platform is ImPlatform {
-  if (!(platform in CONFIG_REQUIRED_FIELDS)) return false;
+  if (!isChannelPlatform(platform)) return false;
   const platformConfig = config.providers[platform];
   if (!platformConfig || typeof platformConfig !== 'object') return false;
-  return CONFIG_REQUIRED_FIELDS[platform as ImPlatform].some((fields) => (
-    fields.every((field) => typeof (platformConfig as Record<string, unknown>)[field] === 'string' && Boolean((platformConfig as Record<string, string>)[field]?.trim()))
-  ));
+  return validateChannelCredentials(platform, platformConfig).valid;
 }
 
 function defaultBuildFeishuWebhookStatus(config: unknown): ImWebhookStatus {

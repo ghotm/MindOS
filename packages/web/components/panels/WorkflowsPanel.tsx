@@ -4,8 +4,11 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { Plus, Zap, AlertTriangle, Loader2 } from 'lucide-react';
 import PanelHeader from './PanelHeader';
+import { PANEL_NAV_STACK_CLASS } from './PanelNavRow';
 import { useLocale } from '@/lib/stores/locale-store';
 import { encodePath, relativeTime } from '@/lib/utils';
+import { openTab } from '@/lib/workspace-tabs';
+import { shouldHandleSmoothNavigation, useSmoothRouterPush } from '@/hooks/useSmoothRouterPush';
 
 interface WorkflowItem {
   path: string;
@@ -24,6 +27,7 @@ interface WorkflowsPanelProps {
 }
 
 export default function WorkflowsPanel({ active, maximized, onMaximize }: WorkflowsPanelProps) {
+  const smoothPush = useSmoothRouterPush();
   const { t } = useLocale();
   const wt = t.panels.workflows as {
     title: string;
@@ -87,7 +91,10 @@ export default function WorkflowsPanel({ active, maximized, onMaximize }: Workfl
       setShowCreate(false);
       setNewName('');
       await fetchWorkflows();
-      window.location.href = `/view/${encodePath(data.path)}`;
+      if (typeof data.path === 'string' && data.path.length > 0) {
+        openTab('doc', data.path, data.path.split('/').pop() || data.path);
+        smoothPush(`/view/${encodePath(data.path)}`);
+      }
     } catch {
       setCreateError('Network error');
     } finally {
@@ -100,7 +107,7 @@ export default function WorkflowsPanel({ active, maximized, onMaximize }: Workfl
       <PanelHeader title={wt.title} maximized={maximized} onMaximize={onMaximize}>
         <button
           onClick={() => setShowCreate(v => !v)}
-          className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors focus-visible:ring-1 focus-visible:ring-ring"
+          className="hit-target-box p-1 text-muted-foreground hover:text-foreground transition-colors focus-visible:ring-1 focus-visible:ring-ring [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-sm)]"
           aria-label={wt.newWorkflow}
           title={wt.newWorkflow}
         >
@@ -108,7 +115,7 @@ export default function WorkflowsPanel({ active, maximized, onMaximize }: Workfl
         </button>
       </PanelHeader>
 
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div className="sidebar-scroll-area flex-1 overflow-y-auto min-h-0">
         {/* Create form */}
         {showCreate && (
           <div className="px-3 py-3 border-b border-border">
@@ -128,14 +135,14 @@ export default function WorkflowsPanel({ active, maximized, onMaximize }: Workfl
             <div className="flex gap-2 mt-2.5">
               <button
                 onClick={() => { setShowCreate(false); setNewName(''); setCreateError(''); }}
-                className="flex-1 px-3 py-1.5 text-xs rounded-md border border-border text-muted-foreground hover:bg-muted transition-colors"
+                className="hit-target-box flex-1 px-3 py-1.5 text-xs border border-transparent text-muted-foreground transition-colors [--hit-target-hover-bg:var(--muted)] [--hit-target-border-width:1px] [--hit-target-border:var(--border)] [--hit-target-hover-border:var(--border)] [--hit-target-radius:var(--radius-md)]"
               >
                 {wt.cancel}
               </button>
               <button
                 onClick={handleCreate}
                 disabled={!newName.trim() || creating}
-                className="flex-1 px-3 py-1.5 text-xs rounded-md font-medium transition-colors disabled:opacity-50 bg-[var(--amber)] text-[var(--amber-foreground)]"
+                className="hit-target-box flex-1 px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 text-[var(--amber-foreground)] [--hit-target-bg:var(--amber)] [--hit-target-hover-bg:var(--amber)] [--hit-target-radius:var(--radius-md)]"
               >
                 {creating ? wt.creating : wt.create}
               </button>
@@ -158,7 +165,7 @@ export default function WorkflowsPanel({ active, maximized, onMaximize }: Workfl
             <p className="text-xs text-muted-foreground/70 mb-4 max-w-[200px]">{wt.emptyDesc}</p>
             <button
               onClick={() => setShowCreate(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md font-medium bg-[var(--amber)] text-[var(--amber-foreground)] transition-colors"
+              className="hit-target-box inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[var(--amber-foreground)] transition-colors [--hit-target-bg:var(--amber)] [--hit-target-hover-bg:var(--amber)] [--hit-target-radius:var(--radius-md)]"
             >
               <Plus size={12} />
               {wt.newWorkflow}
@@ -168,12 +175,17 @@ export default function WorkflowsPanel({ active, maximized, onMaximize }: Workfl
 
         {/* Workflow list */}
         {!loading && workflows.length > 0 && (
-          <div className="flex flex-col gap-0.5 py-1.5">
+          <div className={PANEL_NAV_STACK_CLASS}>
             {workflows.map(w => (
               <Link
                 key={w.path}
                 href={`/view/${encodePath(w.path)}`}
-                className={`flex items-start gap-2.5 px-3 py-2 mx-1 rounded-lg transition-colors hover:bg-muted ${
+                onClick={(event) => {
+                  if (!shouldHandleSmoothNavigation(event)) return;
+                  event.preventDefault();
+                  smoothPush(`/view/${encodePath(w.path)}`);
+                }}
+                className={`hit-target-box flex items-start gap-2.5 px-3 py-2 mx-1 transition-colors [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-lg)] ${
                   w.error ? 'opacity-70' : ''
                 }`}
               >

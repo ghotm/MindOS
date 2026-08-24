@@ -4,26 +4,16 @@
  */
 
 import { Component } from '../component';
-import { App, Command, IPlugin, PluginManifest, PluginSettingTab, ViewCreator, CodeBlockProcessor, MarkdownPostProcessor } from '../types';
+import type { App, Command, IPlugin, PluginManifest, PluginSettingTab, ViewCreator, CodeBlockProcessor, MarkdownPostProcessor } from '../types';
+import type { ObsidianRuntimeHost } from '../runtime';
+import { createObsidianElement } from './dom';
 import fs from 'fs';
 import path from 'path';
 
-type StubElement = {
-  textContent: string;
-  title: string;
-  addEventListener: (type: string, callback: EventListenerOrEventListenerObject) => void;
-};
+type RuntimeApp = App & { getRuntimeHost?: () => ObsidianRuntimeHost };
 
-function createHostElement(tagName: string): HTMLElement | StubElement {
-  if (typeof document !== 'undefined') {
-    return document.createElement(tagName);
-  }
-
-  return {
-    textContent: '',
-    title: '',
-    addEventListener: () => {},
-  };
+function getRuntimeHost(app: App): ObsidianRuntimeHost | null {
+  return (app as RuntimeApp).getRuntimeHost?.() ?? null;
 }
 
 export class Plugin extends Component implements IPlugin {
@@ -38,6 +28,10 @@ export class Plugin extends Component implements IPlugin {
     this.app = app;
     this.manifest = manifest;
     this.dataFilePath = path.join(pluginDir, 'data.json');
+    if (this.app.plugins) {
+      this.app.plugins.plugins[this.manifest.id] = this;
+      this.app.plugins.enabledPlugins.add(this.manifest.id);
+    }
   }
 
   async loadData(): Promise<unknown> {
@@ -79,33 +73,63 @@ export class Plugin extends Component implements IPlugin {
   }
 
   addRibbonIcon(icon: string, title: string, callback: (evt: MouseEvent) => any): HTMLElement {
-    const el = createHostElement('div');
+    const el = createObsidianElement('button');
     el.textContent = icon;
     el.title = title;
     el.addEventListener('click', callback as EventListener);
-    return el as HTMLElement;
+    getRuntimeHost(this.app)?.registerRibbonIcon(this.manifest.id, icon, title, el, callback);
+    return el;
   }
 
   addStatusBarItem(): HTMLElement {
-    return createHostElement('div') as HTMLElement;
+    const el = createObsidianElement('div');
+    getRuntimeHost(this.app)?.registerStatusBarItem(this.manifest.id, el);
+    return el;
   }
 
   registerView(type: string, creator: ViewCreator): void {
-    void type;
-    void creator;
+    getRuntimeHost(this.app)?.registerView(this.manifest.id, type, creator);
   }
 
   registerExtensions(extensions: string[], viewType: string): void {
-    void extensions;
-    void viewType;
+    getRuntimeHost(this.app)?.registerViewExtensions(this.manifest.id, extensions, viewType);
+  }
+
+  registerHoverLinkSource(source: string, options: unknown): void {
+    this.app.workspace.registerHoverLinkSource?.(source, options);
+  }
+
+  registerEditorExtension(extension: unknown): void {
+    getRuntimeHost(this.app)?.registerEditorExtension(this.manifest.id, extension);
+  }
+
+  registerEditorSuggest(editorSuggest: unknown): void {
+    getRuntimeHost(this.app)?.registerEditorSuggest(this.manifest.id, editorSuggest);
   }
 
   registerMarkdownCodeBlockProcessor(language: string, processor: CodeBlockProcessor): void {
-    void language;
-    void processor;
+    getRuntimeHost(this.app)?.registerMarkdownCodeBlockProcessor(this.manifest.id, language, processor);
   }
 
   registerMarkdownPostProcessor(processor: MarkdownPostProcessor): void {
-    void processor;
+    getRuntimeHost(this.app)?.registerMarkdownPostProcessor(this.manifest.id, processor);
+  }
+
+  registerObsidianProtocolHandler(action: string, handler: (params: Record<string, string>) => unknown): void {
+    void handler;
+    getRuntimeHost(this.app)?.warn({
+      code: 'obsidian-protocol-handler-recorded-only',
+      message: `Plugin "${this.manifest.id}" registered obsidian://${action}; MindOS records protocol handlers as no-ops in Phase 1.`,
+    });
+  }
+
+  registerCliHandler(command: string, description: string, args: unknown, handler: (params: Record<string, string>) => unknown): boolean {
+    void args;
+    void handler;
+    getRuntimeHost(this.app)?.warn({
+      code: 'obsidian-cli-handler-recorded-only',
+      message: `Plugin "${this.manifest.id}" registered CLI handler "${command}" (${description}); MindOS records CLI handlers as no-ops in Phase 1.`,
+    });
+    return true;
   }
 }

@@ -1,18 +1,26 @@
 'use client';
 
 import { useState, useTransition, useCallback, useEffect, useRef, useSyncExternalStore, useMemo, Suspense } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Edit3, Save, X, Loader2, LayoutTemplate, ArrowLeft, Share2, FileText, Code, MoreHorizontal, Copy, Pencil, Trash2, Star, Download, Eye, PanelLeft } from 'lucide-react';
+import { Edit3, Save, X, Loader2, LayoutTemplate, ArrowLeft, Share2, FileText, Code, MoreHorizontal, Copy, Pencil, Trash2, Star, Download, Eye, PanelLeft, PanelRightOpen, Puzzle, ChevronDown, History, ListChecks, Wand2 } from 'lucide-react';
 import { lazy } from 'react';
 import MarkdownView from '@/components/MarkdownView';
 import JsonView from '@/components/JsonView';
 import CsvView from '@/components/CsvView';
 import Backlinks from '@/components/Backlinks';
 import { useRendererState } from '@/lib/renderers/useRendererState';
+import '@/lib/renderers/index';
 import Breadcrumb from '@/components/Breadcrumb';
 import MarkdownEditor, { MdViewMode } from '@/components/MarkdownEditor';
+import LinterFixReviewPanel from '@/components/obsidian/LinterFixReviewPanel';
+import ObsidianLinterProfileMenu from '@/components/obsidian/ObsidianLinterProfileMenu';
 import EditorWrapper from '@/components/EditorWrapper';
-import TableOfContents from '@/components/TableOfContents';
+import TableOfContents, {
+  parseTableOfContentsHeadings,
+  readTableOfContentsCollapsed,
+  subscribeTableOfContentsCollapsed,
+} from '@/components/TableOfContents';
 import FindInPage from '@/components/FindInPage';
 import { resolveRenderer, isRendererEnabled } from '@/lib/renderers/registry';
 import { encodePath } from '@/lib/utils';
@@ -26,6 +34,19 @@ import { usePinnedFiles } from '@/lib/hooks/usePinnedFiles';
 import ExportModal from '@/components/ExportModal';
 import { useEditorTheme } from '@/lib/stores/editor-theme-store';
 import { twemojiToNative } from '@/lib/twemoji';
+import { hasMarkdownFrontmatterFence, splitMarkdownFrontmatter } from '@/lib/parsing/frontmatter';
+import { isPathAffected, notifyFilesChanged, subscribeFilesChanged } from '@/lib/files-changed';
+import { closeByKey, keepTab, openTab } from '@/lib/workspace-tabs';
+import { fetchPluginViewSurfacesForExtension, pluginViewSurfaceHref } from '@/lib/plugins/client';
+import { agentReviewHref } from '@/lib/agent-review-links';
+import { useAgentChangeReview } from '@/hooks/useAgentChangeReview';
+import { refreshPreservingDocumentScroll } from '@/lib/scroll-preservation';
+import {
+  buildObsidianLinterSandboxContributions,
+  previewObsidianLinterFixes,
+} from '@/lib/obsidian-compat/linter-adapter';
+import { useObsidianLinterProfile } from '@/lib/stores/obsidian-linter-profile-store';
+import type { PluginSurface } from '@/lib/plugins/surfaces';
 
 interface ViewPageClientProps {
   filePath: string;
@@ -37,6 +58,128 @@ interface ViewPageClientProps {
   isDraft?: boolean;
   draftDirectories?: string[];
   createDraftAction?: (targetPath: string, content: string) => Promise<void>;
+}
+
+function useDeferredFileBodyReady(filePath: string): boolean {
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    setReady(false);
+    let cancelled = false;
+    let firstFrame: number | null = null;
+    let secondFrame: number | null = null;
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const finish = () => {
+      if (!cancelled) setReady(true);
+    };
+
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      firstFrame = window.requestAnimationFrame(() => {
+        secondFrame = window.requestAnimationFrame(finish);
+      });
+    } else {
+      fallbackTimer = setTimeout(finish, 0);
+    }
+
+    return () => {
+      cancelled = true;
+      if (firstFrame !== null) window.cancelAnimationFrame(firstFrame);
+      if (secondFrame !== null) window.cancelAnimationFrame(secondFrame);
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+    };
+  }, [filePath]);
+
+  return ready;
+}
+
+function FileBodyWarmup({ isMarkdown, editing }: { isMarkdown: boolean; editing: boolean }) {
+  return (
+    <div className="content-width" aria-busy="true" data-file-body-warmup>
+      <div className="space-y-5 animate-pulse">
+        <div className="h-4 w-44 rounded bg-muted/80" />
+        {isMarkdown && editing ? (
+          <div className="h-[52vh] rounded-xl border border-border bg-muted/35" />
+        ) : (
+          <div className="space-y-3">
+            <div className="h-3.5 w-full rounded bg-muted/70" />
+            <div className="h-3.5 w-11/12 rounded bg-muted/70" />
+            <div className="h-3.5 w-3/4 rounded bg-muted/70" />
+            <div className="mt-5 h-28 rounded-lg border border-border/60 bg-muted/35" />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CsvRawSource({ content }: { content: string }) {
+  return (
+    <div data-testid="csv-raw-source" className="rounded-lg border border-border bg-card">
+      <div className="flex h-9 items-center justify-between border-b border-border px-3">
+        <span className="text-xs font-medium text-muted-foreground">CSV source</span>
+        <span className="text-2xs font-mono uppercase tracking-[0.08em] text-muted-foreground/60">raw</span>
+      </div>
+      <pre className="max-h-[70vh] overflow-auto px-4 py-3 text-xs leading-relaxed text-foreground">
+        <code className="font-mono whitespace-pre">{content || ''}</code>
+      </pre>
+    </div>
+  );
+}
+
+const MARKDOWN_VIEW_MODE_STORAGE_KEY = 'md-view-mode';
+
+function normalizeMarkdownModePreference(value: string | null): MdViewMode {
+  if (value === 'preview' || value === 'source' || value === 'wysiwyg') return value;
+  return 'wysiwyg';
+}
+
+function readMarkdownModePreference(): MdViewMode {
+  if (typeof window === 'undefined') return 'wysiwyg';
+  return normalizeMarkdownModePreference(window.localStorage.getItem(MARKDOWN_VIEW_MODE_STORAGE_KEY));
+}
+
+function hasUnsafeMarkdownFrontmatterFence(content: string): boolean {
+  return hasMarkdownFrontmatterFence(content) && splitMarkdownFrontmatter(content).frontmatter === null;
+}
+
+function resolveMarkdownStartState(
+  isBinaryFile: boolean,
+  isMarkdown: boolean,
+  initialEditing: boolean,
+  content: string,
+): { editing: boolean; mode: MdViewMode } {
+  if (isBinaryFile || !isMarkdown) {
+    return { editing: !isBinaryFile && (initialEditing || content === ''), mode: 'wysiwyg' };
+  }
+
+  const preferredMode = readMarkdownModePreference();
+  const hasUnsafeFrontmatter = hasUnsafeMarkdownFrontmatterFence(content);
+  const mustEdit = initialEditing || content === '';
+
+  if (mustEdit) {
+    return { editing: true, mode: preferredMode === 'source' || hasUnsafeFrontmatter ? 'source' : 'wysiwyg' };
+  }
+
+  const safeMode = preferredMode === 'wysiwyg' && hasUnsafeFrontmatter ? 'source' : preferredMode;
+  return { editing: safeMode !== 'preview', mode: safeMode };
+}
+
+function scheduleViewIdleWork(callback: () => void): () => void {
+  const idleWindow = typeof window !== 'undefined'
+    ? window as Window & typeof globalThis & {
+      requestIdleCallback?: (cb: IdleRequestCallback, options?: IdleRequestOptions) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    }
+    : null;
+
+  if (idleWindow?.requestIdleCallback) {
+    const handle = idleWindow.requestIdleCallback(() => callback(), { timeout: 800 });
+    return () => idleWindow.cancelIdleCallback?.(handle);
+  }
+
+  const handle = setTimeout(callback, 0);
+  return () => clearTimeout(handle);
 }
 
 export default function ViewPageClient({
@@ -53,6 +196,8 @@ export default function ViewPageClient({
   const { t } = useLocale();
   const { isPinned, togglePin } = usePinnedFiles();
   const pinned = isPinned(filePath);
+  const agentReview = useAgentChangeReview({ path: filePath, enabled: !isDraft, limit: 40 });
+  const hasPendingAgentReview = agentReview.unreadAgentCount > 0;
   const [exportOpen, setExportOpen] = useState(false);
   const editorTheme = useEditorTheme(s => s.theme);
   const hydrated = useSyncExternalStore(
@@ -71,15 +216,41 @@ export default function ViewPageClient({
     'mp4', 'webm', 'mov', 'mkv',
   ].includes(extension);
   const isMarkdown = extension === 'md';
+  const isCsv = extension === 'csv';
+  const isCsvLiveSurface = isCsv && !isDraft;
+  const fileBodyReady = useDeferredFileBodyReady(filePath);
   const [editing, setEditing] = useState(() => {
-    if (isBinaryFile) return false;
-    // Always start in Edit for empty/new files regardless of persisted mode
-    if (initialEditing || content === '') return true;
-    if (isMarkdown && typeof window !== 'undefined' && localStorage.getItem('md-view-mode') === 'preview') return false;
-    return isMarkdown;
+    if (isCsvLiveSurface) return false;
+    return resolveMarkdownStartState(isBinaryFile, isMarkdown, initialEditing, content).editing;
   });
   const [editContent, setEditContent] = useState(content);
   const [savedContent, setSavedContent] = useState(content);
+  const normalizedSavedMarkdown = useMemo(
+    () => isMarkdown && fileBodyReady ? twemojiToNative(savedContent) : savedContent,
+    [isMarkdown, fileBodyReady, savedContent],
+  );
+  const keepCurrentTab = useCallback(() => {
+    keepTab(`doc:${filePath}`);
+  }, [filePath]);
+  const keepDocTab = useCallback((targetPath: string) => {
+    openTab('doc', targetPath, targetPath.split('/').pop() || targetPath);
+  }, []);
+  const retargetKeptDocTab = useCallback((oldPath: string, newPath: string) => {
+    closeByKey('doc', oldPath);
+    keepDocTab(newPath);
+  }, [keepDocTab]);
+  const selfSavedPathsRef = useRef<Set<string>>(new Set());
+  const notifySelfSavedFile = useCallback((targetPath = filePath) => {
+    selfSavedPathsRef.current.add(targetPath);
+    notifyFilesChanged([targetPath]);
+  }, [filePath]);
+  const refreshCurrentView = useCallback((options: { preserveScroll?: boolean } = {}) => {
+    if (options.preserveScroll) {
+      refreshPreservingDocumentScroll(() => router.refresh());
+      return;
+    }
+    router.refresh();
+  }, [router]);
 
   // Sync savedContent when server re-renders with new content (e.g. after router.refresh)
   const serverContentRef = useRef(content);
@@ -118,9 +289,11 @@ export default function ViewPageClient({
         if (!mountedRef.current) return;
         setAutoSaveStatus('saving');
         const cleanContent = twemojiToNative(editContent);
+        keepCurrentTab();
         await saveAction(cleanContent);
         if (!mountedRef.current) return;
         setSavedContent(cleanContent);
+        notifySelfSavedFile();
         setAutoSaveStatus('saved');
         setTimeout(() => {
           if (mountedRef.current) setAutoSaveStatus('idle');
@@ -134,17 +307,38 @@ export default function ViewPageClient({
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
-  }, [editContent, savedContent, editing, isMarkdown, isDraft, saveAction]);
+  }, [editContent, savedContent, editing, isMarkdown, isDraft, saveAction, keepCurrentTab, notifySelfSavedFile]);
   const [mdViewMode, setMdViewModeState] = useState<MdViewMode>(() => {
-    if (typeof window === 'undefined') return 'wysiwyg';
-    const stored = localStorage.getItem('md-view-mode');
-    if (stored === 'wysiwyg' || stored === 'source' || stored === 'preview') return stored;
-    return 'wysiwyg';
+    return resolveMarkdownStartState(isBinaryFile, isMarkdown, initialEditing, content).mode;
   });
-  const setMdViewMode = (mode: MdViewMode) => {
+  const setMdViewMode = useCallback((mode: MdViewMode) => {
     setMdViewModeState(mode);
-    localStorage.setItem('md-view-mode', mode);
-  };
+    localStorage.setItem(MARKDOWN_VIEW_MODE_STORAGE_KEY, mode);
+  }, []);
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const modeButtonRef = useRef<HTMLButtonElement>(null);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
+  const obsidianLinterProfile = useObsidianLinterProfile();
+  const [linterPreviewEnabled, setLinterPreviewEnabled] = useState(false);
+  const [linterFixReviewOpen, setLinterFixReviewOpen] = useState(false);
+  const previousFilePathRef = useRef(filePath);
+  useEffect(() => {
+    if (previousFilePathRef.current === filePath) return;
+    previousFilePathRef.current = filePath;
+    serverContentRef.current = content;
+    setEditContent(content);
+    setSavedContent(content);
+    setSaveError(null);
+    setSaveSuccess(false);
+    setAutoSaveStatus('idle');
+    setGraphMode(false);
+    setModeMenuOpen(false);
+    setLinterPreviewEnabled(false);
+    setLinterFixReviewOpen(false);
+    const nextMarkdownState = resolveMarkdownStartState(isBinaryFile, isMarkdown, initialEditing, content);
+    setMdViewModeState(nextMarkdownState.mode);
+    setEditing(isCsvLiveSurface ? false : nextMarkdownState.editing);
+  }, [content, filePath, initialEditing, isBinaryFile, isCsvLiveSurface, isMarkdown]);
   const [findOpen, setFindOpen] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -175,6 +369,20 @@ export default function ViewPageClient({
     return () => { document.removeEventListener('mousedown', handler); document.removeEventListener('keydown', keyHandler); };
   }, [moreOpen]);
 
+  useEffect(() => {
+    if (!modeMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (
+        modeButtonRef.current && !modeButtonRef.current.contains(e.target as Node) &&
+        modeMenuRef.current && !modeMenuRef.current.contains(e.target as Node)
+      ) setModeMenuOpen(false);
+    };
+    const keyHandler = (e: KeyboardEvent) => { if (e.key === 'Escape') setModeMenuOpen(false); };
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('keydown', keyHandler);
+    return () => { document.removeEventListener('mousedown', handler); document.removeEventListener('keydown', keyHandler); };
+  }, [modeMenuOpen]);
+
   const handleCopyPath = useCallback(() => {
     navigator.clipboard.writeText(filePath).catch(() => {});
     setMoreOpen(false);
@@ -194,12 +402,13 @@ export default function ViewPageClient({
       const result = await renameFileAction(filePath, newName);
       setRenaming(false);
       if (result.success && result.newPath) {
+        retargetKeptDocTab(filePath, result.newPath);
         router.push(`/view/${encodePath(result.newPath)}`);
-        router.refresh();
-        window.dispatchEvent(new Event('mindos:files-changed'));
+        refreshCurrentView();
+        notifyFilesChanged([filePath, result.newPath]);
       }
     });
-  }, [renameValue, filePath, router]);
+  }, [renameValue, filePath, router, retargetKeptDocTab, refreshCurrentView]);
 
   const handleConfirmDelete = useCallback(() => {
     setShowDeleteConfirm(false);
@@ -212,19 +421,19 @@ export default function ViewPageClient({
           toast.undo(`${t.trash?.movedToTrash ?? 'Deleted'} ${fileName}`, async () => {
             const undo = await undoDeleteAction(trashId);
             if (undo.success) {
-              router.refresh();
-              window.dispatchEvent(new Event('mindos:files-changed'));
+              refreshCurrentView();
+              notifyFilesChanged([filePath]);
             } else {
               toast.error(undo.error ?? 'Undo failed');
             }
           }, { label: t.trash?.undo ?? 'Undo' });
         }
         router.push('/');
-        router.refresh();
-        window.dispatchEvent(new Event('mindos:files-changed'));
+        refreshCurrentView();
+        notifyFilesChanged([filePath]);
       }
     });
-  }, [filePath, router, t]);
+  }, [filePath, router, t, refreshCurrentView]);
 
   // Keep first paint deterministic between server and client to avoid hydration mismatch.
   const effectiveUseRaw = hydrated ? useRaw : false;
@@ -245,9 +454,38 @@ export default function ViewPageClient({
     ? resolveRenderer(filePath, extension, 'graph')
     : undefined;
   const renderer = graphRenderer || registryRenderer;
-  const isCsv = extension === 'csv';
   // Graph mode overrides Raw — when graph is active, always show the renderer
   const showRenderer = !editing && !!renderer && (!effectiveUseRaw || !!graphRenderer);
+  const showCsvRawSource = isCsvLiveSurface && effectiveUseRaw && !editing;
+  const [pluginViewSurfaces, setPluginViewSurfaces] = useState<PluginSurface[]>([]);
+  const shouldShowPluginViewEntry = !editing && !isDraft && pluginViewSurfaces.length > 0;
+  const fileExtensionLabel = extension ? `.${extension.trim().replace(/^\.+/, '').toLowerCase()}` : 'this file';
+  const visiblePluginViewSurfaces = pluginViewSurfaces.slice(0, 2);
+  const pluginViewOverflowCount = Math.max(0, pluginViewSurfaces.length - visiblePluginViewSurfaces.length);
+
+  useEffect(() => {
+    if (!extension || isBinaryFile || isDraft || editing) {
+      setPluginViewSurfaces([]);
+      return;
+    }
+
+    let cancelled = false;
+    const cancelIdleWork = scheduleViewIdleWork(() => {
+      if (cancelled) return;
+      fetchPluginViewSurfacesForExtension(extension)
+        .then((surfaces) => {
+          if (!cancelled) setPluginViewSurfaces(surfaces);
+        })
+        .catch(() => {
+          if (!cancelled) setPluginViewSurfaces([]);
+        });
+    });
+
+    return () => {
+      cancelled = true;
+      cancelIdleWork();
+    };
+  }, [editing, extension, isBinaryFile, isDraft]);
 
   // Lazily resolve the renderer component for code-splitting
   const LazyComponent = useMemo(() => {
@@ -258,20 +496,25 @@ export default function ViewPageClient({
   }, [renderer]);
 
   const handleEdit = useCallback(() => {
+    keepCurrentTab();
     setEditContent(savedContent);
+    if (isMarkdown && hasUnsafeMarkdownFrontmatterFence(savedContent)) {
+      setMdViewMode('source');
+    }
     setEditing(true);
     setSaveError(null);
     setSaveSuccess(false);
-  }, [savedContent]);
+  }, [isMarkdown, savedContent, setMdViewMode, keepCurrentTab]);
 
   const handleCancel = useCallback(() => {
     if (isDraft) {
+      closeByKey('doc', filePath);
       router.push('/');
       return;
     }
     setEditing(false);
     setSaveError(null);
-  }, [isDraft, router]);
+  }, [isDraft, filePath, router]);
 
   const handleConfirmDraftSave = useCallback(() => {
     const trimmed = saveName.trim();
@@ -296,21 +539,23 @@ export default function ViewPageClient({
     startTransition(async () => {
       try {
         await createDraftAction(targetPath, editContent);
+        retargetKeptDocTab(filePath, targetPath);
         setSavedContent(editContent);
         setEditing(false);
         setShowSaveAs(false);
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 2500);
         router.push(`/view/${encodePath(targetPath)}`);
-        router.refresh();
+        refreshCurrentView();
+        notifyFilesChanged([targetPath]);
       } catch (err) {
         setSaveError(err instanceof Error ? err.message : 'Failed to save');
       }
     });
-  }, [saveName, createDraftAction, saveDir, editContent, router]);
+  }, [saveName, createDraftAction, saveDir, editContent, filePath, router, retargetKeptDocTab, refreshCurrentView]);
 
   const handleSave = useCallback(() => {
-    if (isCsv) {
+    if (isCsvLiveSurface) {
       setEditing(false);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2500);
@@ -326,8 +571,10 @@ export default function ViewPageClient({
     startTransition(async () => {
       try {
         const cleanContent = twemojiToNative(editContent);
+        keepCurrentTab();
         await saveAction(cleanContent);
         setSavedContent(cleanContent);
+        notifySelfSavedFile();
         // Markdown auto-save: Ctrl+S saves but stays in edit mode
         if (!isMarkdown) {
           setEditing(false);
@@ -338,13 +585,140 @@ export default function ViewPageClient({
         setSaveError(err instanceof Error ? err.message : 'Failed to save');
       }
     });
-  }, [isCsv, isDraft, isMarkdown, saveAction, editContent]);
+  }, [isCsvLiveSurface, isDraft, isMarkdown, saveAction, editContent, keepCurrentTab, notifySelfSavedFile]);
 
   // Renderer's inline save — updates local savedContent without entering edit mode
   const handleRendererSave = useCallback(async (newContent: string) => {
-    await saveAction(newContent);
-    setSavedContent(newContent);
-  }, [saveAction]);
+    setSaveError(null);
+    try {
+      keepCurrentTab();
+      await saveAction(newContent);
+      setSavedContent(newContent);
+      notifySelfSavedFile();
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2500);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save');
+      throw err;
+    }
+  }, [saveAction, keepCurrentTab, notifySelfSavedFile]);
+
+  const handleMarkdownModeSelect = useCallback((mode: 'wysiwyg' | 'preview' | 'source') => {
+    setModeMenuOpen(false);
+    startTransition(() => {
+      if (mode === 'preview') {
+        setMdViewMode('preview');
+        if (editing) {
+          const clean = twemojiToNative(editContent);
+          setSavedContent(clean);
+          if (clean !== savedContent) {
+            keepCurrentTab();
+            saveAction(clean)
+              .then(() => notifySelfSavedFile())
+              .catch(() => {});
+          }
+          setEditing(false);
+        }
+        return;
+      }
+
+      const source = editing ? editContent : savedContent;
+      const nextMode = mode === 'wysiwyg' && hasUnsafeMarkdownFrontmatterFence(source)
+        ? 'source'
+        : mode;
+      setMdViewMode(nextMode);
+      if (!editing) {
+        keepCurrentTab();
+        setEditContent(savedContent);
+        setEditing(true);
+      }
+    });
+  }, [editContent, editing, keepCurrentTab, notifySelfSavedFile, saveAction, savedContent, setMdViewMode]);
+
+  const markdownModeOptions = useMemo(() => ([
+    { id: 'wysiwyg' as const, icon: <Pencil size={13} />, label: 'Edit' },
+    { id: 'preview' as const, icon: <Eye size={13} />, label: 'View' },
+    { id: 'source' as const, icon: <PanelLeft size={13} />, label: 'Source' },
+  ]), []);
+  const activeMarkdownMode = !editing
+    ? 'preview'
+    : (mdViewMode === 'source' ? 'source' : 'wysiwyg');
+  const activeMarkdownModeOption = markdownModeOptions.find(option => option.id === activeMarkdownMode) ?? markdownModeOptions[0];
+  const canShowLinterPreview = isMarkdown && editing && mdViewMode === 'source' && !isDraft;
+  useEffect(() => {
+    if (!canShowLinterPreview && linterPreviewEnabled) {
+      setLinterPreviewEnabled(false);
+    }
+  }, [canShowLinterPreview, linterPreviewEnabled]);
+  const linterPreview = useMemo(() => {
+    if (!canShowLinterPreview || !linterPreviewEnabled) return null;
+    return buildObsidianLinterSandboxContributions(editContent, {
+      profile: obsidianLinterProfile,
+    });
+  }, [canShowLinterPreview, editContent, linterPreviewEnabled, obsidianLinterProfile]);
+  const linterSandboxContributions = linterPreview?.contributions ?? [];
+  const linterIssueCountLabel = linterPreview
+    ? `${linterPreview.issues.length}${linterPreview.skipped.length > 0 ? '+' : ''}`
+    : '';
+  const hasFixableLinterIssues = Boolean(
+    linterPreview
+    && linterPreview.skipped.length === 0
+    && linterPreview.issues.some(issue => issue.fixable),
+  );
+  const linterFixPreview = useMemo(() => {
+    if (!canShowLinterPreview || !linterPreviewEnabled || !hasFixableLinterIssues) return null;
+    const preview = previewObsidianLinterFixes(editContent, {
+      profile: obsidianLinterProfile,
+    });
+    return preview.changed ? preview : null;
+  }, [canShowLinterPreview, editContent, hasFixableLinterIssues, linterPreviewEnabled, obsidianLinterProfile]);
+  const canReviewLinterFixes = Boolean(linterFixPreview);
+  useEffect(() => {
+    if (!canReviewLinterFixes && linterFixReviewOpen) {
+      setLinterFixReviewOpen(false);
+    }
+  }, [canReviewLinterFixes, linterFixReviewOpen]);
+  const handleApplyReviewedLinterFixes = useCallback(() => {
+    if (!linterFixPreview) return;
+    const previousMarkdown = editContent;
+    const nextMarkdown = linterFixPreview.markdown;
+    if (nextMarkdown === previousMarkdown) return;
+    keepCurrentTab();
+    setSaveError(null);
+    setEditContent(nextMarkdown);
+    setAutoSaveStatus('idle');
+    setLinterFixReviewOpen(false);
+    const fixCount = linterFixPreview.fixCount;
+    toast.undo(`Applied ${fixCount} Linter fix${fixCount === 1 ? '' : 'es'}`, () => {
+      keepCurrentTab();
+      setSaveError(null);
+      setEditContent(previousMarkdown);
+      setAutoSaveStatus('idle');
+      setLinterPreviewEnabled(true);
+    }, { label: 'Undo' });
+  }, [editContent, keepCurrentTab, linterFixPreview]);
+  const tocCollapsed = useSyncExternalStore(
+    subscribeTableOfContentsCollapsed,
+    readTableOfContentsCollapsed,
+    () => false,
+  );
+  const markdownTocHeadings = useMemo(() => {
+    if (!fileBodyReady || !isMarkdown || showRenderer) return [];
+    if (editing) {
+      if (mdViewMode === 'source') return [];
+      return parseTableOfContentsHeadings(editContent);
+    }
+    return parseTableOfContentsHeadings(normalizedSavedMarkdown);
+  }, [editContent, editing, fileBodyReady, isMarkdown, mdViewMode, normalizedSavedMarkdown, showRenderer]);
+  const hasMarkdownToc = markdownTocHeadings.length >= 2;
+  const markdownFrameClassName = hasMarkdownToc
+    ? tocCollapsed
+      ? 'content-width markdown-view-frame markdown-view-frame--toc-collapsed'
+      : 'content-width markdown-view-frame markdown-view-frame--with-toc'
+    : 'content-width markdown-view-frame';
+  const shouldRenderToc = hasMarkdownToc;
+  const shouldRenderEditingToc = shouldRenderToc && mdViewMode !== 'source';
+  const markdownBodyClassName = 'markdown-view-body';
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -357,14 +731,14 @@ export default function ViewPageClient({
         e.preventDefault();
         setFindOpen(true);
       }
-      if (key === 'e' && !editing && !isBinaryFile && document.activeElement?.tagName === 'BODY') {
+      if (key === 'e' && !editing && !isBinaryFile && !isCsvLiveSurface && document.activeElement?.tagName === 'BODY') {
         handleEdit();
       }
       if (e.key === 'Escape' && editing && !isMarkdown) handleCancel();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [editing, handleSave, handleEdit, handleCancel]);
+  }, [editing, handleSave, handleEdit, handleCancel, isCsvLiveSurface, isBinaryFile, isMarkdown]);
 
   // Auto-refresh when AI agent modifies files + compute changed lines for highlight
   const [fileUpdated, setFileUpdated] = useState(false);
@@ -405,32 +779,29 @@ export default function ViewPageClient({
   }, [content, editing]);
 
   useEffect(() => {
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-    const handler = () => {
+    // Coalesced (300ms) files-changed subscription: AI may write multiple
+    // files in sequence. Skips the router.refresh() entirely when the event
+    // declares paths and none of them are the file being viewed.
+    return subscribeFilesChanged((paths) => {
+      if (paths && isPathAffected(paths, filePath) && selfSavedPathsRef.current.delete(filePath)) return;
       if (editing) return;
-      // Debounce rapid file changes (AI may write multiple files in sequence)
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        aiTriggeredRef.current = true;
-        router.refresh();
-        setFileUpdated(true);
-        if (updatedTimerRef.current) clearTimeout(updatedTimerRef.current);
-        updatedTimerRef.current = setTimeout(() => setFileUpdated(false), 3000);
-      }, 300);
-    };
-    window.addEventListener('mindos:files-changed', handler);
-    return () => {
-      window.removeEventListener('mindos:files-changed', handler);
-      if (debounceTimer) clearTimeout(debounceTimer);
-    };
-  }, [editing, router]);
+      aiTriggeredRef.current = true;
+      refreshCurrentView({ preserveScroll: paths === undefined });
+      setFileUpdated(true);
+      if (updatedTimerRef.current) clearTimeout(updatedTimerRef.current);
+      updatedTimerRef.current = setTimeout(() => setFileUpdated(false), 3000);
+    }, { isRelevant: (paths) => isPathAffected(paths, filePath) });
+  }, [editing, refreshCurrentView, filePath]);
 
   return (
-    <div className="flex flex-col min-h-screen">
+    <div className="flex flex-col min-h-[calc(100vh-var(--app-titlebar-h))]">
       {/* Top bar */}
-      <div className="sticky top-[52px] md:top-0 z-20 border-b border-border px-4 md:px-6 h-[46px] flex items-center" style={{ background: 'var(--background)' }}>
-        <div className="w-full min-w-0 flex items-center justify-between gap-3 h-full">
-          <div className="min-w-0 flex-1 flex items-center gap-1.5">
+      <div
+        className="view-page-topbar sticky top-[52px] md:top-0 z-20 border-b border-border px-4 md:px-6 h-[var(--workspace-header-h)] flex items-center"
+        style={{ background: 'var(--background)' }}
+      >
+        <div className="view-header-row w-full min-w-0 flex items-center justify-between gap-3 h-full">
+          <div className="view-header-breadcrumb min-w-0 flex-1 flex items-center gap-1.5">
             <button
               onClick={() => router.back()}
               className="-ml-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors duration-75 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation md:hidden"
@@ -439,6 +810,17 @@ export default function ViewPageClient({
               <ArrowLeft size={16} />
             </button>
             <Breadcrumb filePath={filePath} />
+            {hasPendingAgentReview && (
+              <Link
+                href={agentReviewHref(filePath)}
+                className="ml-1 inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-[var(--amber)]/25 bg-[var(--amber-subtle)] px-2 text-[0.68rem] font-medium text-[var(--amber-text)] transition-colors duration-75 hover:bg-[var(--amber)]/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                title={t.changes.reviewFileAgentChanges}
+              >
+                <History size={12} />
+                <span className="hidden sm:inline">{t.changes.agentEditedChip}</span>
+                <span className="sm:hidden">{t.changes.reviewAgentShort}</span>
+              </Link>
+            )}
           </div>
 
           <div className="flex items-center gap-1.5 md:gap-2 shrink-0">
@@ -471,227 +853,345 @@ export default function ViewPageClient({
               <span className="text-xs text-error hidden sm:inline">{saveError}</span>
             )}
 
-            {/* Renderer toggle — only shown when a custom renderer exists (excludes graph-mode override and binary files) */}
-            {registryRenderer && !editing && !isDraft && !graphRenderer && !isBinaryFile && (
-              <button
-                onClick={handleToggleRaw}
-                className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
-                style={{
-                  background: effectiveUseRaw ? `${'var(--amber)'}22` : 'var(--muted)',
-                  color: effectiveUseRaw ? 'var(--amber)' : 'var(--muted-foreground)',
-                }}
-                title={effectiveUseRaw ? `Switch to ${registryRenderer?.name}` : 'View raw'}
-              >
-                {effectiveUseRaw ? <LayoutTemplate size={13} /> : <Code size={13} />}
-                <span className="hidden sm:inline">{effectiveUseRaw ? registryRenderer.name : 'Raw'}</span>
-              </button>
-            )}
+            <div className="view-header-actions flex items-center gap-1.5 md:gap-2 shrink-0">
+              {/* Renderer toggle — only shown when a custom renderer exists (excludes graph-mode override and binary files) */}
+              {registryRenderer && !editing && !isDraft && !graphRenderer && !isBinaryFile && (
+                <button
+                  onClick={handleToggleRaw}
+                  className="inline-flex h-8 min-w-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-75 hover:bg-card/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
+                  style={{
+                    background: effectiveUseRaw ? `${'var(--amber)'}22` : 'var(--muted)',
+                    color: effectiveUseRaw ? 'var(--amber)' : 'var(--muted-foreground)',
+                  }}
+                  title={effectiveUseRaw ? `Switch to ${registryRenderer?.name}` : (isCsv ? 'View CSV source' : 'View raw')}
+                >
+                  {effectiveUseRaw ? <LayoutTemplate size={13} /> : <Code size={13} />}
+                  <span className="hidden sm:inline">{effectiveUseRaw ? registryRenderer.name : (isCsv ? 'Source' : 'Raw')}</span>
+                </button>
+              )}
 
-            {/* Markdown editing: mode switcher in header */}
-            {isMarkdown && !isDraft && (
-              <div className="flex items-center gap-0.5 rounded-md bg-muted p-0.5">
-                {([
-                  { id: 'wysiwyg' as const, icon: <Pencil size={11} />, label: 'Edit' },
-                  { id: 'source' as const, icon: <PanelLeft size={11} />, label: 'Source' },
-                  { id: 'preview' as const, icon: <Eye size={11} />, label: 'View' },
-                ] as const).map(m => (
+              {/* Markdown editing: mode switcher in header */}
+              {isMarkdown && !isDraft && (
+                <div className="relative">
                   <button
-                    key={m.id}
-                    onClick={() => {
-                      // Use startTransition to mark state updates as non-urgent
-                      startTransition(() => {
-                        setMdViewMode(m.id);
-                        if (m.id === 'preview') {
-                          // Sync latest edit content to savedContent before switching
-                          const clean = twemojiToNative(editContent);
-                          setSavedContent(clean);
-                          if (clean !== savedContent) {
-                            saveAction(clean).catch(() => {});
-                          }
-                          setEditing(false);
-                        } else if (!editing) {
-                          setEditContent(savedContent);
-                          setEditing(true);
-                        }
-                      });
-                    }}
-                    className={`inline-flex h-8 min-w-8 items-center justify-center gap-1 rounded px-2.5 text-[11px] font-medium transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation ${
-                      mdViewMode === m.id
-                        ? 'bg-card text-foreground shadow-sm'
-                        : 'text-muted-foreground hover:bg-card/60 hover:text-foreground'
-                    }`}
+                    ref={modeButtonRef}
+                    type="button"
+                    aria-label="Markdown mode"
+                    aria-haspopup="menu"
+                    aria-expanded={modeMenuOpen}
+                    title="Markdown mode"
+                    onClick={() => setModeMenuOpen(value => !value)}
+                    className="inline-flex h-8 min-w-[5.5rem] items-center justify-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-xs font-medium text-foreground shadow-sm transition-colors duration-75 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
                   >
-                    {m.icon}
-                    <span className="hidden md:inline">{m.label}</span>
+                    {activeMarkdownModeOption.icon}
+                    <span>{activeMarkdownModeOption.label}</span>
+                    <ChevronDown size={12} className={`text-muted-foreground transition-transform duration-150 ${modeMenuOpen ? 'rotate-180' : ''}`} />
                   </button>
-                ))}
-              </div>
-            )}
+                  {modeMenuOpen && (
+                    <div
+                      ref={modeMenuRef}
+                      role="menu"
+                      className="absolute right-0 top-full z-50 mt-1 w-36 rounded-lg border border-border bg-card py-1 shadow-lg"
+                    >
+                      {markdownModeOptions.map(option => {
+                        const active = option.id === activeMarkdownMode;
+                        return (
+                          <button
+                            key={option.id}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={active}
+                            onClick={() => handleMarkdownModeSelect(option.id)}
+                            className="flex min-h-8 w-full items-center gap-2 px-2.5 text-left text-xs text-foreground transition-colors duration-75 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            <span className="flex h-5 w-5 shrink-0 items-center justify-center text-muted-foreground">
+                              {option.icon}
+                            </span>
+                            <span className="flex-1">{option.label}</span>
+                            <span
+                              className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-[var(--amber)]' : 'bg-transparent'}`}
+                              aria-hidden="true"
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
 
-            {/* Editor theme picker — hidden for now, may move to Settings later */}
-
-            {/* Edit button — shown in view mode for non-markdown editable file types */}
-            {!editing && !showRenderer && !isDraft && !isBinaryFile && !isMarkdown && (
-              <button
-                onClick={handleEdit}
-                className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
-                style={{ background: 'var(--muted)', color: 'var(--muted-foreground)' }}
-                onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--foreground)'; e.currentTarget.style.background = 'var(--accent)'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--muted-foreground)'; e.currentTarget.style.background = 'var(--muted)'; }}
-              >
-                <Edit3 size={13} />
-                <span className="hidden sm:inline">Edit</span>
-              </button>
-            )}
-
-            {/* Non-markdown editing: original Cancel + Save buttons */}
-            {editing && !isMarkdown && (
-              <>
-                <button
-                  onClick={handleCancel}
-                  disabled={isPending}
-                  className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-75 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
-                  style={{ background: 'var(--muted)', color: 'var(--muted-foreground)' }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent)'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--muted)'; }}
-                >
-                  <X size={13} />
-                  <span className="hidden sm:inline">Cancel</span>
-                </button>
-                <button
-                  onClick={isDraft && showSaveAs ? handleConfirmDraftSave : handleSave}
-                  disabled={isPending}
-                  className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
-                  style={{ background: 'var(--amber)', color: 'var(--amber-foreground)' }}
-                >
-                  {isPending ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                  <span className="hidden sm:inline">Save</span>
-                </button>
-              </>
-            )}
-            {/* Draft markdown: keep Save/Cancel */}
-            {editing && isMarkdown && isDraft && (
-              <>
-                <button
-                  onClick={handleCancel}
-                  disabled={isPending}
-                  className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-75 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
-                  style={{ background: 'var(--muted)', color: 'var(--muted-foreground)' }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent)'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--muted)'; }}
-                >
-                  <X size={13} />
-                  <span className="hidden sm:inline">Cancel</span>
-                </button>
-                <button
-                  onClick={showSaveAs ? handleConfirmDraftSave : handleSave}
-                  disabled={isPending}
-                  className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
-                  style={{ background: 'var(--amber)', color: 'var(--amber-foreground)' }}
-                >
-                  {isPending ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                  <span className="hidden sm:inline">Save</span>
-                </button>
-              </>
-            )}
-
-            {/* More menu (rename, copy path, delete) */}
-            {!isDraft && (
-              <div className="relative">
+              {canShowLinterPreview && (
                 <button
                   type="button"
-                  onClick={() => togglePin(filePath)}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors duration-75 hover:text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
-                  title={pinned ? t.fileTree.removeFromFavorites : t.fileTree.pinToFavorites}
+                  aria-label="Toggle Linter preview"
+                  aria-pressed={linterPreviewEnabled}
+                  title={linterPreviewEnabled
+                    ? `Hide Linter preview${linterIssueCountLabel ? ` (${linterIssueCountLabel})` : ''}`
+                    : 'Show Linter preview'}
+                  onClick={() => setLinterPreviewEnabled(value => !value)}
+                  className={`inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-medium shadow-sm transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation ${
+                    linterPreviewEnabled
+                      ? 'border-[var(--amber)] bg-[var(--amber-subtle)] text-[var(--amber)]'
+                      : 'border-border bg-card text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+                  }`}
                 >
-                  <Star size={16} className={pinned ? 'fill-[var(--amber)] text-[var(--amber)]' : ''} />
+                  <ListChecks size={13} />
+                  <span className="hidden sm:inline">Lint</span>
+                  {linterPreviewEnabled && linterIssueCountLabel && (
+                    <span className="ml-0.5 inline-flex min-w-4 justify-center rounded-full bg-background/80 px-1 text-2xs font-semibold text-foreground">
+                      {linterIssueCountLabel}
+                    </span>
+                  )}
                 </button>
+              )}
+
+              {canShowLinterPreview && (
+                <ObsidianLinterProfileMenu />
+              )}
+
+              {canShowLinterPreview && canReviewLinterFixes && (
                 <button
-                  ref={moreRef}
                   type="button"
-                  onClick={() => setMoreOpen(v => !v)}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors duration-75 hover:text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
-                  title={t.view?.more ?? 'More'}
+                  aria-label="Review Linter fixes"
+                  title={`Review ${linterFixPreview?.fixCount ?? 0} Linter fix${(linterFixPreview?.fixCount ?? 0) === 1 ? '' : 'es'}`}
+                  onClick={() => setLinterFixReviewOpen(true)}
+                  className="inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground shadow-sm transition-colors duration-75 hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
                 >
-                  <MoreHorizontal size={16} />
+                  <Wand2 size={13} />
+                  <span className="hidden sm:inline">Review</span>
                 </button>
-                {moreOpen && (
-                  <div
-                    ref={moreMenuRef}
-                    className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-card shadow-lg py-1"
+              )}
+
+              {/* Editor theme picker — hidden for now, may move to Settings later */}
+
+              {/* Edit button — shown in view mode for non-markdown editable file types */}
+              {!editing && !showRenderer && !showCsvRawSource && !isDraft && !isBinaryFile && !isMarkdown && !isCsvLiveSurface && (
+                <button
+                  onClick={handleEdit}
+                  className="inline-flex h-8 min-w-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
+                  style={{ background: 'var(--muted)', color: 'var(--muted-foreground)' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--foreground)'; e.currentTarget.style.background = 'var(--accent)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--muted-foreground)'; e.currentTarget.style.background = 'var(--muted)'; }}
+                >
+                  <Edit3 size={13} />
+                  <span className="hidden sm:inline">Edit</span>
+                </button>
+              )}
+
+              {/* Non-markdown editing: original Cancel + Save buttons */}
+              {editing && !isMarkdown && (
+                <>
+                  <button
+                    onClick={handleCancel}
+                    disabled={isPending}
+                    className="inline-flex h-8 min-w-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-75 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
+                    style={{ background: 'var(--muted)', color: 'var(--muted-foreground)' }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent)'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--muted)'; }}
                   >
-                    {extension === 'md' && !editing && !isDraft && isRendererEnabled('graph') && (
-                      <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors text-left" onClick={() => { setMoreOpen(false); handleToggleGraph(); }}>
-                        {effectiveGraphMode ? <FileText size={14} className="shrink-0" /> : <Share2 size={14} className="shrink-0" />}
-                        {effectiveGraphMode ? (t.view?.switchToDoc ?? 'Document view') : (t.view?.switchToGraph ?? 'Wiki Graph')}
+                    <X size={13} />
+                    <span className="hidden sm:inline">Cancel</span>
+                  </button>
+                  <button
+                    onClick={isDraft && showSaveAs ? handleConfirmDraftSave : handleSave}
+                    disabled={isPending}
+                    className="inline-flex h-8 min-w-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
+                    style={{ background: 'var(--amber)', color: 'var(--amber-foreground)' }}
+                  >
+                    {isPending ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+                    <span className="hidden sm:inline">Save</span>
+                  </button>
+                </>
+              )}
+              {/* Draft markdown: keep Save/Cancel */}
+              {editing && isMarkdown && isDraft && (
+                <>
+                  <button
+                    onClick={handleCancel}
+                    disabled={isPending}
+                    className="inline-flex h-8 min-w-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-75 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
+                    style={{ background: 'var(--muted)', color: 'var(--muted-foreground)' }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent)'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--muted)'; }}
+                  >
+                    <X size={13} />
+                    <span className="hidden sm:inline">Cancel</span>
+                  </button>
+                  <button
+                    onClick={showSaveAs ? handleConfirmDraftSave : handleSave}
+                    disabled={isPending}
+                    className="inline-flex h-8 min-w-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
+                    style={{ background: 'var(--amber)', color: 'var(--amber-foreground)' }}
+                  >
+                    {isPending ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+                    <span className="hidden sm:inline">Save</span>
+                  </button>
+                </>
+              )}
+
+              {/* More menu (rename, copy path, delete) */}
+              {!isDraft && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => togglePin(filePath)}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors duration-75 hover:bg-card/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
+                    title={pinned ? t.fileTree.removeFromFavorites : t.fileTree.pinToFavorites}
+                  >
+                    <Star size={16} className={pinned ? 'fill-[var(--amber)] text-[var(--amber)]' : ''} />
+                  </button>
+                  <button
+                    ref={moreRef}
+                    type="button"
+                    onClick={() => setMoreOpen(v => !v)}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors duration-75 hover:bg-card/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
+                    title={t.view?.more ?? 'More'}
+                  >
+                    <MoreHorizontal size={16} />
+                  </button>
+                  {moreOpen && (
+                    <div
+                      ref={moreMenuRef}
+                      className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-card shadow-lg py-1"
+                    >
+                      {extension === 'md' && !editing && !isDraft && isRendererEnabled('graph') && (
+                        <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors text-left" onClick={() => { setMoreOpen(false); handleToggleGraph(); }}>
+                          {effectiveGraphMode ? <FileText size={14} className="shrink-0" /> : <Share2 size={14} className="shrink-0" />}
+                          {effectiveGraphMode ? (t.view?.switchToDoc ?? 'Document view') : (t.view?.switchToGraph ?? 'Wiki Graph')}
+                        </button>
+                      )}
+                      <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors text-left" onClick={() => { setMoreOpen(false); setExportOpen(true); }}>
+                        <Download size={14} className="shrink-0" /> {t.fileTree?.export ?? 'Export'}
                       </button>
-                    )}
-                    <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors text-left" onClick={() => { setMoreOpen(false); setExportOpen(true); }}>
-                      <Download size={14} className="shrink-0" /> {t.fileTree?.export ?? 'Export'}
-                    </button>
-                    <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors text-left" onClick={handleCopyPath}>
-                      <Copy size={14} className="shrink-0" /> {t.view?.copyPath ?? t.fileTree?.copyPath ?? 'Copy Path'}
-                    </button>
-                    <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors text-left" onClick={handleStartRename}>
-                      <Pencil size={14} className="shrink-0" /> {t.view?.rename ?? 'Rename'}
-                    </button>
-                    <div className="my-1 border-t border-border/50" />
-                    <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-error hover:bg-error/10 transition-colors text-left" onClick={() => { setMoreOpen(false); setShowDeleteConfirm(true); }}>
-                      <Trash2 size={14} className="shrink-0" /> {t.view?.delete ?? 'Delete'}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
+                      <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors text-left" onClick={handleCopyPath}>
+                        <Copy size={14} className="shrink-0" /> {t.view?.copyPath ?? t.fileTree?.copyPath ?? 'Copy Path'}
+                      </button>
+                      <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors text-left" onClick={handleStartRename}>
+                        <Pencil size={14} className="shrink-0" /> {t.view?.rename ?? 'Rename'}
+                      </button>
+                      <div className="my-1 border-t border-border/50" />
+                      <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-error hover:bg-error/10 transition-colors text-left" onClick={() => { setMoreOpen(false); setShowDeleteConfirm(true); }}>
+                        <Trash2 size={14} className="shrink-0" /> {t.view?.delete ?? 'Delete'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
+      {shouldShowPluginViewEntry && (
+        <div className="border-b border-border/70 bg-muted/20 px-4 py-2 md:px-6">
+          <div
+            className="content-width flex min-h-11 flex-wrap items-center justify-between gap-2 rounded-lg border border-border/70 bg-card/80 px-3 py-2 shadow-sm"
+            data-testid="plugin-view-extension-entry"
+          >
+            <div className="flex min-w-0 items-center gap-2.5">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--amber-subtle)] text-[var(--amber)]">
+                <Puzzle size={14} />
+              </span>
+              <div className="min-w-0">
+                <div className="truncate text-xs font-semibold text-foreground">Plugin view available</div>
+                <div className="truncate text-2xs text-muted-foreground">
+                  {fileExtensionLabel} can open through an Obsidian-compatible view.
+                </div>
+              </div>
+            </div>
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              {visiblePluginViewSurfaces.map((surface) => {
+                const href = pluginViewSurfaceHref(surface, filePath);
+                if (!href) return null;
+                return (
+                  <a
+                    key={surface.id}
+                    href={href}
+                    className="inline-flex h-8 max-w-[220px] items-center gap-1.5 rounded-md border border-border bg-background px-2.5 text-xs font-medium text-foreground transition-colors duration-75 hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    data-testid="plugin-view-extension-link"
+                    title={`Open ${surface.pluginName}: ${surface.title}`}
+                  >
+                    <PanelRightOpen size={13} className="shrink-0 text-[var(--amber)]" />
+                    <span className="truncate">{surface.pluginName}</span>
+                  </a>
+                );
+              })}
+              {pluginViewOverflowCount > 0 && (
+                <span className="inline-flex h-8 items-center rounded-md border border-border/70 px-2 text-2xs font-medium text-muted-foreground">
+                  +{pluginViewOverflowCount}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Content */}
       <div className="flex-1 py-6 md:py-8">
-        {isMarkdown && !showRenderer ? (
+        {!fileBodyReady ? (
+          <FileBodyWarmup isMarkdown={isMarkdown} editing={editing} />
+        ) : isMarkdown && !showRenderer ? (
           <>
-            {/* Markdown Edit — always mounted, hidden when in View mode */}
-            <div className="content-width" style={{ display: editing ? undefined : 'none' }}>
-              {isDraft && showSaveAs && (
-                <div className="mb-3 rounded-lg border border-border bg-card p-3 flex flex-col gap-2">
-                  <div>
-                    <label className="text-xs text-muted-foreground">{t.view?.saveDirectory ?? 'Directory'}</label>
-                    <div className="mt-1">
-                      <DirPicker
-                        dirPaths={draftDirectories}
-                        value={saveDir}
-                        onChange={setSaveDir}
-                        rootLabel={t.home?.rootLevel ?? 'Root'}
-                      />
+            {editing && (
+              <div className={markdownFrameClassName} data-markdown-view-frame>
+                <div className={markdownBodyClassName}>
+                  {isDraft && showSaveAs && (
+                    <div className="mb-3 rounded-lg border border-border bg-card p-3 flex flex-col gap-2">
+                      <div>
+                        <label className="text-xs text-muted-foreground">{t.view?.saveDirectory ?? 'Directory'}</label>
+                        <div className="mt-1">
+                          <DirPicker
+                            dirPaths={draftDirectories}
+                            value={saveDir}
+                            onChange={setSaveDir}
+                            rootLabel={t.home?.rootLevel ?? 'Root'}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground">{t.view?.saveFileName ?? 'File name'}</label>
+                        <input
+                          value={saveName}
+                          onChange={(e) => setSaveName(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') handleConfirmDraftSave(); }}
+                          className="mt-1 w-full px-2.5 py-1.5 text-sm bg-background border border-border rounded-lg text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          placeholder="Untitled.md"
+                        />
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <label className="text-xs text-muted-foreground">{t.view?.saveFileName ?? 'File name'}</label>
-                    <input
-                      value={saveName}
-                      onChange={(e) => setSaveName(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') handleConfirmDraftSave(); }}
-                      className="mt-1 w-full px-2.5 py-1.5 text-sm bg-background border border-border rounded-lg text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      placeholder="Untitled.md"
+                  )}
+                  {linterFixReviewOpen && linterFixPreview && (
+                    <LinterFixReviewPanel
+                      beforeMarkdown={editContent}
+                      afterMarkdown={linterFixPreview.markdown}
+                      applied={linterFixPreview.applied}
+                      fixCount={linterFixPreview.fixCount}
+                      onApply={handleApplyReviewedLinterFixes}
+                      onClose={() => setLinterFixReviewOpen(false)}
                     />
-                  </div>
+                  )}
+                  <MarkdownEditor
+                    value={editContent}
+                    onChange={setEditContent}
+                    viewMode={mdViewMode}
+                    editorKey={filePath}
+                    sourcePath={filePath}
+                    sandboxContributions={linterSandboxContributions}
+                  />
                 </div>
-              )}
-              <MarkdownEditor
-                value={editContent}
-                onChange={setEditContent}
-                viewMode={mdViewMode}
-              />
-              {mdViewMode !== 'source' && <TableOfContents content={editContent} />}
-            </div>
-            {/* Markdown View — always mounted, hidden when in Edit mode */}
-            <div ref={contentRef} className="content-width" style={{ display: editing ? 'none' : undefined }}>
-              {findOpen && <FindInPage containerRef={contentRef} onClose={() => setFindOpen(false)} />}
-              <MarkdownView content={twemojiToNative(savedContent)} highlightLines={changedLines} onDismissHighlight={() => setChangedLines([])} emptyPlaceholder={t.view?.emptyNote} />
-              <TableOfContents content={twemojiToNative(savedContent)} />
-              <Backlinks filePath={filePath} />
-            </div>
+                {shouldRenderEditingToc && <TableOfContents headings={markdownTocHeadings} />}
+              </div>
+            )}
+            {!editing && (
+              <div ref={contentRef} className={markdownFrameClassName} data-markdown-view-frame>
+                <div className={markdownBodyClassName}>
+                  {findOpen && <FindInPage containerRef={contentRef} onClose={() => setFindOpen(false)} />}
+                  <MarkdownView content={normalizedSavedMarkdown} sourcePath={filePath} highlightLines={changedLines} onDismissHighlight={() => setChangedLines([])} emptyPlaceholder={t.view?.emptyNote} />
+                  <Backlinks filePath={filePath} />
+                </div>
+                {shouldRenderToc && <TableOfContents headings={markdownTocHeadings} />}
+              </div>
+            )}
           </>
         ) : showRenderer && LazyComponent ? (
           <div ref={contentRef} className="content-width">
@@ -706,6 +1206,12 @@ export default function ViewPageClient({
             </Suspense>
             <Backlinks filePath={filePath} />
           </div>
+        ) : showCsvRawSource ? (
+          <div ref={contentRef} className="content-width">
+            {findOpen && <FindInPage containerRef={contentRef} onClose={() => setFindOpen(false)} />}
+            <CsvRawSource content={savedContent} />
+            <Backlinks filePath={filePath} />
+          </div>
         ) : editing ? (
           <div className="content-width">
             {isCsv ? (
@@ -714,9 +1220,11 @@ export default function ViewPageClient({
                 filePath={filePath}
                 appendAction={appendRowAction}
                 saveAction={async (c) => {
+                  keepCurrentTab();
                   await saveAction(c);
                   setEditContent(c);
                   setSavedContent(c);
+                  notifySelfSavedFile();
                 }}
               />
             ) : (
@@ -734,7 +1242,7 @@ export default function ViewPageClient({
             ) : extension === 'json' ? (
               <JsonView content={savedContent} />
             ) : (
-              <MarkdownView content={savedContent} highlightLines={changedLines} onDismissHighlight={() => setChangedLines([])} emptyPlaceholder={t.view?.emptyNote} />
+              <MarkdownView content={savedContent} sourcePath={filePath} highlightLines={changedLines} onDismissHighlight={() => setChangedLines([])} emptyPlaceholder={t.view?.emptyNote} />
             )}
             <Backlinks filePath={filePath} />
           </div>

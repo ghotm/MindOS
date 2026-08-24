@@ -7,11 +7,13 @@ import {
   readChannelConfig,
   writeChannelConfig,
   validateChannelConfig,
+  normalizeChannelConfig,
   getChannelConfigMtime,
 } from './channel-config.js';
 import { CHANNEL_PLATFORMS, CHANNEL_PLATFORM_EMOJIS } from './channel-constants.js';
+import { loadConfig } from './config.js';
+import { getAuthHeaders, getBaseUrl } from './remote.js';
 
-const DEFAULT_WEB_PORT = process.env.MINDOS_WEB_PORT || '3456';
 const VERIFY_TIMEOUT_MS = 10_000;
 
 export async function channelList() {
@@ -48,7 +50,8 @@ export async function channelAdd(platform, credentials, options = {}) {
     return unsupportedPlatform(platform);
   }
 
-  const validation = validateChannelConfig(platform, credentials);
+  const normalizedCredentials = normalizeChannelConfig(platform, credentials);
+  const validation = validateChannelConfig(platform, normalizedCredentials);
   if (!validation.valid) {
     return {
       ok: false,
@@ -59,13 +62,13 @@ export async function channelAdd(platform, credentials, options = {}) {
 
   let verifyResult = { ok: true, botName: undefined, botId: undefined };
   if (!options.skipVerify) {
-    verifyResult = await verifyCredentialsRemotely(platform, credentials);
+    verifyResult = await verifyCredentialsRemotely(platform, normalizedCredentials);
     if (!verifyResult.ok) {
       return {
-      ok: false,
-      message: `Failed to verify ${platform} credentials`,
-      error: `${verifyResult.error}${options.skipVerify ? '' : ' Use --skip-verify to save format-valid credentials without a remote check.'}`,
-    };
+        ok: false,
+        message: `Failed to verify ${platform} credentials`,
+        error: `${verifyResult.error}${options.skipVerify ? '' : ' Use --skip-verify to save format-valid credentials without a remote check.'}`,
+      };
     }
   }
 
@@ -73,12 +76,7 @@ export async function channelAdd(platform, credentials, options = {}) {
     const config = readChannelConfig();
     const expectedMtime = getChannelConfigMtime();
     config.providers ??= {};
-    config.providers[platform] = {
-      ...credentials,
-      _botName: verifyResult.botName,
-      _botId: verifyResult.botId,
-      _lastVerified: new Date().toISOString(),
-    };
+    config.providers[platform] = buildSavedProviderConfig(normalizedCredentials, verifyResult, options);
     writeChannelConfig(config, { expectedMtime });
 
     return {
@@ -175,16 +173,34 @@ export async function channelVerify(platform, options = {}) {
     };
   }
 
-  return {
-    ok: true,
-    valid: true,
-    message: `${platform} credentials verified successfully`,
-    details: {
-      botName: result.botName,
-      botId: result.botId,
-      status: 'Verified',
-    },
-  };
+  try {
+    const expectedMtime = getChannelConfigMtime();
+    const latestConfig = readChannelConfig();
+    latestConfig.providers ??= {};
+    latestConfig.providers[platform] = buildVerifiedProviderConfig(
+      latestConfig.providers[platform] ?? credentials,
+      result,
+    );
+    writeChannelConfig(latestConfig, { expectedMtime });
+
+    return {
+      ok: true,
+      valid: true,
+      message: `${platform} credentials verified successfully`,
+      details: {
+        botName: result.botName,
+        botId: result.botId,
+        status: 'Verified',
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      valid: false,
+      message: `${platform} credentials verified, but failed to save verification state`,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 export function formatPlatformStatus(status) {
@@ -218,10 +234,11 @@ function unsupportedPlatform(platform) {
 }
 
 async function verifyCredentialsRemotely(platform, credentials) {
+  loadConfig();
   const url = buildVerifyUrl();
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ platform, credentials }),
     signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
   }).catch((err) => {
@@ -256,6 +273,25 @@ async function verifyCredentialsRemotely(platform, credentials) {
 }
 
 function buildVerifyUrl() {
-  const base = process.env.MINDOS_URL || `http://localhost:${DEFAULT_WEB_PORT}`;
-  return `${base.replace(/\/$/, '')}/api/channels/verify`;
+  return `${getBaseUrl()}/api/channels/verify`;
+}
+
+function buildSavedProviderConfig(credentials, verifyResult, options) {
+  if (options.skipVerify) {
+    return {
+      ...credentials,
+      _verificationStatus: 'skipped',
+    };
+  }
+  return buildVerifiedProviderConfig(credentials, verifyResult);
+}
+
+function buildVerifiedProviderConfig(credentials, verifyResult) {
+  return {
+    ...credentials,
+    _botName: verifyResult.botName,
+    _botId: verifyResult.botId,
+    _lastVerified: new Date().toISOString(),
+    _verificationStatus: 'verified',
+  };
 }

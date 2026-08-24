@@ -127,6 +127,17 @@ describe('GitHub workflow migration contract', () => {
     expect(yml).not.toContain('pnpm --filter @mindos/mcp-server build');
     expect(yml).toContain('pnpm --filter @mindos/web run build');
     expect(yml).toContain('packages/web/.next/cache');
+    expect(yml).toContain('https://releases.mindos.com/runtime/mindos-runtime-${version}.tar.gz');
+    expect(yml).toContain('https://github.com/GeminiLight/MindOS/releases/download/runtime-latest/mindos-runtime-${version}.tar.gz');
+    expect(yml).toContain('RUNTIME_OSS_BASE_URL');
+    expect(yml.indexOf('gh release upload "$TAG" "$ARCHIVE" --clobber')).toBeLessThan(
+      yml.indexOf('gh release upload "$TAG" /tmp/latest.json --clobber'),
+    );
+    expect(yml.indexOf('gh release upload "$TAG" /tmp/latest.json --clobber')).toBeLessThan(
+      yml.indexOf('Delete old tarball assets after the new archive + manifest are live'),
+    );
+    expect(yml).toContain('grep -Fx "mindos-runtime-${VERSION}.tar.gz" /tmp/runtime-assets.txt');
+    expect(yml).toContain('grep -Fx "latest.json" /tmp/runtime-assets.txt');
     expect(yml).not.toMatch(/\bcd app\b|\bcd \.\.\/mcp\b|app\/package-lock\.json/);
   });
 
@@ -139,6 +150,11 @@ describe('GitHub workflow migration contract', () => {
     expect(desktop).toContain('pnpm --filter @geminilight/mindos build');
     expect(desktop).toContain('pnpm --filter @mindos/web run build');
     expect(desktop).toContain('pnpm --filter @mindos/desktop run build');
+    expect(desktop).toContain('ref: ${{ inputs.tag != \'\' && inputs.tag || github.ref }}');
+    expect(desktop).toContain('fetch-depth: 0');
+    expect(desktop).toContain('Validate requested tag');
+    expect(desktop).toContain('TAG_SHA="$(git rev-list -n 1 "refs/tags/${TAG}")"');
+    expect(desktop).toContain('HEAD_SHA="$(git rev-parse HEAD)"');
     expect(desktop).toContain('platform: win\n            arch: arm64');
     expect(desktop).toContain('MINDOS_BUNDLE_NODE_PLATFORM: ${{ matrix.node_platform }}');
     expect(desktop).toContain('MINDOS_BUNDLE_NODE_ARCH: ${{ matrix.arch }}');
@@ -150,6 +166,10 @@ describe('GitHub workflow migration contract', () => {
 
     expect(sync).toContain('\\"tag\\":\\"${TAG}\\"');
     expect(sync).toContain('\\"publish\\":\\"true\\"');
+    expect(sync).toContain('\\"ref\\":\\"${TAG}\\"');
+    expect(sync).toContain('Failed to dispatch desktop build');
+    expect(sync).toContain('exit 1');
+    expect(sync).not.toContain('\\"ref\\":\\"main\\"');
   });
 
   it('keeps release workflow triggers single-sourced by tag family', () => {
@@ -166,6 +186,19 @@ describe('GitHub workflow migration contract', () => {
     expect(sync).toContain('build-desktop.yml/dispatches');
     expect(sync).not.toContain('publish-npm.yml/dispatches');
     expect(sync).toContain('public repo tag push will trigger publish-npm.yml and publish-runtime.yml');
+  });
+
+  it('preserves co-author trailers when syncing commits to the public repo', () => {
+    const sync = workflow('sync-to-mindos.yml');
+
+    expect(sync).toContain("DEV_SUBJECT=$(git -C \"$GITHUB_WORKSPACE\" log -1 --format='%s')");
+    expect(sync).toContain("DEV_MSG=$(git -C \"$GITHUB_WORKSPACE\" log -1 --format='%B')");
+    expect(sync).toContain('COAUTHOR_TRAILERS=$(');
+    expect(sync).toContain("grep -E '^Co-authored-by:'");
+    expect(sync).toContain('git -C "$GITHUB_WORKSPACE" log --format=\'%B\' "${FIRST_PARENT}..${HEAD_SHA}"');
+    expect(sync).toContain('git commit -F "$COMMIT_MSG_FILE"');
+    expect(sync).toContain('git commit -m "deploy: ${DEV_SUBJECT}"');
+    expect(sync).not.toContain('git commit -m "${DEV_MSG}"');
   });
 
   it('builds mobile from packages/mobile', () => {
@@ -217,6 +250,7 @@ describe('GitHub workflow migration contract', () => {
     expect(clipperPkg.scripts?.package).not.toMatch(/\bzip\b|rm -rf/);
     expect(clipperPkg.scripts?.clean).not.toMatch(/\brm -rf\b/);
     expect(clipperPkg.devDependencies).toHaveProperty('archiver');
+    expect(readText('packages/browser-extension/build.mjs')).toContain('rmSync(resolve(ROOT, OUT), { recursive: true, force: true })');
     expect(packageScript).toContain('archiver');
     expect(packageScript).not.toContain('zip -r');
     expect(clipperReadme).toContain('pnpm install');
@@ -232,6 +266,11 @@ describe('GitHub workflow migration contract', () => {
     expect(existsSync(resolve(root, 'packages/desktop-tauri/package-lock.json'))).toBe(false);
     const tauriPkg = readText('packages/desktop-tauri/package.json');
     const tauriConfig = readText('packages/desktop-tauri/src-tauri/tauri.conf.json');
+    const tauriCargo = readText('packages/desktop-tauri/src-tauri/Cargo.toml');
+    const tauriMain = readText('packages/desktop-tauri/src-tauri/src/main.rs');
+    const tauriRuntime = readText('packages/desktop-tauri/src-tauri/src/runtime.rs');
+    const tauriShortcuts = readText('packages/desktop-tauri/src-tauri/src/shortcuts.rs');
+    const tauriUpdater = readText('packages/desktop-tauri/src-tauri/src/updater.rs');
 
     expect(tauriPkg).toContain('"name": "@mindos/desktop-tauri"');
     expect(tauriPkg).toContain('"dev:web": "vite');
@@ -242,6 +281,20 @@ describe('GitHub workflow migration contract', () => {
     expect(tauriConfig).toContain('"beforeBuildCommand": "pnpm run build:web"');
     expect(npmignore).toMatch(/^packages\/desktop-tauri\/$/m);
     expect(readText('.gitignore')).toMatch(/^!packages\/desktop-tauri\/src-tauri\/icons\/\*\.png$/m);
+    expect(tauriCargo).toContain('alloc-no-stdlib = "=2.0.4"');
+    expect(tauriCargo).toContain('alloc-stdlib = "=0.2.2"');
+    expect(tauriCargo).toContain('brotli-decompressor = "=5.0.1"');
+    expect(tauriMain).toContain('use tauri_plugin_deep_link::DeepLinkExt;');
+    expect(tauriMain).toContain('app.deep_link().on_open_url');
+    expect(tauriMain).toContain('shortcuts::register_shortcuts(app.handle())');
+    expect(tauriMain).not.toContain('tauri_plugin_deep_link::register');
+    expect(tauriMain).not.toContain('event.window()');
+    expect(tauriRuntime).toContain('use tauri_plugin_shell::ShellExt;');
+    expect(tauriShortcuts).toContain(
+      'use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};',
+    );
+    expect(tauriUpdater).toContain('use tauri::{AppHandle, Emitter};');
+    expect(tauriUpdater).not.toContain('Manager, Emitter');
   });
 
   it('builds the Tauri desktop spike through an isolated manual workflow', () => {
@@ -293,6 +346,9 @@ describe('GitHub workflow migration contract', () => {
 
     expect(yml).toContain('packages/web/app/api/channels/verify/route.ts');
     expect(yml).toContain('packages/web/lib/im/config.ts');
+    expect(yml.indexOf('pnpm --filter @geminilight/mindos run build')).toBeLessThan(
+      yml.indexOf('pnpm --filter @mindos/web run typecheck'),
+    );
     expect(yml).toContain('pnpm --filter @mindos/web run typecheck');
     expect(yml).toContain('pnpm --filter @mindos/web exec vitest run');
     expect(yml).not.toMatch(/app\/app\/api|app\/lib|app\/__tests__|\bcd app\b|app\/package-lock\.json/);

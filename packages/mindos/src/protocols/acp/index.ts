@@ -6,8 +6,10 @@ export {
   getDescriptorDescription,
   getDescriptorDisplayName,
   getDescriptorInstallCmd,
+  getConfiguredDetectableAgents,
   getDetectableAgents,
   parseAcpAgentOverrides,
+  resolveConfiguredAcpAgentEntry,
   resolveAgentCommand,
   resolveAlias,
 } from './agent-descriptors.js';
@@ -22,6 +24,7 @@ export {
   expandHome,
   isPathLikeCommand,
   resolveCommandPath,
+  resolveCommandPathCandidates,
   resolveCommandPathSync,
   resolveDirectCommandPath,
   resolveExistingPresenceDir,
@@ -35,14 +38,28 @@ export {
   spawnAndConnect,
 } from './subprocess.js';
 export {
+  buildAcpSessionMcpInheritancePlan,
+  resolveAcpSessionMcpServers,
+} from './mcp-session-inheritance.js';
+export {
+  checkAcpHandshakeHealth,
+  getCachedAcpHandshakeHealth,
+  listCachedAcpHandshakeHealth,
+  rememberAcpHandshakeHealth,
+  resetAcpHandshakeHealthCacheForTest,
+} from './handshake-health.js';
+export {
   cancelPrompt,
   closeAllSessions,
   closeSession,
   createSession,
   createSessionFromEntry,
   getActiveSessions,
+  getActiveSessionSnapshots,
   getSession,
+  getSessionSnapshot,
   listSessions,
+  listSessionsForAgent,
   loadSession,
   prompt,
   promptStream,
@@ -51,14 +68,32 @@ export {
 } from './session.js';
 export { ACP_ERRORS } from './types.js';
 export type {
+  AcpAgentAdapterCommandDeclaration,
+  AcpAgentAdapterModelDeclaration,
+  AcpAgentAdapterMetadata,
+  AcpAgentAdapterSessionCapabilities,
   AcpAgentDescriptor,
   AcpAgentOverride,
   DetectableAgent,
   ResolvedAgentCommand,
 } from './agent-descriptors.js';
 export type {
+  AcpSessionMcpAccess,
+  AcpSessionMcpConfigEntry,
+  AcpSessionMcpConfigLike,
+  AcpSessionMcpInheritancePlan,
+} from './mcp-session-inheritance.js';
+export type {
   AcpSessionOptions,
 } from './session.js';
+export type {
+  AcpHandshakeHealthResult,
+  AcpHandshakeHealthSessionServices,
+  AcpHandshakeHealthStage,
+  AcpHandshakeHealthStatus,
+  AcpHandshakeSessionHealth,
+  CheckAcpHandshakeHealthOptions,
+} from './handshake-health.js';
 export type {
   AcpConnection,
   AcpClientCallbacks,
@@ -71,24 +106,39 @@ export type {
   NotInstalledAgent,
 } from './detect-local.js';
 export type {
+  AcpAdapterConnectionType,
+  AcpAdapterOutputCapabilities,
+  AcpAdapterOutputKind,
   AcpAgentCapabilities,
   AcpAuthMethod,
+  AcpAvailableCommand,
   AcpClientCapabilities,
   AcpConfigOption,
   AcpConfigOptionEntry,
   AcpContentBlock,
+  AcpMcpCapabilities,
   AcpMode,
+  AcpPermissionEvent,
+  AcpPermissionEventStatus,
   AcpPermissionOutcome,
+  AcpPermissionOption,
   AcpPlan,
   AcpPlanEntry,
   AcpPlanEntryPriority,
   AcpPlanEntryStatus,
+  AcpPromptCapabilities,
   AcpPromptResponse,
   AcpRegistry,
   AcpRegistryEntry,
   AcpSession,
+  AcpSessionCapabilities,
+  AcpSessionControlSnapshot,
   AcpSessionInfo,
+  AcpSessionMcpServerSummary,
+  AcpSessionSnapshot,
+  AcpSessionSnapshotFactSource,
   AcpSessionState,
+  AcpSessionToolSummary,
   AcpSessionUpdate,
   AcpStopReason,
   AcpToolCall,

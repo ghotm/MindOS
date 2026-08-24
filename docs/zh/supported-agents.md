@@ -14,7 +14,8 @@
 | Kimi Code | ✅ | ✅ | `~/.kimi/mcp.json` | `~/.agents/skills/` |
 | Codex | ✅ | ✅ | `~/.codex/config.toml`（TOML 格式，键名：`mcp_servers`） | `~/.agents/skills/` |
 | OpenCode | ✅ | ✅ | `~/.config/opencode/config.json` | `~/.agents/skills/` |
-| iFlow CLI | ✅ | ✅ | `~/.iflow/settings.json` | `~/.iflow/skills/` |
+| Kilo Code | ✅ | ✅ | `~/.config/kilo/kilo.jsonc`（键名：`mcp`，entry 类型：`local` / `remote`；兼容识别 `kilo.json`） | `~/.agents/skills/` |
+| Warp | ✅ | ✅ | `~/.warp/.mcp.json` | `~/.agents/skills/` |
 | Pi | ✅ | ✅ | `~/.pi/agent/mcp.json` | `~/.pi/skills/` |
 | Qoder | ✅ | ✅ | `~/.qoder.json` | `~/.qoder/skills/` |
 | Antigravity | ✅ | ✅ | `~/.gemini/antigravity/mcp_config.json` | `~/.antigravity/skills/` |
@@ -60,13 +61,16 @@
 mindos mcp install -g
 ```
 
-交互式引导选择 agent、transport（stdio/http）和 token。安装到全局。
+交互式引导选择 agent、transport（stdio/http）和 token。会把 MCP 配置写入全局，并将随包发布的 MindOS Skill 复制到对应 Agent 的 Skill 工作区。
 
 ### 一键安装
 
 ```bash
 # 本机，全局
 mindos mcp install -g -y
+
+# 验证 MCP + 命令 + Skill 是否可用
+mindos doctor agents codex
 
 # 远程
 mindos mcp install --transport http --url http://<服务器IP>:8781/mcp --token your-token -g
@@ -124,6 +128,21 @@ args = ["mcp"]
 
 [mcp_servers.mindos.env]
 MCP_TRANSPORT = "stdio"
+```
+
+**Kilo Code（`mcp` 键名，entry 使用 local / remote）：**
+
+```json
+{
+  "mcp": {
+    "mindos": {
+      "type": "local",
+      "command": ["mindos", "mcp"],
+      "environment": { "MCP_TRANSPORT": "stdio" },
+      "enabled": true
+    }
+  }
+}
 ```
 
 > 各 Agent 的配置文件路径不同，详见上方表格中的 **MCP 配置文件路径** 列。

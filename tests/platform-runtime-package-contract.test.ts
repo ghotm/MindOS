@@ -74,6 +74,9 @@ describe('OpenCode-style platform runtime packages', () => {
 
     expect(shim).toContain('MINDOS_BIN_PATH');
     expect(shim).toContain('MINDOS_RUNTIME_PACKAGE_PATH');
+    expect(shim).toContain('DEFAULT_RUNTIME_MANIFEST_URL');
+    expect(shim).toContain('MINDOS_RUNTIME_CACHE_DIR');
+    expect(shim).toContain('extractRuntimeArchive');
     expect(shim).toContain('@geminilight/mindos-');
     expect(shim).toContain('linux-x64-musl');
     expect(shim).toContain('childProcess.spawnSync');
@@ -95,11 +98,28 @@ describe('OpenCode-style platform runtime packages', () => {
     expect(script).toContain('runtime-manifest.json');
     expect(readText('scripts/runtime-manifest.mjs')).toContain("route: '/api/health'");
     expect(script).toContain('dist/protocols/mcp-server/index.cjs');
+    expect(script).toContain('skills/mindos/SKILL.md');
+    expect(script).toContain('skills/mindos-zh/SKILL.md');
+    expect(script).toContain("'skills'");
+    expect(script).toContain("'skills/'");
     expect(script).toContain('os: [target.os]');
     expect(script).toContain('cpu: [target.cpu]');
     expect(script).toContain("key: 'windows-arm64'");
     expect(script).toContain('binary: false');
     expect(script).toContain("'bin/cli.js'");
+    expect(script).not.toContain('bin: {');
+    expect(script).not.toContain('mindos: targetBuildBinary');
+  });
+
+  it('embeds root CLI dependency closure for sync daemon runtime imports', () => {
+    const script = readText('scripts/build-platform-packages.mjs');
+
+    expect(script).toMatch(/CLI_RUNTIME_ROOT_DEPENDENCIES\s*=\s*\[\s*'chokidar'\s*\]/);
+    expect(script).toContain('copyCliRuntimeNodeModules(packageDir)');
+    expect(script).toContain('copyDependencyClosure(CLI_RUNTIME_ROOT_DEPENDENCIES');
+    expect(script).toContain("resolve(packageDir, 'node_modules')");
+    expect(script).toContain('dependencies: platformRuntimeDependencies()');
+    expect(script).toContain("'node_modules'");
   });
 
   it('verifies npm release tarballs include runtime-critical assets', () => {
@@ -107,12 +127,20 @@ describe('OpenCode-style platform runtime packages', () => {
     const release = readText('scripts/release.sh');
 
     expect(workflow).toContain('"dist/protocols/mcp-server/index.cjs"');
-    expect(workflow).toContain('"bin/mindos" "runtime-manifest.json" "package.json"');
-    expect(workflow).toContain('Published Bun single-binary platform package should not expose expanded runtime assets');
+    expect(workflow).toContain('Publish main package to npm');
+    expect(workflow).toContain('Publish platform packages to npm');
+    expect(workflow).toContain('continue-on-error: true');
+    expect(workflow).toContain('platform packages are optional accelerators');
+    expect(workflow).toContain('Published CLI shim is missing runtime archive fallback');
     expect(workflow).toContain('Published package missing $f');
-    expect(workflow).toContain('Published platform package missing $f');
     expect(release).toContain('dist/index.js dist/protocols/acp/index.js dist/protocols/mcp-server/index.cjs');
     expect(release).not.toContain('dist/foundation.js dist/protocols/acp/index.js');
+    expect(release).toContain('--omit=optional');
+    expect(release).toContain('npm rebuild --bin-links');
+    expect(release).toContain('mcp install codex -g -y');
+    expect(release).toContain('doctor agents codex --json');
+    expect(release).toContain('"ready"[[:space:]]*:[[:space:]]*true');
+    expect(release).toContain('.agents/skills/mindos/SKILL.md');
   });
 
   it('documents the migration plan and acceptance criteria', () => {

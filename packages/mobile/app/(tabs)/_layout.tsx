@@ -6,10 +6,10 @@ import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import OfflineBanner from '@/components/OfflineBanner';
+import { colors } from '@/lib/theme';
+import type { MobileIconName } from '@/lib/mobile-icons';
 
-type IoniconsName = React.ComponentProps<typeof Ionicons>['name'];
-
-function TabIcon({ name, color, size }: { name: IoniconsName; color: string; size: number }) {
+function TabIcon({ name, color, size }: { name: MobileIconName; color: string; size: number }) {
   return <Ionicons name={name} size={size} color={color} />;
 }
 
@@ -18,14 +18,14 @@ export default function TabLayout() {
     <View style={styles.container}>
       <Tabs
         screenOptions={{
-          headerStyle: { backgroundColor: '#1a1917' },
-          headerTintColor: '#fafaf9',
+          headerStyle: { backgroundColor: colors.background },
+          headerTintColor: colors.text,
           tabBarStyle: {
-            backgroundColor: '#1a1917',
-            borderTopColor: '#292524',
+            backgroundColor: colors.background,
+            borderTopColor: colors.borderSubtle,
           },
-          tabBarActiveTintColor: '#c8873a',
-          tabBarInactiveTintColor: '#78716c',
+          tabBarActiveTintColor: colors.amber,
+          tabBarInactiveTintColor: colors.textSubtle,
         }}
       >
         <Tabs.Screen
@@ -81,7 +81,7 @@ function BannerOverlay() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#1a1917' },
+  container: { flex: 1, backgroundColor: colors.background },
   bannerOverlay: {
     position: 'absolute',
     left: 0,

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useCallback, useState } from 'react';
+import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { LayoutGrid, Columns, Table2, Settings2 } from 'lucide-react';
 import type { RendererContext } from '@/lib/renderers/registry';
 import type { ViewType, CsvConfig } from './types';
@@ -10,6 +10,7 @@ import { TableView } from './TableView';
 import { GalleryView } from './GalleryView';
 import { BoardView } from './BoardView';
 import { ConfigPanel } from './ConfigPanel';
+import { cn } from '@/lib/utils';
 
 const VIEW_TABS: { id: ViewType; icon: React.ReactNode; label: string }[] = [
   { id: 'table',   icon: <Table2 size={13} />,    label: 'Table' },
@@ -22,37 +23,90 @@ export function CsvRenderer({ filePath, content, saveAction }: RendererContext) 
   const def = useMemo(() => defaultConfig(headers), [headers]);
   const [cfg, setCfg] = useRendererState<CsvConfig>('csv', filePath, def);
   const [showConfig, setShowConfig] = useState(false);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const resetSaveStateRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (resetSaveStateRef.current) clearTimeout(resetSaveStateRef.current);
+    };
+  }, []);
 
   const updateConfig = useCallback((next: CsvConfig) => {
     setCfg(next);
   }, [setCfg]);
 
+  const updateTableSort = useCallback((field: string, dir: CsvConfig['table']['sortDir']) => {
+    setCfg(current => ({
+      ...current,
+      table: {
+        ...current.table,
+        sortField: field,
+        sortDir: dir,
+      },
+    }));
+  }, [setCfg]);
+
+  const persistCsv = useCallback(async (nextContent: string) => {
+    if (resetSaveStateRef.current) clearTimeout(resetSaveStateRef.current);
+    setSaveState('saving');
+    try {
+      await saveAction(nextContent);
+      setSaveState('saved');
+      resetSaveStateRef.current = setTimeout(() => setSaveState('idle'), 1800);
+    } catch (err) {
+      setSaveState('error');
+      throw err;
+    }
+  }, [saveAction]);
+
   const view = cfg.activeView;
+  const saveStatusLabel = saveState === 'saving'
+    ? 'Saving...'
+    : saveState === 'saved'
+      ? 'Saved'
+      : saveState === 'error'
+        ? 'Save failed'
+        : null;
 
   return (
     <div className="w-full py-2">
       {/* Toolbar */}
       <div className="flex items-center gap-2 mb-4 relative">
-        <div className="flex items-center gap-0.5 p-1 rounded-lg" style={{ background: 'var(--muted)' }}>
+        <div className="flex items-center gap-0.5 rounded-lg bg-muted p-1">
           {VIEW_TABS.map(tab => (
             <button key={tab.id} onClick={() => updateConfig({ ...cfg, activeView: tab.id })}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors font-display"
-              style={{
-                background: view === tab.id ? 'var(--card)' : 'transparent',
-                color: view === tab.id ? 'var(--foreground)' : 'var(--muted-foreground)',
-                boxShadow: view === tab.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
-              }}
+              className={cn(
+                'flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                view === tab.id
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:bg-card/50 hover:text-foreground',
+              )}
             >{tab.icon}{tab.label}</button>
           ))}
         </div>
         <div className="flex-1" />
-        <span className="text-xs font-display" style={{ color: 'var(--muted-foreground)', opacity: 0.5 }}>
+        <span className="text-xs tabular-nums text-muted-foreground/50">
           {rows.length} rows
         </span>
+        {saveStatusLabel && (
+          <span
+            className={cn(
+              'text-xs tabular-nums',
+              saveState === 'error' ? 'text-error' : 'text-muted-foreground',
+            )}
+            role={saveState === 'error' ? 'alert' : 'status'}
+          >
+            {saveStatusLabel}
+          </span>
+        )}
         <div className="relative">
           <button onClick={() => setShowConfig(v => !v)}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-colors"
-            style={{ background: showConfig ? 'var(--accent)' : 'var(--muted)', color: showConfig ? 'var(--foreground)' : 'var(--muted-foreground)' }}
+            className={cn(
+              'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              showConfig ? 'bg-accent text-foreground' : 'bg-muted text-muted-foreground hover:text-foreground',
+            )}
+            aria-label="View settings"
             title="View settings"
           ><Settings2 size={13} /></button>
           {showConfig && (
@@ -62,9 +116,9 @@ export function CsvRenderer({ filePath, content, saveAction }: RendererContext) 
         </div>
       </div>
 
-      {view === 'table' && <TableView headers={headers} rows={rows} cfg={cfg.table} saveAction={saveAction} />}
+      {view === 'table' && <TableView headers={headers} rows={rows} cfg={cfg.table} saveAction={persistCsv} onSortChange={updateTableSort} />}
       {view === 'gallery' && <GalleryView headers={headers} rows={rows} cfg={cfg.gallery} />}
-      {view === 'board' && <BoardView headers={headers} rows={rows} cfg={cfg.board} saveAction={saveAction} />}
+      {view === 'board' && <BoardView headers={headers} rows={rows} cfg={cfg.board} saveAction={persistCsv} />}
     </div>
   );
 }

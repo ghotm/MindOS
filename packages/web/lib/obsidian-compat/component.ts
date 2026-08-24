@@ -5,37 +5,67 @@
 
 import { Events, EventRef } from './events';
 
+type LifecycleChild = {
+  load(): Promise<void>;
+  unload(): Promise<void>;
+};
+
 /**
  * Base component class for plugin lifecycle and event/timer cleanup.
  * Plugins extend this; ensures unload() properly cleans up child resources.
  */
 export class Component extends Events {
-  private children: Set<Component> = new Set();
-  private unloadCallbacks: Set<() => void> = new Set();
+  #children: Set<LifecycleChild> = new Set();
+  #unloadCallbacks: Set<() => void> = new Set();
+  #loaded = false;
+  #unloaded = false;
+  #unloading = false;
 
   async load(): Promise<void> {
-    await this.onload();
+    if (this.#loaded) return;
+    this.#loaded = true;
+    this.#unloaded = false;
+    try {
+      await this.onload();
+      for (const child of Array.from(this.#children)) {
+        await child.load();
+      }
+    } catch (err) {
+      this.#loaded = false;
+      throw err;
+    }
   }
 
   async unload(): Promise<void> {
+    if (this.#unloading || (this.#unloaded && !this.#loaded)) {
+      return;
+    }
+
+    this.#unloading = true;
     // Clean up all children first
-    for (const child of Array.from(this.children)) {
-      await child.unload();
-    }
-    this.children.clear();
-
-    // Call all registered unload callbacks
-    for (const callback of Array.from(this.unloadCallbacks)) {
-      try {
-        callback();
-      } catch (err) {
-        console.error('[obsidian-compat] Component unload callback error:', err);
+    try {
+      for (const child of Array.from(this.#children)) {
+        await child.unload();
       }
-    }
-    this.unloadCallbacks.clear();
+      this.#children.clear();
 
-    // Call user-defined onunload
-    await this.onunload();
+      // Call all registered unload callbacks
+      for (const callback of Array.from(this.#unloadCallbacks)) {
+        try {
+          callback();
+        } catch (err) {
+          console.error('[obsidian-compat] Component unload callback error:', err);
+        }
+      }
+      this.#unloadCallbacks.clear();
+
+      // Call user-defined onunload
+      await this.onunload();
+    } finally {
+      this.#loaded = false;
+      this.#unloaded = true;
+      this.#unloading = false;
+    }
   }
 
   /** Override in subclass */
@@ -44,19 +74,28 @@ export class Component extends Events {
   /** Override in subclass */
   onunload(): Promise<void> | void {}
 
-  addChild(child: Component): void {
-    this.children.add(child);
+  addChild<T extends LifecycleChild>(child: T): T {
+    this.#children.add(child);
+    if (this.#loaded) {
+      void child.load().catch((err) => {
+        console.error('[obsidian-compat] Component child load error:', err);
+      });
+    }
+    return child;
   }
 
-  removeChild(child: Component): void {
-    this.children.delete(child);
+  removeChild<T extends LifecycleChild>(child: T): T {
+    if (this.#children.delete(child)) {
+      void child.unload();
+    }
+    return child;
   }
 
   /**
    * Register a callback to be invoked when this component unloads.
    */
   register(callback: () => void): void {
-    this.unloadCallbacks.add(callback);
+    this.#unloadCallbacks.add(callback);
   }
 
   /**
@@ -69,9 +108,9 @@ export class Component extends Events {
   /**
    * Register a DOM event listener. Automatically removes on unload.
    */
-  registerDomEvent(el: EventTarget, type: string, callback: EventListener): void {
-    el.addEventListener(type, callback);
-    this.register(() => el.removeEventListener(type, callback));
+  registerDomEvent(el: EventTarget, type: string, callback: EventListener, options?: boolean | AddEventListenerOptions): void {
+    el.addEventListener(type, callback, options);
+    this.register(() => el.removeEventListener(type, callback, options));
   }
 
   /**

@@ -3,12 +3,11 @@
 import Link from 'next/link';
 import { useCallback, useMemo, useState } from 'react';
 import {
-  ArrowLeft, Globe, Loader2, MoreHorizontal, Pencil, Server, Search,
-  Trash2, Wifi, WifiOff, Zap, Copy, AlertTriangle,
+  ArrowLeft, Globe, Pencil, Server, Search,
+  Trash2, Wifi, WifiOff, Zap, AlertTriangle,
 } from 'lucide-react';
 import { useLocale } from '@/lib/stores/locale-store';
 import { toast } from '@/lib/toast';
-import { encodePath } from '@/lib/utils';
 import { useMcpData } from '@/lib/stores/mcp-store';
 import { useA2aRegistry } from '@/hooks/useA2aRegistry';
 import { apiFetch } from '@/lib/api';
@@ -23,6 +22,9 @@ import {
   type AgentDetailSkillSourceFilter,
 } from './agents-content-model';
 import { AgentAvatar, ActionButton, ConfirmDialog, PillButton } from './AgentsPrimitives';
+import { Toggle } from '../settings/Primitives';
+import { useSkillMatrix } from '@/hooks/useSkillMatrix';
+import { isSkillCellOn, nextSkillCellAction, postSkillCellAction } from '@/lib/skill-cell-actions';
 import SkillDetailPopover from './SkillDetailPopover';
 import CustomAgentModal from './CustomAgentModal';
 import { DetailLine, formatRelativeTime } from './agent-detail-primitives';
@@ -39,6 +41,8 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
   const a2a = useA2aRegistry();
 
   const agent = useMemo(() => mcp.agents.find((item) => item.key === agentKey), [mcp.agents, agentKey]);
+  // Unified (skill × agent) matrix — drives every per-agent cell state on this page.
+  const { matrix, refreshMatrix } = useSkillMatrix();
   const [skillQuery, setSkillQuery] = useState('');
   const [skillSource, setSkillSource] = useState<AgentDetailSkillSourceFilter>('all');
   const [skillBusy, setSkillBusy] = useState<string | null>(null);
@@ -127,6 +131,19 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
     () => (agent?.installedSkillNames ?? []).filter((n) => !mindosSkillNames.has(n)),
     [agent?.installedSkillNames, mindosSkillNames],
   );
+  const targetableSkillAgents = useMemo(
+    () => mcp.agents.filter((item) =>
+      item.present
+      && item.installed
+      && Boolean(item.skillWorkspacePath)
+      && item.skillCapabilities?.canReceiveLinkedSkills !== false),
+    [mcp.agents],
+  );
+  const currentAgentCanReceiveSkills = Boolean(
+    agent?.skillWorkspacePath
+    && agent.skillCapabilities?.canReceiveLinkedSkills !== false
+    && !isMindOS,
+  );
   const configuredMcpServers = agent?.configuredMcpServers ?? [];
 
 
@@ -200,34 +217,98 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
     }
   }, [a.detail.skillDeleteSuccess, a.detail.skillDeleteFailed, mcp]);
 
-  const handleCopySkillToAgent = useCallback(async (skillName: string) => {
-    if (!agent?.skillWorkspacePath) return;
+  const handleCopySkillToAgent = useCallback(async (
+    skillName: string,
+    options?: { targetAgent?: AgentInfo; sourcePath?: string },
+  ) => {
+    const target = options?.targetAgent ?? agent;
+    if (!target?.skillWorkspacePath) {
+      toast.error(a.detail.skillReceiveUnsupported);
+      return;
+    }
     setSkillBusy(skillName);
     setEditError(null);
     try {
-      const res = await apiFetch<{ success: boolean; targetPath?: string }>(
-        '/api/agents/copy-skill',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            skillName,
-            targetPath: agent.skillWorkspacePath,
-          }),
-        }
-      );
-      if (res.success) {
-        toast.success(`Skill "${skillName}" copied to ${agent.name}`);
-        await mcp.refresh();
+      if (options?.sourcePath) {
+        // Native skill (unknown to MindOS) — copy/symlink from its source dir.
+        await apiFetch<{ success: boolean; targetPath?: string }>(
+          '/api/agents/copy-skill',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              skillName,
+              sourcePath: options.sourcePath,
+              targetPath: target.skillWorkspacePath,
+              strategy: target.skillCapabilities?.linkStrategy === 'symlink' ? 'symlink' : 'copy',
+            }),
+          }
+        );
+      } else {
+        // MindOS-known skill — the unified link interface (symlink-based,
+        // same single source of truth as the Settings matrix view).
+        await postSkillCellAction('link', skillName, target.key);
       }
+      toast.success(a.detail.skillLinkSuccess(skillName, target.name));
+      await Promise.all([mcp.refresh(), refreshMatrix()]);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to copy skill';
+      const reason = err instanceof Error ? err.message : 'Unknown error';
+      const msg = a.detail.skillLinkFailed(skillName, target.name, reason);
       setEditError(msg);
       toast.error(msg);
     } finally {
       setSkillBusy(null);
     }
-  }, [agent, mcp]);
+  }, [agent, a.detail, mcp, refreshMatrix]);
+
+  /** Per-agent on/off for a MindOS-known skill on THIS agent's page (matrix cell driven). */
+  const handleCellToggle = useCallback(async (skillName: string) => {
+    if (!agent) return;
+    const status = matrix?.cells[skillName]?.[agent.key]?.status;
+    setSkillBusy(skillName);
+    setEditError(null);
+    try {
+      await postSkillCellAction(nextSkillCellAction(status), skillName, agent.key);
+      await Promise.all([mcp.refresh(), refreshMatrix()]);
+      if (agent.skillMode === 'additional') {
+        toast.success(a.skills.linkSkillRestartHint(agent.name));
+      }
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : 'Unknown error';
+      const msg = a.detail.skillLinkFailed(skillName, agent.name, reason);
+      setEditError(msg);
+      toast.error(msg);
+    } finally {
+      setSkillBusy(null);
+    }
+  }, [agent, matrix, mcp, refreshMatrix, a.skills, a.detail]);
+
+  const handlePopoverRemoveAgent = useCallback(async (skillName: string, targetAgentName: string) => {
+    const target = mcp.agents.find((item) => item.name === targetAgentName);
+    if (!target) return;
+    const status = matrix?.cells[skillName]?.[target.key]?.status;
+    const action = status === 'conflict' ? 'disable-native' : 'unlink';
+    try {
+      await postSkillCellAction(action, skillName, target.key);
+      await Promise.all([mcp.refresh(), refreshMatrix()]);
+      toast.success(a.skills.unlinkSkillSuccess(skillName, targetAgentName));
+    } catch (err: unknown) {
+      toast.error(a.skills.unlinkSkillFailed(skillName, targetAgentName, err instanceof Error ? err.message : 'Unknown error'));
+    }
+  }, [mcp, matrix, refreshMatrix, a.skills]);
+
+  const handleLinkPopoverSkill = useCallback(async (skillName: string, targetAgentName: string) => {
+    const target = targetableSkillAgents.find((item) => item.name === targetAgentName);
+    if (!target) {
+      toast.error(a.detail.skillReceiveUnsupported);
+      return;
+    }
+    const isNativeSkill = !mindosSkillNames.has(skillName);
+    await handleCopySkillToAgent(skillName, {
+      targetAgent: target,
+      sourcePath: isNativeSkill ? agent?.installedSkillSourcePath : undefined,
+    });
+  }, [agent?.installedSkillSourcePath, a.detail.skillReceiveUnsupported, handleCopySkillToAgent, mindosSkillNames, targetableSkillAgents]);
 
   const handleCopySnippet = useCallback(async () => {
     const ok = await copyToClipboard(snippet.snippet);
@@ -321,7 +402,7 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
               }`}>{status}</span>
               <span className="font-mono">{agent.transport ?? agent.preferredTransport}</span>
               <span className="text-muted-foreground/25" aria-hidden="true">·</span>
-              <span>{agent.skillMode ?? a.na}</span>
+              <span>{formatAgentSkillBoundary(agent, a.detail)}</span>
             </div>
           </div>
           {agent.isCustom && (
@@ -350,6 +431,7 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-2xs text-muted-foreground/50 px-5 py-2 border-t border-border/40">
           <span>{agent.format} <span className="text-muted-foreground/30">·</span> {formatRelativeTime(agent.runtimeLastActivityAt)}</span>
           <span className="tabular-nums">{configuredMcpServers.length} MCP <span className="text-muted-foreground/30">·</span> {nativeInstalledSkills.length} skills</span>
+          <span>{agent.skillCapabilities?.workspacePath || a.na}</span>
         </div>
       </section>
 
@@ -518,6 +600,19 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
             <ul className="space-y-0.5">
               {filteredSkills.map((skill) => {
                 const isEditing = editingSkill === skill.name;
+                const cellStatus = !isMindOS && agent ? matrix?.cells[skill.name]?.[agent.key]?.status : undefined;
+                const cellOn = isSkillCellOn(cellStatus);
+                const cellBadge = isMindOS
+                  ? { label: a.detail.skillAlreadyLinked, cls: 'bg-[var(--success)]/15 text-[var(--success)]' }
+                  : cellStatus === 'linked' || cellStatus === 'copied'
+                    ? { label: a.detail.skillAlreadyLinked, cls: 'bg-[var(--success)]/15 text-[var(--success)]' }
+                    : cellStatus === 'conflict'
+                      ? { label: a.skills.sourceAgentOwned, cls: 'bg-[var(--amber-subtle)] text-[var(--amber-text)]' }
+                      : cellStatus === 'native-disabled'
+                        ? { label: a.skills.cellParked, cls: 'bg-muted text-muted-foreground/70' }
+                        : cellStatus === 'broken'
+                          ? { label: a.skills.cellBroken, cls: 'bg-destructive/10 text-destructive' }
+                          : { label: a.detail.skillBoundaryGlobal, cls: 'bg-muted text-muted-foreground' };
                 return (
                   <li key={skill.name} className="rounded-md hover:bg-muted/30 transition-colors duration-100">
                     <div className="flex items-center gap-2 py-1.5 px-1.5 group/skill">
@@ -532,14 +627,27 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
                       <span className={`text-2xs px-1.5 py-0.5 rounded shrink-0 ${skill.source === 'builtin' ? 'bg-muted text-muted-foreground' : 'bg-[var(--amber-dim)] text-[var(--amber-text)]'}`}>
                         {skill.source === 'builtin' ? a.detail.skillsSourceBuiltin : a.detail.skillsSourceUser}
                       </span>
+                      <span className={`text-2xs px-1.5 py-0.5 rounded shrink-0 ${cellBadge.cls}`} title={cellStatus === 'native-disabled' ? a.skills.cellParkedHint : undefined}>
+                        {cellBadge.label}
+                      </span>
+                      {!isMindOS && currentAgentCanReceiveSkills && (
+                        <Toggle
+                          size="sm"
+                          checked={cellOn}
+                          disabled={skillBusy === skill.name}
+                          onChange={() => void handleCellToggle(skill.name)}
+                        />
+                      )}
 
                       <div className="flex items-center gap-1 shrink-0 md:opacity-0 md:group-hover/skill:opacity-100 md:focus-within:opacity-100 transition-opacity duration-150">
-                        <ActionButton
-                          onClick={() => void handleSkillToggle(skill.name, !skill.enabled)}
-                          disabled={skillBusy === skill.name}
-                          busy={skillBusy === skill.name}
-                          label={skill.enabled ? a.detail.skillDisable : a.detail.skillEnable}
-                        />
+                        {isMindOS && (
+                          <ActionButton
+                            onClick={() => void handleSkillToggle(skill.name, !skill.enabled)}
+                            disabled={skillBusy === skill.name}
+                            busy={skillBusy === skill.name}
+                            label={skill.enabled ? a.detail.skillDisable : a.detail.skillEnable}
+                          />
+                        )}
                         {skill.editable && (
                           <>
                             <ActionButton
@@ -559,18 +667,7 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
                             </button>
                           </>
                         )}
-                        {agent?.skillMode === 'unsupported' && (
-                          <button
-                            type="button"
-                            onClick={() => void handleCopySkillToAgent(skill.name)}
-                            disabled={skillBusy === skill.name}
-                            className="inline-flex items-center justify-center min-h-[28px] px-1.5 rounded-md text-muted-foreground hover:text-[var(--amber)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150"
-                            title={`Copy ${skill.name} to ${agent.name}`}
-                            aria-label={`Copy ${skill.name} to ${agent.name}`}
-                          >
-                            <Copy size={13} />
-                          </button>
-                        )}
+
                       </div>
                     </div>
 
@@ -601,9 +698,12 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
         {/* Native installed skills */}
         {nativeInstalledSkills.length > 0 && (
           <div>
-            <p className="text-2xs font-medium text-muted-foreground uppercase tracking-wider mb-1.5">
-              {a.detail.nativeInstalledSkills} <span className="tabular-nums">({nativeInstalledSkills.length})</span>
-            </p>
+            <div className="mb-1.5 space-y-1">
+              <p className="text-2xs font-medium text-muted-foreground uppercase tracking-wider">
+                {a.detail.nativeInstalledSkills} <span className="tabular-nums">({nativeInstalledSkills.length})</span>
+              </p>
+              <p className="text-2xs text-muted-foreground/60">{a.detail.skillNativePrivateHint}</p>
+            </div>
             <div className="space-y-0.5 max-h-[280px] overflow-y-auto">
               {nativeInstalledSkills.map((name) => (
                 <button
@@ -614,6 +714,9 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
                 >
                   <Zap size={13} className="shrink-0 text-muted-foreground/50" aria-hidden="true" />
                   <span className="text-xs text-foreground flex-1 min-w-0 truncate hover:text-[var(--amber)] transition-colors duration-150">{name}</span>
+                  <span className="text-2xs px-1.5 py-0.5 rounded shrink-0 bg-muted text-muted-foreground">
+                    {a.detail.skillBoundaryNativePrivate}
+                  </span>
                 </button>
               ))}
             </div>
@@ -712,6 +815,9 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
         onToggle={mcp.toggleSkill}
         onDelete={handleDeleteSkillFromPopover}
         onRefresh={mcp.refresh}
+        allAgentNames={targetableSkillAgents.map((item) => item.name)}
+        onAddAgent={(skillName, targetAgentName) => void handleLinkPopoverSkill(skillName, targetAgentName)}
+        onRemoveAgent={(skillName, targetAgentName) => void handlePopoverRemoveAgent(skillName, targetAgentName)}
       />
 
       {/* Custom agent edit modal */}
@@ -738,4 +844,16 @@ export default function AgentDetailContent({ agentKey }: { agentKey: string }) {
       />
     </div>
   );
+}
+
+function formatAgentSkillBoundary(agent: AgentInfo, copy: {
+  skillBoundaryGlobal: string;
+  skillBoundaryLinked: string;
+  skillBoundaryNativePrivate: string;
+}): string {
+  const caps = agent.skillCapabilities;
+  if (!caps) return agent.skillMode ?? '';
+  if (caps.visibility === 'global') return copy.skillBoundaryGlobal;
+  if (caps.nativeSkillScope === 'native-private') return copy.skillBoundaryNativePrivate;
+  return copy.skillBoundaryLinked;
 }

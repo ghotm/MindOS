@@ -13,6 +13,8 @@ import { invalidateCache } from '@/lib/fs';
 import { ALL_PROVIDER_IDS, getApiKeyEnvVar, getApiKeyFromEnv } from '@/lib/agent/providers';
 import { parseProviders } from '@/lib/custom-endpoints';
 import { getEmbeddingStatus } from '@/lib/core/hybrid-search';
+import { readMindosIgnoreFile, writeMindosIgnoreFile } from '@/lib/core/tree';
+import { handleRouteErrorSimple } from '@/lib/errors';
 import { toNextResponse } from '../_mindos-adapter';
 
 function createSettingsServices(): MindosSettingsServices {
@@ -25,6 +27,10 @@ function createSettingsServices(): MindosSettingsServices {
     parseProviders,
     getEmbeddingStatus,
     invalidateCache,
+    readSearchIgnoreFile: (mindRoot) => mindRoot ? readMindosIgnoreFile(mindRoot) : [],
+    writeSearchIgnoreFile: (mindRoot, ignoredPaths) => {
+      writeMindosIgnoreFile(mindRoot, ignoredPaths);
+    },
     providerEnv: {
       ids: [...ALL_PROVIDER_IDS],
       getApiKeyEnvVar,
@@ -38,6 +44,10 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json() as Partial<ServerSettings>;
-  return toNextResponse(handleSettingsPost(body, createSettingsServices()));
+  try {
+    const body = await req.json() as Partial<ServerSettings>;
+    return toNextResponse(handleSettingsPost(body, createSettingsServices()));
+  } catch (error) {
+    return handleRouteErrorSimple(error);
+  }
 }

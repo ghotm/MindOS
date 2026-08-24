@@ -5,6 +5,8 @@
 
 ## 代码规范
 
+- 单文件尽量不要超过 1000 行；确有必要超过时必须有明确拆分理由和后续拆分计划；源码、测试、脚本和文档文件一定不能超过 3000 行（生成物、lockfile、自动生成快照除外）。
+
 ### Spec 模板
 
 每个 spec 文件（`wiki/specs/spec-*.md`）必须包含以下段落，不能留空：
@@ -196,12 +198,73 @@ MCP_TRANSPORT=http MINDOS_MCP_PORT=8567 MINDOS_WEB_PORT=4567 node packages/mindo
 `stopMindos()` 在 `NODE_ENV=test` 时自动跳过进程 kill，`npm test` 和 `git push` 都不会影响 dev server。
 
 ```bash
-git push                          # 正常跑测试，不杀 dev server
+git push                          # 跑 pre-push 分层快门，不杀 dev server
 SKIP_TESTS=1 git push             # 跳过测试直接 push
-npm test                          # 手动跑测试，不杀 dev server
+pnpm test                         # 手动跑测试，不杀 dev server
+pnpm run test:release             # release 前全量 build + test + typecheck
 ```
 
 ## Git 提交流程
+
+### Worktree / 分支协作公约
+
+用于较大或可异步推进的任务，默认拆成主 worktree 与任务 worktree，避免阻塞 `main` 上的连续更新。
+
+| 角色 | 路径 / 分支 | 职责 |
+|------|-------------|------|
+| 主 worktree | `/Users/moonshot/projects/product/mindos-dev` / `main` | 承接当前主线、热修、release、最终集成 |
+| 任务 worktree | 相邻目录或 `.claude/worktrees/<task-slug>` / 唯一任务分支 | 承接较大功能、跨模块 hardening、需要较长验证的任务 |
+
+本仓库主线固定回归根目录：`/Users/moonshot/projects/product/mindos-dev` 是唯一长期 `main` worktree。`.claude/worktrees/*` 和相邻 `mindos-dev-*` 目录只作为任务 worktree；不要让这些临时目录长期承载 `main`、release 或最终集成。
+
+**Root / worktree 操作边界**
+- `git status`、代码编辑、测试、build、merge、rebase、版本 bump、发版前检查都默认在根目录主 worktree 执行。
+- 不确定当前目录时先执行 `pwd`、`git status --short --branch`、`git branch --show-current` 和 `git worktree list`；如果在 detached HEAD 或临时任务 worktree，先说明再决定是否切回根目录。
+- 同步 `main` 时，先在根目录主 worktree 跑 `git status --short --branch`。如果有本地改动，不能直接 `reset` 或强行 pull；先明确这些改动归属，必要时用临时 branch / commit / stash 保护后再快进或 merge。
+- 如果发现 `main` 被 checkout 到 `.claude/worktrees/*`，先提交或迁移其中改动，再释放该 worktree，把 `main` 切回根目录。
+
+任务分支不要写死成一个共享分支。按任务创建唯一分支，例如 `<agent>/<task-slug>`、`async/<task-slug>`、`fix/<task-slug>`；worktree 目录也用同一个 task slug 命名，便于清理和追踪。
+
+**主 worktree 规则**
+- 只在 `main` 工作；不要直接混入任务分支的半成品改动。
+- merge 任务分支前先检查 `git status`。如果 `main` 有未提交改动，先提交/处理这些改动，或明确说明暂不 merge。
+- 合并任务分支后，按影响范围跑测试、typecheck、build，再 `git push origin main`。
+- 绝对禁止 `git merge public/main` 或 `git push public main`；公开仓只走 CI 单向同步。
+
+**任务 worktree 规则**
+- 主动对齐 `main` 是任务 worktree 的前置动作：新任务开工、恢复已有任务、push 或开 PR 前，都先执行 `git fetch origin --prune`，再确认当前目录、分支和 `origin/main` 状态。
+- 对齐检查必须具体到命令结果：`git status --short --branch` 确认 worktree 干净或改动归属明确；`git merge-base --is-ancestor origin/main HEAD` 确认任务分支包含最新 `origin/main`。如果不包含，先把 `origin/main` merge/rebase 到任务分支并解决冲突，再继续开发或交付。
+- 开 PR 前再查一次 base/head：确认 PR 目标是 `main`、分支已 push、merge state 无冲突；如果主线刚更新，先同步 `origin/main` 并按影响范围重跑验证。
+- 只做当前任务相关改动；不要顺手改主线正在进行的其它文件。
+- 完成后在任务分支提交并 `git push -u origin <task-branch>`，不要直接 push 到 `main`。
+- push / handoff 时必须说明：commit hash、改动范围、已跑测试、未跑测试及原因、PR 链接或 merge 建议。
+
+**验证分层：pre-push 快门 / release 全量门**
+- `git push` 默认调用 `scripts/pre-push-checks.mjs`，按本次 push 的 changed files 选择验证：文档-only 只跑 `git diff --check`；root contract/unit 测试改动只跑对应测试文件；e2e 改动默认只做 Playwright load/list 检查；Web 代码跑相关 Vitest + `@mindos/web` typecheck，Web test-only 改动只跑对应测试文件；核心 / mobile / desktop / retrieval 改动跑对应 package 的 test/typecheck；脚本改动补 `node --check` 或 `bash -n`。
+- 任务分支 push 是交付候选，不等于进入主线；小 feature、UI polish、文档/局部修复默认跑“快门”：受影响测试 + 必要 typecheck + `git diff --check`，UI 改动补 `/tmp/...png` 截图。
+- 快门已通过时，任务分支如果还需跳过 hook，可用 `SKIP_TESTS=1 git push -u origin <task-branch>`；handoff 必须写清已跑命令、截图路径、未跑全量的原因。
+- 跨模块重构、权限/安全/数据迁移、发布包、runtime/协议/同步等高风险改动，不只依赖默认快门；任务分支 push 前也应主动跑相应 full test/build。
+- release 前必须跑全量门：`pnpm run test:release`。它显式执行 root contracts / unit、全 workspace build、全 workspace test、全 workspace typecheck；不要把 release 质量门塞回普通 pre-push。
+- 如果 hook 因环境问题失败，只有在已用等价命令完成同级验证后才可 `SKIP_TESTS=1`，并在汇报里写明环境原因和替代验证。
+
+**防覆盖合并规则**
+- 固定由实际 `main` worktree 做最终集成和 release；任务 worktree 只交付候选分支，不直接替代主线状态。
+- 合并任务分支前，先确认该分支已包含最新 `origin/main`；长期分支、旧 PR、恢复类分支尤其不能直接合入。
+- 合并前不只看 Git conflict，还要做语义 diff：`git diff --name-status origin/main...origin/<task-branch>`，并重点审查 sidebar、channel、inbox、agents、activity bar、runtime、settings 等高风险 UI / 状态面。
+- 如果任务分支改到了高风险面，handoff 必须说明它是否会覆盖主线近期改动；主 worktree merge 后要补跑对应 regression tests 或手动截图检查。
+- 发现“无冲突但行为回退”时，不要继续 release；先在主 worktree 修复并补测试，把丢失的行为变成 regression contract。
+
+**任务成果进入主线的标准流程**
+1. 任务 worktree 只把成果 push 到 `origin/<task-branch>`；这一步只是交付候选，不会让 `main` 变新。
+2. 主 worktree 负责最终集成：`git fetch origin`，确认 `main` 干净，再 `git merge origin/<task-branch>` 或通过 PR 合入。
+3. merge 后必须解决冲突并跑受影响测试；如果暴露集成问题，先在 `main` 修好并提交。
+4. 验证通过后才 `git push origin main`；push 成功后确认 `sync-to-mindos` workflow 成功。
+5. handoff 结论必须明确写：任务分支是否已进入 `main`、merge commit hash、验证命令、是否已同步 public。
+
+**协作边界**
+- 多个 Agent 并行时，尽量按模块拆文件；不要在两个 worktree 同时编辑同一组文件。
+- 发现另一个 worktree/分支有相关未提交改动时，先说明冲突风险，再选择同步、等待或继续在独立分支推进。
+- 任务分支进入 `main` 的默认方式是 PR 或显式本地 merge；如果用户要求“布置上去 / 主分支也要有 / 发布最新”，应视为需要完成主线集成，而不是只 push 任务分支。
 
 ### Commit 前 Checklist
 

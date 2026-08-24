@@ -2,10 +2,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import AskContent from '@/components/ask/AskContent';
+import ChatContent from '@/components/chat/ChatContent';
 
 const mockUploadInputRef = { current: null as HTMLInputElement | null };
 const mockImageInputRef = { current: null as HTMLInputElement | null };
+const { mockSubmit } = vi.hoisted(() => ({
+  mockSubmit: vi.fn((e: Event) => e.preventDefault()),
+}));
 
 vi.mock('@/lib/stores/locale-store', () => ({
   useLocale: () => ({
@@ -13,9 +16,12 @@ vi.mock('@/lib/stores/locale-store', () => ({
       ask: {
         placeholder: 'Ask a question...',
         send: 'Send',
+        providerNotConfigured: 'Connect a model provider before sending.',
+        configureProvider: 'Configure',
         newlineHint: 'New line',
         stopped: 'Stopped',
         errorNoResponse: 'No response',
+        concurrentLimit: 'too many conversations are running',
         emptyPrompt: 'Empty',
         emptyHint: 'Hint',
         suggestions: [],
@@ -31,6 +37,26 @@ vi.mock('@/lib/stores/locale-store', () => ({
         modeAgent: 'Agent',
         modeChatHint: 'Chat hint',
         modeAgentHint: 'Agent hint',
+        sessionContext: {
+          title: 'Context',
+          workDir: 'WorkDir',
+          spaces: 'Spaces',
+          assistants: 'Assistants',
+          mindRoot: 'Mind root',
+          none: 'None',
+          locked: 'Locked after first message',
+          editWorkDir: 'Set work directory',
+          workDirPlaceholder: '/path/to/project',
+          addSpace: 'Add Space',
+          addAssistant: 'Add Assistant',
+          newSession: 'New',
+          removeItem: (label: string) => `Remove ${label}`,
+          spacePlaceholder: 'Space path',
+          assistantPlaceholder: 'assistant-id',
+          applyNextTurn: 'Changes apply to the next message.',
+          spacesCount: (n: number) => `${n} space${n === 1 ? '' : 's'}`,
+          assistantsCount: (n: number) => `${n} assistant${n === 1 ? '' : 's'}`,
+        },
       },
       hints: {
         attachFile: 'Attach local file',
@@ -53,9 +79,13 @@ vi.mock('@/hooks/useAskSession', () => ({
     clearPersistTimer: vi.fn(),
     setMessages: vi.fn(),
     setSessionDefaultAcpAgent: vi.fn(),
+    setSessionWorkDir: vi.fn(() => true),
+    setSessionContextSelection: vi.fn(() => true),
+    setSessionModelSelection: vi.fn(() => true),
     resetSession: vi.fn(),
     loadSession: vi.fn(),
     deleteSession: vi.fn(),
+    forkSession: vi.fn(),
     renameSession: vi.fn(),
     togglePinSession: vi.fn(),
     clearAllSessions: vi.fn(),
@@ -117,8 +147,8 @@ vi.mock('@/hooks/useAcpDetection', () => ({
   }),
 }));
 
-vi.mock('@/hooks/useAskChat', () => ({
-  useAskChat: () => ({
+vi.mock('@/hooks/useAgentChat', () => ({
+  useAgentChat: () => ({
     isLoading: false,
     isLoadingRef: { current: false },
     loadingPhase: 'connecting',
@@ -126,7 +156,7 @@ vi.mock('@/hooks/useAskChat', () => ({
     reconnectMaxRef: { current: 3 },
     abortRef: { current: null },
     firstMessageFired: { current: false },
-    submit: (e: Event) => e.preventDefault(),
+    submit: mockSubmit,
     stop: vi.fn(),
   }),
 }));
@@ -143,19 +173,35 @@ vi.mock('@/components/ask/ProviderModelCapsule', () => ({
   default: () => null,
   getPersistedProviderModel: () => ({ provider: null, model: null }),
 }));
+vi.mock('@/components/ask/PiThinkingLevelCapsule', () => ({
+  default: () => null,
+}));
 vi.mock('@/components/ask/ModeCapsule', () => ({
   default: () => null,
-  getPersistedMode: () => 'agent',
+  getPersistedPermissionMode: () => 'ask',
 }));
 vi.mock('@/lib/utils', () => ({ cn: (...parts: Array<string | false | null | undefined>) => parts.filter(Boolean).join(' ') }));
 
-describe('AskContent attach menu', () => {
+describe('ChatContent attach menu', () => {
   let host: HTMLDivElement;
   let root: ReturnType<typeof createRoot>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ai: {
+          activeProvider: 'p_openai01',
+          providers: [
+            { id: 'p_openai01', name: 'OpenAI', protocol: 'openai', apiKey: 'sk-test', model: 'gpt-5.4', baseUrl: '' },
+          ],
+        },
+        envOverrides: {},
+        envValues: {},
+      }),
+    }));
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
@@ -167,13 +213,14 @@ describe('AskContent attach menu', () => {
     });
     host.remove();
     document.body.innerHTML = '';
+    vi.unstubAllGlobals();
   });
 
   it('keeps attach menu open on mousedown inside the portal and triggers file input click', async () => {
     const inputClickSpy = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {});
 
     await act(async () => {
-      root.render(<AskContent visible variant="panel" />);
+      root.render(<ChatContent visible variant="panel" />);
     });
 
     const attachButton = host.querySelector('button[title="Attach local file"]') as HTMLButtonElement;
@@ -201,5 +248,48 @@ describe('AskContent attach menu', () => {
 
     expect(inputClickSpy).toHaveBeenCalled();
     inputClickSpy.mockRestore();
+  });
+
+  it('blocks MindOS submit and opens AI settings when no model provider is configured', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ai: { activeProvider: undefined, providers: [] },
+        envOverrides: {},
+        envValues: {},
+      }),
+    }));
+    const settingsEvents: Array<{ tab?: string }> = [];
+    const onOpenSettings = (event: Event) => {
+      settingsEvents.push((event as CustomEvent).detail ?? {});
+    };
+    window.addEventListener('mindos:open-settings', onOpenSettings);
+
+    await act(async () => {
+      root.render(<ChatContent visible variant="panel" initialMessage="summarize my notes" />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const submitButton = host.querySelector('button[type="submit"]') as HTMLButtonElement;
+    expect(submitButton.disabled).toBe(true);
+    expect(submitButton.title).toBe('Connect a model provider before sending.');
+    expect(host.textContent).toContain('Connect a model provider before sending.');
+
+    await act(async () => {
+      Array.from(host.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === 'Configure')
+        ?.click();
+    });
+
+    expect(settingsEvents).toEqual([{ tab: 'ai' }]);
+
+    const form = host.querySelector('form') as HTMLFormElement;
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    expect(mockSubmit).not.toHaveBeenCalled();
+
+    window.removeEventListener('mindos:open-settings', onOpenSettings);
   });
 });

@@ -1,74 +1,88 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo, useTransition } from 'react';
-import { Search, Trash2, Pencil, Pin, PinOff, FolderInput, MessageSquare, SquarePen, X } from 'lucide-react';
-import type { ChatSession } from '@/lib/types';
+import { useState, useRef, useEffect, useCallback, useMemo, useTransition, useDeferredValue, memo, type ReactNode } from 'react';
+import { AlertCircle, Loader2, RefreshCw, Search, Link2, MessageSquare, SquarePen, X } from 'lucide-react';
+import type { AgentRuntimeIdentity, ChatSession } from '@/lib/types';
 import { sessionTitle } from '@/hooks/useAskSession';
+import { useRunSummary } from '@/lib/agent-run-store';
 import { useLocale } from '@/lib/stores/locale-store';
+import { SessionRowActions } from '@/components/shared/SessionRowActions';
+import {
+  type RuntimeSessionEntry,
+} from '@/lib/runtime-session-entry';
+import {
+  buildChatSessionListEntry,
+  buildRuntimeSessionListEntry,
+  pluralizeSessionListCount,
+  sessionListEntryMatchesSearch,
+  type ChatSessionListEntry,
+  type RuntimeSessionListEntry,
+} from '@/lib/session-list-entry';
+import { SessionHistoryRow } from './SessionHistoryRow';
 
 interface SessionHistoryPanelProps {
   sessions: ChatSession[];
   activeSessionId: string | null;
+  selectedAgentRuntime?: AgentRuntimeIdentity | null;
+  runtimeSessions?: RuntimeSessionEntry[];
+  runtimeSessionsLoading?: boolean;
+  runtimeSessionsError?: string | null;
+  runtimeSessionActionId?: string | null;
+  runtimeSessionsSupported?: boolean;
   onLoad: (id: string) => void;
   onDelete: (id: string) => void;
+  onForkSession?: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onTogglePin: (id: string) => void;
   onClearAll: () => void;
   onClose: () => void;
   onNewChat: () => void;
+  onRefreshRuntimeSessions?: () => void;
+  onAttachRuntimeSession?: (entry: RuntimeSessionEntry) => void;
+  onForkRuntimeSession?: (entry: RuntimeSessionEntry) => void;
+  onArchiveRuntimeSession?: (entry: RuntimeSessionEntry) => void;
 }
 
-// ── Helpers ──
+type HistoryRow =
+  | { kind: 'session'; id: string; session: ChatSession; listEntry: ChatSessionListEntry; updatedAt: number; pinned: boolean }
+  | { kind: 'runtime-session'; id: string; entry: RuntimeSessionEntry; listEntry: RuntimeSessionListEntry; updatedAt: number; pinned: false };
 
-function formatRelativeTime(date: Date): string {
-  const now = Date.now();
-  const diff = now - date.getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
-
-function getTimeGroup(ts: number): 'pinned' | 'today' | 'yesterday' | 'week' | 'older' {
-  const now = new Date();
-  const date = new Date(ts);
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfYesterday = startOfToday - 86400000;
-  const startOfWeek = startOfToday - now.getDay() * 86400000;
-  if (ts >= startOfToday) return 'today';
-  if (ts >= startOfYesterday) return 'yesterday';
-  if (ts >= startOfWeek) return 'week';
-  return 'older';
-}
-
-function sessionPreview(s: ChatSession): string {
-  const firstUser = s.messages.find(m => m.role === 'user');
-  if (!firstUser) return '';
-  const text = firstUser.content.replace(/\s+/g, ' ').trim();
-  return text.length > 60 ? `${text.slice(0, 60)}...` : text;
+function compareHistoryRows(a: HistoryRow, b: HistoryRow): number {
+  if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+  if (a.updatedAt !== b.updatedAt) return b.updatedAt - a.updatedAt;
+  return a.id.localeCompare(b.id);
 }
 
 // ── Main Component ──
 
-export default function SessionHistoryPanel({
+function SessionHistoryPanel({
   sessions, activeSessionId,
-  onLoad, onDelete, onRename, onTogglePin, onClearAll,
+  selectedAgentRuntime,
+  runtimeSessions = [],
+  runtimeSessionsLoading = false,
+  runtimeSessionsError = null,
+  runtimeSessionActionId = null,
+  runtimeSessionsSupported = false,
+  onLoad, onDelete, onRename, onTogglePin,
+  onForkSession,
   onClose, onNewChat,
+  onRefreshRuntimeSessions, onAttachRuntimeSession, onForkRuntimeSession, onArchiveRuntimeSession,
 }: SessionHistoryPanelProps) {
   const { t } = useLocale();
-  const [isPending, startTransition] = useTransition();
+  const [, startTransition] = useTransition();
   const ask = t.ask;
+  // Run/unread state comes from agent-run-store's summary snapshot, which only
+  // changes on run start/end or unread membership — streaming chunks never
+  // re-render the list (spec-chat-session-concurrency.md performance bar).
+  const runSummary = useRunSummary();
   const [query, setQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
-  const [confirmClearAll, setConfirmClearAll] = useState(false);
-  const clearTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const searchRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const normalizedQuery = query.trim().toLowerCase();
+  const deferredNormalizedQuery = useDeferredValue(normalizedQuery);
+  const searchQuery = normalizedQuery ? deferredNormalizedQuery : '';
 
   // Focus search on mount
   useEffect(() => { searchRef.current?.focus(); }, []);
@@ -76,42 +90,80 @@ export default function SessionHistoryPanel({
   // Focus rename input
   useEffect(() => { if (editingId) setTimeout(() => inputRef.current?.focus(), 0); }, [editingId]);
 
-  // Clear timer cleanup
-  useEffect(() => () => { if (clearTimer.current) clearTimeout(clearTimer.current); }, []);
+  const sessionEntryById = useMemo(() => {
+    const index = new Map<string, ChatSessionListEntry>();
+    for (const session of sessions) {
+      index.set(session.id, buildChatSessionListEntry(session));
+    }
+    return index;
+  }, [sessions]);
+
+  const runtimeSessionEntryById = useMemo(() => {
+    const index = new Map<string, RuntimeSessionListEntry>();
+    for (const entry of runtimeSessions) {
+      index.set(entry.id, buildRuntimeSessionListEntry(entry));
+    }
+    return index;
+  }, [runtimeSessions]);
 
   // Filter sessions by search query
   const filtered = useMemo(() => {
-    if (!query.trim()) return sessions;
-    const q = query.toLowerCase();
-    return sessions.filter(s => {
-      const title = sessionTitle(s).toLowerCase();
-      if (title.includes(q)) return true;
-      return s.messages.some(m => m.content.toLowerCase().includes(q));
+    if (!searchQuery) return sessions;
+    return sessions.filter((session) => {
+      const entry = sessionEntryById.get(session.id);
+      return entry ? sessionListEntryMatchesSearch(entry, searchQuery) : false;
     });
-  }, [sessions, query]);
+  }, [sessions, searchQuery, sessionEntryById]);
 
-  // Group sessions by time
-  const groups = useMemo(() => {
-    const pinned: ChatSession[] = [];
-    const today: ChatSession[] = [];
-    const yesterday: ChatSession[] = [];
-    const week: ChatSession[] = [];
-    const older: ChatSession[] = [];
+  const filteredRuntimeSessions = useMemo(() => {
+    if (!runtimeSessionsSupported) return [];
+    if (!searchQuery) return runtimeSessions;
+    return runtimeSessions.filter((entry) => {
+      const listEntry = runtimeSessionEntryById.get(entry.id);
+      return listEntry ? sessionListEntryMatchesSearch(listEntry, searchQuery) : false;
+    });
+  }, [runtimeSessionEntryById, runtimeSessions, runtimeSessionsSupported, searchQuery]);
 
-    for (const s of filtered) {
-      if (s.pinned) { pinned.push(s); continue; }
-      const group = getTimeGroup(s.updatedAt);
-      if (group === 'today') today.push(s);
-      else if (group === 'yesterday') yesterday.push(s);
-      else if (group === 'week') week.push(s);
-      else older.push(s);
+  const pinnedCount = useMemo(() => sessions.filter(s => s.pinned).length, [sessions]);
+  const totalCount = useMemo(() => {
+    let count = 0;
+    for (const session of sessions) {
+      if (sessionEntryById.get(session.id)?.hasListContent) count += 1;
     }
-    return { pinned, today, yesterday, week, older };
-  }, [filtered]);
+    return count;
+  }, [sessions, sessionEntryById]);
+  const showRuntimeSessions = Boolean(selectedAgentRuntime && runtimeSessionsSupported);
+  const historyRows = useMemo<HistoryRow[]>(() => {
+    const rows: HistoryRow[] = filtered.map((session) => {
+      const listEntry = sessionEntryById.get(session.id) ?? buildChatSessionListEntry(session);
+      return {
+        kind: 'session',
+        id: session.id,
+        session,
+        listEntry,
+        updatedAt: listEntry.updatedAtMs ?? 0,
+        pinned: listEntry.pinned,
+      };
+    });
 
-  const pinnedCount = sessions.filter(s => s.pinned).length;
-  // Only count sessions with messages (non-empty)
-  const totalCount = sessions.filter(s => s.messages.length > 0).length;
+    if (showRuntimeSessions) {
+      for (const entry of filteredRuntimeSessions) {
+        const listEntry = runtimeSessionEntryById.get(entry.id) ?? buildRuntimeSessionListEntry(entry);
+        rows.push({
+          kind: 'runtime-session',
+          id: entry.id,
+          entry,
+          listEntry,
+          updatedAt: listEntry.updatedAtMs ?? 0,
+          pinned: false,
+        });
+      }
+    }
+
+    rows.sort(compareHistoryRows);
+    return rows;
+  }, [filtered, filteredRuntimeSessions, runtimeSessionEntryById, sessionEntryById, showRuntimeSessions]);
+  const totalHistoryCount = totalCount + (showRuntimeSessions ? runtimeSessions.length : 0);
 
   const handleLoad = useCallback((id: string) => {
     startTransition(() => {
@@ -141,20 +193,6 @@ export default function SessionHistoryPanel({
     });
   }, [editingId, editValue, onRename]);
 
-  const handleClearAll = useCallback(() => {
-    if (!confirmClearAll) {
-      setConfirmClearAll(true);
-      if (clearTimer.current) clearTimeout(clearTimer.current);
-      clearTimer.current = setTimeout(() => setConfirmClearAll(false), 3000);
-      return;
-    }
-    startTransition(() => {
-      if (clearTimer.current) clearTimeout(clearTimer.current);
-      onClearAll();
-      setConfirmClearAll(false);
-    });
-  }, [confirmClearAll, onClearAll]);
-
   // Keyboard: Esc to close
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -164,43 +202,15 @@ export default function SessionHistoryPanel({
     return () => document.removeEventListener('keydown', handler);
   }, [onClose, editingId]);
 
-  const renderGroup = (label: string, items: ChatSession[]) => {
-    if (items.length === 0) return null;
-    return (
-      <div key={label}>
-        <div className="text-2xs font-medium text-muted-foreground/50 uppercase tracking-wider px-1 py-2">
-          {label}
-        </div>
-        <div className="flex flex-col gap-1">
-          {items.map(s => (
-            <SessionCard
-              key={s.id}
-              session={s}
-              isActive={s.id === activeSessionId}
-              editing={editingId === s.id}
-              editValue={editValue}
-              onEditValueChange={setEditValue}
-              inputRef={inputRef}
-              onLoad={() => handleLoad(s.id)}
-              onStartRename={() => startRename(s)}
-              onCommitRename={commitRename}
-              onCancelRename={() => setEditingId(null)}
-              onDelete={() => onDelete(s.id)}
-              onTogglePin={() => onTogglePin(s.id)}
-              ask={ask}
-            />
-          ))}
-        </div>
-      </div>
-    );
-  };
-
-  const hasResults = filtered.length > 0;
+  const hasAnyResults = historyRows.length > 0 || (showRuntimeSessions && (runtimeSessionsLoading || Boolean(runtimeSessionsError)));
+  const statsLabel = showRuntimeSessions
+    ? pluralizeSessionListCount(totalHistoryCount, 'session', 'sessions')
+    : (ask?.historyStats?.(totalCount) ?? `${totalCount} conversations`);
 
   return (
     <div className="flex flex-col flex-1 min-h-0 animate-in fade-in-0 duration-150">
       {/* Search bar */}
-      <div className="px-4 pt-3 pb-2 shrink-0">
+      <div className="px-4 pt-2.5 pb-1.5 shrink-0">
         <div className="relative">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50" />
           <input
@@ -209,13 +219,14 @@ export default function SessionHistoryPanel({
             value={query}
             onChange={e => setQuery(e.target.value)}
             placeholder={ask?.historySearch ?? 'Search conversations...'}
-            className="w-full pl-8 pr-8 py-2 text-xs rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground/40 outline-none focus-visible:border-[var(--amber)]/40 transition-colors"
+            className="h-8 w-full rounded-md border border-border bg-background pl-8 pr-8 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/40 focus-visible:border-[var(--amber)]/40 focus-visible:ring-2 focus-visible:ring-ring/20"
           />
           {query && (
             <button
               type="button"
               onClick={() => setQuery('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-muted-foreground/40 hover:text-foreground"
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground/40 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <X size={12} />
             </button>
@@ -224,15 +235,29 @@ export default function SessionHistoryPanel({
       </div>
 
       {/* Stats bar */}
-      <div className="flex items-center justify-between px-4 pb-2 shrink-0">
-        <span className="text-2xs text-muted-foreground/60">
-          {ask?.historyStats?.(totalCount) ?? `${totalCount} conversations`}
-          {pinnedCount > 0 && <> &middot; {pinnedCount} {ask?.historyPinned ?? 'pinned'}</>}
+      <div className="flex items-center justify-between px-4 pb-1.5 shrink-0">
+        <span className="flex min-w-0 items-center gap-1.5 text-2xs text-muted-foreground/60">
+          <span className="min-w-0 truncate">
+            {statsLabel}
+            {pinnedCount > 0 && <> &middot; {pinnedCount} {ask?.historyPinned ?? 'pinned'}</>}
+          </span>
+          {showRuntimeSessions && onRefreshRuntimeSessions && (
+            <button
+              type="button"
+              onClick={onRefreshRuntimeSessions}
+              disabled={runtimeSessionsLoading}
+              className="hit-target-box inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground/45 transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-radius:var(--radius-md)]"
+              title="Refresh runtime sessions"
+              aria-label="Refresh runtime sessions"
+            >
+              {runtimeSessionsLoading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+            </button>
+          )}
         </span>
         <button
           type="button"
           onClick={handleNewChat}
-          className="flex items-center gap-1 text-2xs text-[var(--amber)] hover:text-[var(--amber)]/80 transition-colors"
+          className="hit-target-box inline-flex min-h-6 items-center gap-1 rounded-md px-1.5 text-2xs text-[var(--amber)] transition-colors hover:text-[var(--amber)]/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <SquarePen size={11} />
           <span>{t.hints?.newChat ?? 'New chat'}</span>
@@ -241,13 +266,60 @@ export default function SessionHistoryPanel({
 
       {/* Scrollable list */}
       <div className="flex-1 overflow-y-auto min-h-0 px-3 pb-3">
-        {hasResults ? (
-          <div className="flex flex-col gap-1">
-            {renderGroup(ask?.historyPinned ?? 'Pinned', groups.pinned)}
-            {renderGroup(ask?.historyToday ?? 'Today', groups.today)}
-            {renderGroup(ask?.historyYesterday ?? 'Yesterday', groups.yesterday)}
-            {renderGroup(ask?.historyThisWeek ?? 'This week', groups.week)}
-            {renderGroup(ask?.historyOlder ?? 'Older', groups.older)}
+        {hasAnyResults ? (
+          <div className="flex flex-col gap-0.5">
+            {showRuntimeSessions && runtimeSessionsError && (
+              <RuntimeHistoryNotice
+                tone="error"
+                icon={<AlertCircle size={12} className="mt-0.5 shrink-0 text-error" />}
+                text={runtimeSessionsError}
+              />
+            )}
+            {showRuntimeSessions && runtimeSessionsLoading && filteredRuntimeSessions.length === 0 && (
+              <RuntimeHistoryNotice
+                icon={<Loader2 size={12} className="animate-spin text-muted-foreground/50" />}
+                text="Loading runtime sessions..."
+              />
+            )}
+            {historyRows.map((row) => (
+              row.kind === 'session' ? (
+                <SessionHistoryRow
+                  key={`session:${row.id}`}
+                  session={row.session}
+                  title={row.listEntry.title}
+                  preview={row.listEntry.preview}
+                  runtimeSummary={row.listEntry.runtimeSummary}
+                  isActive={row.id === activeSessionId}
+                  isRunning={runSummary.running.has(row.id)}
+                  isUnread={!runSummary.running.has(row.id) && runSummary.unread.has(row.id)}
+                  editing={editingId === row.id}
+                  editValue={editValue}
+                  onEditValueChange={setEditValue}
+                  inputRef={inputRef}
+                  onLoad={() => handleLoad(row.id)}
+                  onStartRename={() => startRename(row.session)}
+                  onCommitRename={commitRename}
+                  onCancelRename={() => setEditingId(null)}
+                  onArchive={() => onDelete(row.id)}
+                  onFork={onForkSession ? () => {
+                    onForkSession(row.id);
+                    onClose();
+                  } : undefined}
+                  onTogglePin={() => onTogglePin(row.id)}
+                  ask={ask}
+                />
+              ) : (
+                <RuntimeSessionRow
+                  key={`runtime-session:${row.id}`}
+                  entry={row.entry}
+                  listEntry={row.listEntry}
+                  busy={runtimeSessionActionId === row.id}
+                  onAttach={onAttachRuntimeSession}
+                  onFork={onForkRuntimeSession}
+                  onArchive={onArchiveRuntimeSession}
+                />
+              )
+            ))}
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -264,143 +336,154 @@ export default function SessionHistoryPanel({
         )}
       </div>
 
-      {/* Footer */}
-      {totalCount > 0 && (
-        <div className="flex items-center justify-between px-4 py-2.5 border-t border-border/40 shrink-0">
-          <button
-            type="button"
-            onClick={handleClearAll}
-            className={`text-2xs px-2 py-0.5 rounded-md transition-colors ${
-              confirmClearAll
-                ? 'bg-error/10 text-error font-medium'
-                : 'text-muted-foreground/50 hover:text-error hover:bg-muted'
-            }`}
-          >
-            <span className="flex items-center gap-1">
-              <Trash2 size={10} />
-              {confirmClearAll ? (ask?.confirmClear ?? 'Confirm clear?') : (ask?.clearAll ?? 'Clear all')}
-            </span>
-          </button>
-          <span className="text-2xs text-muted-foreground/40 tabular-nums">
-            {ask?.historyCapacity?.(totalCount) ?? `${totalCount} of 30`}
-          </span>
-        </div>
-      )}
     </div>
   );
 }
 
-// ── Session Card ──
+// Memoized: ChatContent re-renders on every streamed chunk (it subscribes to the
+// active session's messages), but every prop here is referentially stable during
+// a stream, so memo keeps the open history panel from reconciling per chunk.
+export default memo(SessionHistoryPanel);
 
-function SessionCard({
-  session: s, isActive, editing, editValue, onEditValueChange, inputRef,
-  onLoad, onStartRename, onCommitRename, onCancelRename, onDelete, onTogglePin,
-  ask,
+function RuntimeHistoryNotice({
+  icon,
+  text,
+  tone = 'muted',
 }: {
-  session: ChatSession;
-  isActive: boolean;
-  editing: boolean;
-  editValue: string;
-  onEditValueChange: (v: string) => void;
-  inputRef: React.RefObject<HTMLInputElement | null>;
-  onLoad: () => void;
-  onStartRename: () => void;
-  onCommitRename: () => void;
-  onCancelRename: () => void;
-  onDelete: () => void;
-  onTogglePin: () => void;
-  ask: Record<string, any>;
+  icon: ReactNode;
+  text: string;
+  tone?: 'muted' | 'error';
 }) {
-  const title = sessionTitle(s);
-  const preview = sessionPreview(s);
-  const msgCount = s.messages.length;
+  return (
+    <div
+      className={`mb-0.5 flex items-start gap-2 rounded-md border px-3 py-2 text-2xs ${
+        tone === 'error'
+          ? 'border-border/60 bg-muted/30 text-muted-foreground'
+          : 'border-border/50 text-muted-foreground/60'
+      }`}
+    >
+      {icon}
+      <span className="min-w-0">{text}</span>
+    </div>
+  );
+}
+
+function RuntimeSessionRow({
+  entry,
+  listEntry,
+  busy,
+  onAttach,
+  onFork,
+  onArchive,
+}: {
+  entry: RuntimeSessionEntry;
+  listEntry: RuntimeSessionListEntry;
+  busy: boolean;
+  onAttach?: (entry: RuntimeSessionEntry) => void;
+  onFork?: (entry: RuntimeSessionEntry) => void;
+  onArchive?: (entry: RuntimeSessionEntry) => void;
+}) {
+  const title = listEntry.title;
+  const noun = listEntry.noun;
+  const updatedAtLabel = listEntry.updatedAtLabel;
+  const disabled = busy || !onAttach;
+  const hasActions = Boolean(onFork || onArchive);
+  const titleTrailingInsetClass = updatedAtLabel
+    ? busy
+      ? 'pr-16'
+      : 'pr-14'
+    : busy
+      ? 'pr-6'
+      : undefined;
 
   return (
     <div
-      className={`group relative rounded-lg transition-colors cursor-pointer ${
-        isActive
-          ? 'bg-[var(--amber)]/8 border border-[var(--amber)]/15'
-          : 'hover:bg-muted/60 border border-transparent'
+      data-runtime-session-row
+      role="button"
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled}
+      aria-label={`Open ${noun}: ${title}`}
+      title={`Open this ${noun}`}
+      onClick={() => {
+        if (!disabled) onAttach?.(entry);
+      }}
+      onKeyDown={(event) => {
+        if (disabled) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onAttach?.(entry);
+        }
+      }}
+      className={`group cursor-pointer rounded-md border border-transparent px-3 py-1.5 transition-colors hover:bg-muted/55 focus-within:bg-muted/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        disabled ? 'cursor-not-allowed opacity-50' : ''
       }`}
-      onClick={onLoad}
     >
-      {/* Active indicator */}
-      {isActive && (
-        <span className="absolute left-0 top-3 bottom-3 w-[2px] rounded-r-full bg-[var(--amber)]" />
-      )}
-
-      <div className="px-3 py-2.5">
-        {/* Title row */}
-        <div className="flex items-center gap-1.5 mb-0.5">
-          {s.pinned && <Pin size={10} className="shrink-0 text-[var(--amber)]/60 -rotate-45" />}
-          {editing ? (
-            <input
-              ref={inputRef}
-              type="text"
-              value={editValue}
-              onChange={e => onEditValueChange(e.target.value)}
-              onBlur={onCommitRename}
-              onKeyDown={e => {
-                if (e.key === 'Enter') { e.preventDefault(); onCommitRename(); }
-                if (e.key === 'Escape') { e.preventDefault(); onCancelRename(); }
-              }}
-              onClick={e => e.stopPropagation()}
-              className="flex-1 min-w-0 bg-transparent border-b border-[var(--amber)] outline-none text-xs font-medium text-foreground"
-            />
-          ) : (
-            <span className="flex-1 min-w-0 text-xs font-medium text-foreground truncate">
-              {title}
-            </span>
-          )}
-          <span className="text-2xs text-muted-foreground/40 shrink-0 tabular-nums">
-            {formatRelativeTime(new Date(s.updatedAt))}
+      <div className="relative flex min-w-0 items-center gap-1.5">
+        <span className={`min-w-0 flex-1 truncate text-xs font-medium text-foreground ${titleTrailingInsetClass ?? ''}`}>
+          {title}
+        </span>
+        {(updatedAtLabel || busy) && (
+          <span
+            data-session-row-time
+            className={`pointer-events-none absolute right-0 top-1/2 inline-flex -translate-y-1/2 items-center gap-1.5 text-2xs tabular-nums text-muted-foreground/40 transition-opacity duration-100 ${
+              hasActions ? 'group-hover:opacity-0 group-focus-within:opacity-0' : ''
+            }`}
+          >
+            {busy && (
+              <Loader2 size={11} className="shrink-0 animate-spin text-[var(--amber)]" />
+            )}
+            {updatedAtLabel && (
+              <span className="shrink-0">
+                {updatedAtLabel}
+              </span>
+            )}
           </span>
-        </div>
-
-        {/* Preview */}
-        {!editing && preview && (
-          <p className="text-2xs text-muted-foreground/50 truncate mt-0.5 pl-0.5">
-            {preview}
-          </p>
         )}
-
-        {/* Meta row */}
-        {!editing && (
-          <div className="flex items-center justify-between mt-1.5">
-            <span className="text-2xs text-muted-foreground/40 flex items-center gap-1">
-              <MessageSquare size={9} />
-              {ask?.historyMsgs?.(msgCount) ?? `${msgCount} msgs`}
-            </span>
-
-            {/* Action buttons — visible on hover */}
-            <div className="flex items-center gap-0.5 opacity-0 transition-opacity duration-75 group-hover:opacity-100 focus-within:opacity-100" onClick={e => e.stopPropagation()}>
-              <button
-                type="button"
-                onClick={onTogglePin}
-                className={`inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation ${s.pinned ? 'text-[var(--amber)] hover:bg-muted/60 hover:text-muted-foreground' : 'text-muted-foreground/40 hover:bg-[var(--amber)]/10 hover:text-[var(--amber)]'}`}
-                title={s.pinned ? 'Unpin' : 'Pin'}
-              >
-                {s.pinned ? <PinOff size={11} /> : <Pin size={11} />}
-              </button>
-              <button
-                type="button"
-                onClick={onStartRename}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/40 transition-colors duration-75 hover:text-foreground hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
-                title={ask?.renameSession ?? 'Rename'}
-              >
-                <Pencil size={11} />
-              </button>
-              <button
-                type="button"
-                onClick={onDelete}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/40 transition-colors duration-75 hover:text-error hover:bg-error/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
-                title="Delete"
-              >
-                <Trash2 size={11} />
-              </button>
-            </div>
-          </div>
+        {hasActions && (
+          <span
+            data-session-row-actions
+            className="pointer-events-none absolute right-0 top-1/2 z-10 inline-flex -translate-y-1/2 items-center justify-end rounded-md bg-background/90 pl-1 opacity-0 backdrop-blur-sm transition-opacity duration-100 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
+          >
+            <SessionRowActions
+              disabled={busy}
+              onFork={onFork ? () => onFork(entry) : undefined}
+              onArchive={onArchive ? () => onArchive(entry) : undefined}
+              labels={{
+                fork: `Fork ${noun}`,
+                archive: `Archive ${noun}`,
+              }}
+            />
+          </span>
         )}
+      </div>
+      <div
+        data-session-row-meta
+        className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground/45 opacity-0 transition-opacity duration-100 group-hover:opacity-100 group-focus-within:opacity-100"
+        title={listEntry.metadataTitle}
+      >
+        <span className="inline-flex shrink-0 items-center gap-1">
+          <Link2 size={9} className="text-[var(--amber)]/70" />
+          {listEntry.runtimeLabel}
+        </span>
+        {listEntry.status && (
+          <>
+            <span className="shrink-0 text-muted-foreground/25">·</span>
+            <span className="shrink-0">{listEntry.status}</span>
+          </>
+        )}
+        {listEntry.compactRuntimePath && (
+          <>
+            <span className="shrink-0 text-muted-foreground/25">·</span>
+            <span className="truncate font-mono">{listEntry.compactRuntimePath}</span>
+          </>
+        )}
+        <span className="shrink-0 text-muted-foreground/25">·</span>
+        <span className="min-w-0 max-w-[8.5rem] truncate font-mono">{listEntry.compactSessionId}</span>
+        <span className="shrink-0 text-muted-foreground/25">·</span>
+        <span className="inline-flex shrink-0 items-center gap-1">
+          <MessageSquare size={9} />
+          {typeof listEntry.messageCount === 'number' ? pluralizeSessionListCount(listEntry.messageCount, 'msg', 'msgs') : '? msgs'}
+        </span>
       </div>
     </div>
   );

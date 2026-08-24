@@ -1,12 +1,12 @@
 /**
- * One-shot (non-interactive) execution for CLI agent/chat commands.
+ * One-shot (non-interactive) execution for CLI agent commands.
  *
  * Counterpart to lib/repl.js (interactive mode).
- * Shared between `mindos agent -p` and `mindos ask -p`.
+ * Shared by `mindos agent -p` and the deprecated `mindos ask` alias.
  */
 
 import { dim, red } from './colors.js';
-import { streamSSE, postAsk, checkHealth } from './sse-stream.js';
+import { streamSSE, postAgentTurn, checkHealth } from './sse-stream.js';
 import { EXIT } from './command.js';
 
 /**
@@ -16,18 +16,31 @@ import { EXIT } from './command.js';
  * @param {string} opts.baseUrl - e.g. http://localhost:3456
  * @param {string} opts.token - auth token
  * @param {string} opts.message - user message / task
- * @param {'agent'|'chat'} opts.mode
+ * @param {'default'|'plan'|'goal'} [opts.agentMode]
+ * @param {'read'|'ask'|'auto'|'full'} [opts.permissionMode]
  * @param {boolean} [opts.showTools=false] - show tool calls in output
  * @param {number} [opts.maxSteps] - max agent steps
  * @param {string[]} [opts.attachedFiles] - file attachments
+ * @param {string} [opts.providerOverride] - AI provider override
+ * @param {string} [opts.modelOverride] - model override
+ * @param {object} [opts.runtimeOptions] - runtime-specific request options
+ * @param {object} [opts.agentOptions] - MindOS agent request options
+ * @param {object} [opts.workDir] - request-scoped working directory
  * @param {boolean} [opts.json=false] - output as JSON
  */
 export async function executeOneShot(opts) {
   const {
-    baseUrl, token, message, mode,
+    baseUrl, token, message,
+    agentMode = 'default',
+    permissionMode,
     showTools = false,
     maxSteps,
     attachedFiles,
+    providerOverride,
+    modelOverride,
+    runtimeOptions,
+    agentOptions,
+    workDir,
     json = false,
   } = opts;
 
@@ -43,13 +56,20 @@ export async function executeOneShot(opts) {
 
   const body = {
     messages: [{ role: 'user', content: message, timestamp: Date.now() }],
-    mode,
+    agentMode,
   };
+  if (permissionMode) body.permissionMode = permissionMode;
   if (attachedFiles) body.attachedFiles = attachedFiles;
   if (maxSteps) body.maxSteps = maxSteps;
+  if (providerOverride) body.providerOverride = providerOverride;
+  if (modelOverride) body.modelOverride = modelOverride;
+  if (runtimeOptions) body.runtimeOptions = runtimeOptions;
+  if (agentOptions) body.agentOptions = agentOptions;
+  if (workDir) body.workDir = workDir;
 
   try {
-    const res = await postAsk(baseUrl, body, token);
+    const sessionId = `cli-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const res = await postAgentTurn(baseUrl, sessionId, body, token);
 
     if (!res.ok) {
       const errText = await res.text();

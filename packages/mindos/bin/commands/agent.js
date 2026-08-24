@@ -1,39 +1,51 @@
 /**
  * mindos agent — AI Agent: interactive REPL (default) or one-shot (-p)
  *
- * Inspired by Claude Code: bare `mindos agent` enters interactive mode;
- * `mindos agent -p "task"` prints the result and exits.
+ * Inspired by Claude Code: bare `mindos` or `mindos agent` enters interactive
+ * mode; `mindos -p "task"` / `mindos agent -p "task"` prints and exits.
  *
  * Management subcommands (list/info/stats) are available as sub-routes.
  */
 
 import { bold, dim, cyan, green, red, yellow } from '../lib/colors.js';
 import { MCP_AGENTS, detectAgentPresence } from '../lib/mcp-agents.js';
-import { existsSync, readFileSync } from 'node:fs';
 import { loadConfig } from '../lib/config.js';
 import { output, isJsonMode, EXIT } from '../lib/command.js';
 import { startRepl } from '../lib/repl.js';
 import { executeOneShot } from '../lib/one-shot.js';
 import { expandHome } from '../lib/path-expand.js';
+import { prepareAgentInvocation } from '../lib/agent-options.js';
+import { inspectAgentReadiness } from '../lib/agent-readiness.js';
 
 const MANAGEMENT_SUBCOMMANDS = new Set(['list', 'ls', 'info', 'stats', 'help']);
 
 export const meta = {
   name: 'agent',
   group: 'AI',
-  summary: 'AI Agent: interactive REPL or one-shot (-p)',
-  usage: 'mindos agent [-p "<task>"]',
+  summary: 'MindOS AI Agent: interactive REPL or one-shot (-p)',
+  usage: 'mindos agent [-p "<task>"] [options]',
   flags: {
     '-p, --print': 'Non-interactive: run task and print result',
     '--file <path>': 'Attach a file as context',
+    '@<path>': 'Attach a file as context (positional shorthand)',
+    '--provider <id>': 'Use a provider for this request',
+    '--model <model>': 'Use a model for this request',
+    '--thinking <level|budget|off>': 'Override thinking for this request',
+    '--no-thinking': 'Disable thinking for this request',
+    '--readonly': 'Run with read-only tool permissions',
+    '--agent': 'Run with standard agent permissions (ask before risky writes)',
+    '--cwd, --workdir <path>': 'Run this request from a working directory',
     '--max-steps <n>': 'Max agent steps (default: 20)',
     '--json': 'Output as JSON (implies -p)',
     '--port <port>': 'MindOS web port (default: 3456)',
   },
   examples: [
-    'mindos agent                    # interactive REPL',
+    'mindos                          # interactive REPL',
+    'mindos "Summarize notes"        # top-level one-shot',
+    'mindos -p "Organize my inbox"',
+    'mindos @notes/today.md -p "Summarize"',
     'mindos agent -p "Organize my inbox"',
-    'mindos agent "Summarize notes"  # also one-shot',
+    'mindos agent --readonly --model claude-sonnet-4 "Review this"',
     'mindos agent list               # list detected agents',
   ],
 };
@@ -50,49 +62,51 @@ export async function run(args, flags) {
     return;
   }
 
-  // Determine mode: -p / --print / --json / bare task → print; otherwise interactive
-  const isPrintMode = flags.p || flags.print || isJsonMode(flags) || (sub != null);
+  const invocation = await prepareAgentInvocation(args, flags);
+
+  // Determine mode: -p / --print / --json / bare task/stdin → print; otherwise interactive.
+  const isPrintMode = flags.p || flags.print || isJsonMode(flags) || invocation.hasMessage;
 
   if (isPrintMode) {
-    const task = args.join(' ');
-    if (!task) {
+    if (!invocation.hasMessage) {
       console.error(red('No task provided.'));
       console.error(dim('Usage: mindos agent -p "<task>"'));
+      console.error(dim('       mindos -p "<task>"'));
       console.error(dim('       mindos agent    (interactive mode)'));
       process.exit(EXIT.ARGS);
     }
-    return agentExecute(task, flags);
+    return agentExecute(invocation, flags);
   }
 
   // Interactive REPL (default)
-  return agentInteractive(flags);
+  return agentInteractive(flags, invocation);
 }
 
 // ---------------------------------------------------------------------------
 // Interactive REPL
 // ---------------------------------------------------------------------------
 
-async function agentInteractive(flags) {
+async function agentInteractive(flags, invocation = {}) {
   loadConfig();
   const port = flags.port || process.env.MINDOS_WEB_PORT || '3456';
   const token = process.env.MINDOS_AUTH_TOKEN || '';
   const baseUrl = `http://localhost:${port}`;
 
-  const maxSteps = (() => {
-    if (!flags['max-steps']) return undefined;
-    const n = parseInt(flags['max-steps'], 10);
-    return (!Number.isNaN(n) && n > 0) ? n : undefined;
-  })();
-
   await startRepl({
     baseUrl,
     token,
-    mode: 'agent',
+    agentMode: 'default',
+    permissionMode: invocation.permissionMode,
     prompt: 'agent> ',
-    welcome: bold('MindOS Agent') + dim(' (interactive) — full tool access'),
+    welcome: bold('MindOS Agent') + dim(' (interactive)'),
     showTools: true,
-    attachedFiles: flags.file ? [flags.file] : undefined,
-    maxSteps,
+    attachedFiles: invocation.attachedFiles,
+    maxSteps: invocation.maxSteps,
+    providerOverride: invocation.providerOverride,
+    modelOverride: invocation.modelOverride,
+    runtimeOptions: invocation.runtimeOptions,
+    agentOptions: invocation.agentOptions,
+    workDir: invocation.workDir,
   });
 }
 
@@ -100,25 +114,25 @@ async function agentInteractive(flags) {
 // Print Mode — One-shot Task Execution
 // ---------------------------------------------------------------------------
 
-async function agentExecute(task, flags) {
+async function agentExecute(invocation, flags) {
   loadConfig();
   const port = flags.port || process.env.MINDOS_WEB_PORT || '3456';
   const token = process.env.MINDOS_AUTH_TOKEN || '';
 
-  const maxSteps = (() => {
-    if (!flags['max-steps']) return undefined;
-    const n = parseInt(flags['max-steps'], 10);
-    return (!Number.isNaN(n) && n > 0) ? n : undefined;
-  })();
-
   await executeOneShot({
     baseUrl: `http://localhost:${port}`,
     token,
-    message: task,
-    mode: 'agent',
+    message: invocation.message,
+    agentMode: 'default',
+    permissionMode: invocation.permissionMode,
     showTools: true,
-    maxSteps,
-    attachedFiles: flags.file ? [flags.file] : undefined,
+    maxSteps: invocation.maxSteps,
+    attachedFiles: invocation.attachedFiles,
+    providerOverride: invocation.providerOverride,
+    modelOverride: invocation.modelOverride,
+    runtimeOptions: invocation.runtimeOptions,
+    agentOptions: invocation.agentOptions,
+    workDir: invocation.workDir,
     json: isJsonMode(flags),
   });
 }
@@ -127,27 +141,20 @@ async function agentExecute(task, flags) {
 // Agent Management — List / Info / Stats
 // ---------------------------------------------------------------------------
 
-function hasMindosConfig(agent) {
-  const paths = [agent.global, agent.project].filter(Boolean).map(expandHome);
-  for (const p of paths) {
-    try {
-      if (!existsSync(p)) continue;
-      const raw = readFileSync(p, 'utf-8')
-        .replace(/\/\/.*$/gm, '')
-        .replace(/\/\*[\s\S]*?\*\//g, '');
-      const data = JSON.parse(raw);
-      const servers = data[agent.key] || {};
-      if (Object.keys(servers).some(k => k.toLowerCase().includes('mindos'))) return true;
-    } catch { /* skip */ }
-  }
-  return false;
-}
-
 function agentList(flags) {
   const agents = [];
   for (const [key, agent] of Object.entries(MCP_AGENTS)) {
     if (!detectAgentPresence(key)) continue;
-    agents.push({ key, name: agent.name, installed: true, mindosConnected: hasMindosConfig(agent) });
+    const readiness = inspectAgentReadiness(key);
+    agents.push({
+      key,
+      name: agent.name,
+      installed: true,
+      mindosConnected: readiness.mcp.configured,
+      skillInstalled: readiness.skill.installed,
+      ready: readiness.ready,
+      status: readiness.status,
+    });
   }
 
   if (isJsonMode(flags)) {
@@ -162,10 +169,15 @@ function agentList(flags) {
 
   console.log('\n' + bold('Detected Agents (' + agents.length + '):') + '\n');
   for (const a of agents) {
-    const st = a.mindosConnected ? green('● connected') : dim('○ not connected');
+    const st = a.ready
+      ? green('● ready')
+      : a.mindosConnected
+        ? yellow('● needs repair')
+        : dim('○ not connected');
     console.log('  ' + a.name.padEnd(20) + ' ' + st);
   }
-  console.log('\n' + dim('Connect: mindos mcp install <agent-key>') + '\n');
+  console.log('\n' + dim('Connect/repair: mindos mcp install <agent-key> -g -y'));
+  console.log(dim('Verify:         mindos doctor agents <agent-key>') + '\n');
 }
 
 function agentInfo(key, flags) {
@@ -180,13 +192,20 @@ function agentInfo(key, flags) {
     process.exit(EXIT.NOT_FOUND);
   }
 
-  const installed = detectAgentPresence(key);
-  const connected = installed ? hasMindosConfig(agent) : false;
+  const readiness = inspectAgentReadiness(key);
+  const installed = readiness.present;
+  const connected = readiness.mcp.configured;
   const info = {
     key,
     name: agent.name,
     installed,
     mindosConnected: connected,
+    skillInstalled: readiness.skill.installed,
+    ready: readiness.ready,
+    status: readiness.status,
+    mcp: readiness.mcp,
+    skill: readiness.skill,
+    command: readiness.command,
     transport: agent.preferredTransport,
   };
 
@@ -198,10 +217,13 @@ function agentInfo(key, flags) {
   console.log('\n' + bold(agent.name));
   console.log('  Key:       ' + key);
   console.log('  Installed: ' + (installed ? green('yes') : red('no')));
-  console.log('  MindOS:    ' + (connected ? green('connected') : yellow('not connected')));
+  console.log('  MindOS:    ' + (readiness.ready ? green('ready') : connected ? yellow('needs repair') : yellow('not connected')));
+  console.log('  MCP:       ' + (connected ? green(`${readiness.mcp.transport || 'configured'}`) : yellow('missing')));
+  console.log('  Skill:     ' + (readiness.skill.installed ? green(readiness.skill.skillName) : red(`missing ${readiness.skill.skillName}`)));
   console.log('  Transport: ' + agent.preferredTransport);
   if (agent.global) console.log('  Config:    ' + expandHome(agent.global));
-  if (!connected && installed) console.log('\n  Connect: mindos mcp install ' + key);
+  console.log('  Doctor:    mindos doctor agents ' + key);
+  if (!readiness.ready) console.log('\n  Repair: mindos mcp install ' + key + ' -g -y');
   console.log('');
 }
 
@@ -220,14 +242,19 @@ function agentStats(flags) {
 
 export function printHelp() {
   console.log(`
-${bold('mindos agent')} — AI Agent with full tool access
+${bold('mindos agent')} — MindOS AI Agent with full tool access
 
 ${bold('Interactive (default):')}
-  ${cyan('mindos agent')}                         Enter multi-turn REPL
+  ${cyan('mindos')}                               Enter multi-turn REPL
+  ${cyan('mindos agent')}                         Explicit REPL entrypoint
   ${dim('Commands inside REPL: /clear, /exit')}
 
 ${bold('Non-interactive (-p):')}
-  ${cyan('mindos agent -p "<task>"')}              Run task, print result, exit
+  ${cyan('mindos -p "<task>"')}                    Run task, print result, exit
+  ${cyan('mindos "<task>"')}                       Same (shorthand)
+  ${cyan('cat note.md | mindos -p "Summarize"')}   Read stdin as task context
+  ${cyan('mindos @note.md -p "Summarize"')}        Attach file context
+  ${cyan('mindos agent -p "<task>"')}              Explicit stable form
   ${cyan('mindos agent "<task>"')}                 Same (shorthand)
 
 ${bold('Manage agents:')}
@@ -238,9 +265,18 @@ ${bold('Manage agents:')}
 ${bold('Options:')}
   ${dim('-p, --print')}          Non-interactive mode
   ${dim('--file <path>')}        Attach file as context
+  ${dim('@<path>')}              Attach file as context
+  ${dim('--provider <id>')}      Provider override for this request
+  ${dim('--model <model>')}      Model override for this request
+  ${dim('--thinking <value>')}   Thinking override: off, minimal, low, medium, high, xhigh, max, or token budget
+  ${dim('--no-thinking')}        Disable thinking for this request
+  ${dim('--readonly')}           Read-only tool permissions
+  ${dim('--agent')}              Full local agent permissions (default)
+  ${dim('--cwd <path>')}         Working directory for this request
   ${dim('--max-steps <n>')}      Max agent steps (default: 20)
   ${dim('--json')}               JSON output (implies -p)
 
-${bold('Note:')} For lightweight Q&A (read-only), use ${cyan('mindos ask')}.
+${bold('Note:')} ${cyan('mindos')} now opens the MindOS Agent by default.
+Use ${cyan('mindos agent')} when scripts need the explicit stable command.
 `);
 }

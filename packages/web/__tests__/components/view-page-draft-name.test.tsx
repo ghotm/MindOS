@@ -38,6 +38,7 @@ vi.mock('@/lib/renderers/useRendererState', () => ({
 }));
 
 vi.mock('@/lib/renderers/registry', () => ({
+  registerRenderer: vi.fn(),
   resolveRenderer: () => undefined,
   isRendererEnabled: () => false,
 }));
@@ -51,7 +52,12 @@ vi.mock('@/components/MarkdownEditor', () => ({
   default: () => <textarea aria-label="Editor" />,
 }));
 vi.mock('@/components/EditorWrapper', () => ({ default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
-vi.mock('@/components/TableOfContents', () => ({ default: () => <div /> }));
+vi.mock('@/components/TableOfContents', () => ({
+  default: () => <div />,
+  parseTableOfContentsHeadings: () => [],
+  readTableOfContentsCollapsed: () => false,
+  subscribeTableOfContentsCollapsed: () => () => {},
+}));
 vi.mock('@/components/FindInPage', () => ({ default: () => <div /> }));
 vi.mock('@/components/DirPicker', () => ({ default: () => <div /> }));
 vi.mock('@/components/ExportModal', () => ({ default: () => null }));
@@ -78,6 +84,10 @@ vi.mock('@/lib/stores/editor-theme-store', () => ({
 vi.mock('@/lib/twemoji', () => ({
   twemojiToNative: (value: string) => value,
 }));
+vi.mock('@/lib/plugins/client', () => ({
+  fetchPluginViewSurfacesForExtension: vi.fn().mockResolvedValue([]),
+  pluginViewSurfaceHref: vi.fn(() => null),
+}));
 
 describe('ViewPageClient draft file names', () => {
   let host: HTMLDivElement;
@@ -97,6 +107,16 @@ describe('ViewPageClient draft file names', () => {
     document.body.removeChild(host);
   });
 
+  async function flushDeferredFileBody() {
+    await act(async () => {
+      await new Promise<void>((resolve) => {
+        const raf = window.requestAnimationFrame
+          ?? ((cb: FrameRequestCallback) => window.setTimeout(() => cb(performance.now()), 0));
+        raf(() => raf(() => resolve()));
+      });
+    });
+  }
+
   it('allows consecutive dots inside a draft file name', async () => {
     const createDraftAction = vi.fn().mockResolvedValue(undefined);
 
@@ -114,6 +134,10 @@ describe('ViewPageClient draft file names', () => {
         />,
       );
     });
+
+    expect(host.querySelector('[data-file-body-warmup]')).not.toBeNull();
+
+    await flushDeferredFileBody();
 
     const nameInput = host.querySelector('input[placeholder="Untitled.md"]') as HTMLInputElement | null;
     expect(nameInput).not.toBeNull();

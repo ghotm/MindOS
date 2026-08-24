@@ -20,7 +20,7 @@ const PANEL_WIDTH = 300;
 
 /* ── Save Single Message Button (for message action bar) ── */
 
-export function SaveMessageButton({ text }: { text: string }) {
+export function SaveMessageButton({ text, variant = 'default' }: { text: string; variant?: 'default' | 'dock' }) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -34,11 +34,14 @@ export function SaveMessageButton({ text }: { text: string }) {
         ref={btnRef}
         type="button"
         onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-        className={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors duration-75 touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-          open
-            ? 'border-[var(--amber)]/40 bg-[var(--amber)]/10 text-[var(--amber)]'
-            : 'border-border/60 bg-card text-muted-foreground hover:bg-[var(--amber)]/10 hover:text-[var(--amber)] shadow-sm'
-        }`}
+        className={variant === 'dock'
+          ? `hit-target-box inline-flex h-7 w-7 items-center justify-center text-muted-foreground transition-colors duration-75 touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-bg:transparent] [--hit-target-hover-bg:color-mix(in_srgb,var(--amber)_10%,transparent)] [--hit-target-radius:var(--radius-sm)] ${open ? 'text-[var(--amber)]' : 'hover:text-[var(--amber)]'}`
+          : `inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors duration-75 touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+              open
+                ? 'border-[var(--amber)]/40 bg-[var(--amber)]/10 text-[var(--amber)]'
+                : 'border-border/60 bg-card text-muted-foreground hover:bg-[var(--amber)]/10 hover:text-[var(--amber)] shadow-sm'
+            }`}
+        aria-label={t.ask?.saveToKB ?? 'Save to knowledge base'}
         title={t.ask?.saveToKB ?? 'Save to knowledge base'}
       >
         <FolderInput size={11} />
@@ -108,13 +111,13 @@ function MessageIntentCards({ content, onSelect, onClose, ask }: {
           className="flex flex-col items-center gap-1 p-2.5 border border-[var(--amber)]/30 rounded-lg hover:border-[var(--amber)]/60 hover:shadow-sm active:scale-[0.98] transition-all">
           <FolderInput size={16} className="text-[var(--amber)]" />
           <span className="text-2xs font-medium text-foreground">{ask?.saveDirectly ?? 'Save directly'}</span>
-          <span className="text-[10px] text-muted-foreground text-center leading-tight">{ask?.saveDirectlyDesc ?? 'Save as-is'}</span>
+          <span className="whitespace-nowrap text-[10px] text-muted-foreground text-center leading-tight">{ask?.saveDirectlyDesc ?? 'Save as-is'}</span>
         </button>
         <button type="button" onClick={() => onSelect('digest')}
           className="flex flex-col items-center gap-1 p-2.5 border border-border rounded-lg hover:border-[var(--amber)]/50 hover:shadow-sm active:scale-[0.98] transition-all">
           <Sparkles size={16} className="text-[var(--amber)]" />
           <span className="text-2xs font-medium text-foreground">{ask?.organizeToNote ?? 'Organize to note'}</span>
-          <span className="text-[10px] text-muted-foreground text-center leading-tight">{ask?.organizeToNoteDesc ?? 'AI organizes'}</span>
+          <span className="whitespace-nowrap text-[10px] text-muted-foreground text-center leading-tight">{ask?.organizeToNoteDesc ?? 'Extract key points'}</span>
         </button>
       </div>
     </div>
@@ -141,10 +144,11 @@ export function SaveSessionButton({ messages, disabled }: {
         type="button"
         onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
         disabled={disabled}
-        className={`relative z-10 h-9 w-9 inline-flex items-center justify-center rounded-lg transition-colors pointer-events-auto touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        data-hit-active={open ? 'true' : undefined}
+        className={`hit-target-box relative z-10 h-9 w-9 inline-flex items-center justify-center transition-colors pointer-events-auto touch-manipulation focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-radius:var(--radius-lg)] [--hit-target-hover-bg:var(--muted)] [--hit-target-active-bg:color-mix(in_srgb,var(--amber)_10%,transparent)] ${
           open
-            ? 'bg-[var(--amber)]/10 text-[var(--amber)]'
-            : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+            ? 'text-[var(--amber)]'
+            : 'text-muted-foreground hover:text-foreground'
         } disabled:pointer-events-none disabled:opacity-40`}
         title={t.ask?.saveSession ?? 'Save session'}
       >
@@ -358,13 +362,13 @@ function IntentCards({ messages, onSelect, onClose, ask }: {
           className="flex flex-col items-center gap-1 p-2.5 border border-[var(--amber)]/30 rounded-lg hover:border-[var(--amber)]/60 hover:shadow-sm active:scale-[0.98] transition-all">
           <FolderInput size={16} className="text-[var(--amber)]" />
           <span className="text-2xs font-medium text-foreground">{ask?.saveDirectly ?? 'Save directly'}</span>
-          <span className="text-[10px] text-muted-foreground text-center leading-tight">{ask?.saveDirectlyDesc ?? 'Save as-is'}</span>
+          <span className="whitespace-nowrap text-[10px] text-muted-foreground text-center leading-tight">{ask?.saveDirectlyDesc ?? 'Save as-is'}</span>
         </button>
         <button type="button" onClick={() => onSelect('digest')}
           className="flex flex-col items-center gap-1 p-2.5 border border-border rounded-lg hover:border-[var(--amber)]/50 hover:shadow-sm active:scale-[0.98] transition-all">
           <Sparkles size={16} className="text-[var(--amber)]" />
           <span className="text-2xs font-medium text-foreground">{ask?.organizeToNote ?? 'Organize to note'}</span>
-          <span className="text-[10px] text-muted-foreground text-center leading-tight">{ask?.organizeToNoteDesc ?? 'AI extracts insights'}</span>
+          <span className="whitespace-nowrap text-[10px] text-muted-foreground text-center leading-tight">{ask?.organizeToNoteDesc ?? 'Extract key points'}</span>
         </button>
       </div>
     </div>

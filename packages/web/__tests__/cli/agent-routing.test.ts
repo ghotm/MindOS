@@ -1,5 +1,5 @@
 /**
- * Tests for agent/ask CLI routing logic:
+ * Tests for agent CLI routing logic:
  * - `-p` flag → non-interactive (print mode)
  * - No `-p` + no args → interactive REPL
  * - Management subcommands → direct execution
@@ -30,18 +30,8 @@ function classifyAgentArgs(
   return 'interactive';
 }
 
-function classifyAskArgs(
-  args: string[],
-  flags: Record<string, unknown> = {},
-): 'interactive' | 'print' {
-  if (flags.p || flags.print) return 'print';
-  if (args.length > 0) return 'print';
-  return 'interactive';
-}
-
 function buildAskBody(
   content: string | string[],
-  mode: 'agent' | 'chat',
   opts: { file?: string; maxSteps?: number } = {},
 ) {
   const messages = Array.isArray(content)
@@ -52,7 +42,7 @@ function buildAskBody(
       }))
     : [{ role: 'user', content, timestamp: Date.now() }];
 
-  const body: Record<string, unknown> = { messages, mode };
+  const body: Record<string, unknown> = { messages };
   if (opts.file) body.attachedFiles = [opts.file];
   if (opts.maxSteps) body.maxSteps = opts.maxSteps;
   return body;
@@ -112,32 +102,12 @@ describe('Agent CLI routing', () => {
   });
 });
 
-// ── Ask routing ───────────────────────────────────────────────────────────────
-
-describe('Ask CLI routing', () => {
-  it('routes empty args to interactive', () => {
-    expect(classifyAskArgs([])).toBe('interactive');
-  });
-
-  it('routes -p with question to print', () => {
-    expect(classifyAskArgs(['what is RAG'], { p: true })).toBe('print');
-  });
-
-  it('routes bare question (no -p) to print for backward compat', () => {
-    expect(classifyAskArgs(['what is RAG'])).toBe('print');
-  });
-
-  it('routes --print flag to print', () => {
-    expect(classifyAskArgs(['hello'], { print: true })).toBe('print');
-  });
-});
-
 // ── API body construction ─────────────────────────────────────────────────────
 
 describe('Ask API body construction', () => {
-  it('builds agent mode body with correct message format', () => {
-    const body = buildAskBody('do something', 'agent');
-    expect(body.mode).toBe('agent');
+  it('builds request body with correct message format', () => {
+    const body = buildAskBody('do something');
+    expect(body).not.toHaveProperty('mode');
     expect(body.messages).toHaveLength(1);
     const msg = (body.messages as any[])[0];
     expect(msg.role).toBe('user');
@@ -145,13 +115,8 @@ describe('Ask API body construction', () => {
     expect(msg.timestamp).toBeTypeOf('number');
   });
 
-  it('builds chat mode body', () => {
-    const body = buildAskBody('what is RAG', 'chat');
-    expect(body.mode).toBe('chat');
-  });
-
   it('builds multi-turn conversation body', () => {
-    const body = buildAskBody(['hello', 'hi there', 'how are you'], 'chat');
+    const body = buildAskBody(['hello', 'hi there', 'how are you']);
     expect(body.messages).toHaveLength(3);
     const msgs = body.messages as any[];
     expect(msgs[0].role).toBe('user');
@@ -160,17 +125,17 @@ describe('Ask API body construction', () => {
   });
 
   it('attaches file when provided', () => {
-    const body = buildAskBody('summarize', 'agent', { file: 'notes.md' });
+    const body = buildAskBody('summarize', { file: 'notes.md' });
     expect(body.attachedFiles).toEqual(['notes.md']);
   });
 
   it('sets maxSteps when provided', () => {
-    const body = buildAskBody('do task', 'agent', { maxSteps: 10 });
+    const body = buildAskBody('do task', { maxSteps: 10 });
     expect(body.maxSteps).toBe(10);
   });
 
   it('omits attachedFiles and maxSteps when not provided', () => {
-    const body = buildAskBody('simple task', 'agent');
+    const body = buildAskBody('simple task');
     expect(body.attachedFiles).toBeUndefined();
     expect(body.maxSteps).toBeUndefined();
   });

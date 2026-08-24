@@ -1,40 +1,28 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer as createNodeServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CORS_HEADERS,
+  createDefaultSkillAgentRegistry,
   createDefaultMindosHttpServices,
   createMindosHttpServer,
-  handleA2aAgentsGet,
-  handleA2aDelegationsGet,
-  handleA2aDiscoverPost,
-  handleA2aOptions,
-  handleA2aPost,
-  handleAcpConfigDelete,
-  handleAcpConfigGet,
-  handleAcpConfigPost,
-  handleAcpDetectGet,
-  handleAcpInstallPost,
-  handleAcpRegistryGet,
-  handleAcpSessionDelete,
-  handleAcpSessionGet,
-  handleAcpSessionPost,
-  resolveNpmInvocation,
-  handleAskSessionsDelete,
-  handleAskSessionsGet,
-  handleAskSessionsPost,
   handleFiles,
   handleFileGet,
+  handleOpenInFileManagerGet,
   handleFilePost,
-  handleBacklinks,
-  handleBootstrapGet,
-  handleChannelsVerifyPost,
-  handleConnectGet,
+  handleCodexThreadsGet,
   handleGit,
   handleGraph,
-  handleAskStream,
+  handleAgentTurnStream,
   handleAgentActivity,
+  handleAgentActivityPost,
+  handleAssistantsDelete,
+  handleAssistantsGet,
+  handleAssistantsPost,
+  handleAgentRuntimesGet,
   handleAgentCopySkillPost,
   handleCustomAgentDetectPost,
   handleCustomAgentsDelete,
@@ -47,6 +35,8 @@ import {
   handleImConfigDelete,
   handleImConfigGet,
   handleImConfigPut,
+  handleImFeishuOAuthCallbackGet,
+  handleImFeishuOAuthGet,
   handleImFeishuLongConnectionDelete,
   handleImFeishuLongConnectionGet,
   handleImFeishuLongConnectionPost,
@@ -60,62 +50,24 @@ import {
   handleChangesPost,
   handleStaticArtifact,
   handleMcpStatus,
+  handleMcpTokenReveal,
   handleMcpAgentsGet,
-  handleMcpInstallPost,
-  handleMcpInstallSkillPost,
-  resolveNpxInvocation,
-  findMcpProcessIdsByPort,
-  handleMcpRestartPost,
-  handleMcpUninstallPost,
-  isMindosMcpCommandLine,
-  parseNetstatListeningPids,
-  handleMcpDirectToolsPost,
-  handleMcpToolsGet,
   handleRawFile,
   handleRecentFiles,
-  handleSettingsGet,
-  handleSettingsListModelsPost,
-  handleSettingsPost,
-  handleSettingsResetTokenPost,
-  handleSettingsTestKeyPost,
-  handleSkillsGet,
-  handleSkillsPost,
-  handleSpaceOverviewGet,
-  handleSyncGet,
-  handleSyncPost,
   handleSearch,
   handleSearchPrewarm,
-  handleSetupCheckPath,
-  handleSetupCheckPort,
-  handleSetupGenerateToken,
-  handleSetupListDirectories,
-  handleMonitoringGet,
-  handleRestartPost,
-  handleUninstallPost,
-  handleUpdateCheckGet,
-  handleUpdatePost,
-  handleUpdateStatusGet,
-  handleWorkflowsGet,
-  handleWorkflowsPost,
   createMindosHealth,
   collectAllFilesFromMindRoot,
   getDefaultMindRoot,
-  getSkillRootsFromRuntime,
   getMindosServerContract,
   getRecentlyModifiedFromMindRoot,
   readTextFileFromMindRoot,
   getTreeVersionFromMindRoot,
-  handleTreeVersion,
   searchMindRoot,
-  readMindosProductVersion,
-  type MindosSkillsSettings,
-  type CustomAgentSettings,
-  type MindosCustomMcpAgentDef,
-  type MindosMcpAgentDef,
-  type MindosMcpAgentRegistryDef,
+  readMindosProductVersion
 } from './server.js';
 
-describe('MindOS product server contract', () => {
+describe('MindOS server contract: core, files, HTTP', () => {
   it('exposes stable route metadata owned by the product runtime', () => {
     const contract = getMindosServerContract();
 
@@ -175,27 +127,33 @@ describe('MindOS product server contract', () => {
       auth: 'required',
     });
     expect(contract.routes).toContainEqual({
-      id: 'ask.stream',
+      id: 'agent.sessions.turns.create',
       method: 'POST',
-      path: '/api/ask',
+      path: '/api/agent/sessions/[sessionId]/turns',
       auth: 'required',
     });
     expect(contract.routes).toContainEqual({
-      id: 'ask-sessions',
+      id: 'agent.sessions.turns.create',
+      method: 'POST',
+      path: '/api/agent/sessions/[sessionId]/turns',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-sessions',
       method: 'GET',
-      path: '/api/ask-sessions',
+      path: '/api/agent/sessions',
       auth: 'required',
     });
     expect(contract.routes).toContainEqual({
-      id: 'ask-sessions.save',
+      id: 'agent-sessions.save',
       method: 'POST',
-      path: '/api/ask-sessions',
+      path: '/api/agent/sessions',
       auth: 'required',
     });
     expect(contract.routes).toContainEqual({
-      id: 'ask-sessions.delete',
+      id: 'agent-sessions.delete',
       method: 'DELETE',
-      path: '/api/ask-sessions',
+      path: '/api/agent/sessions',
       auth: 'required',
     });
     expect(contract.routes).toContainEqual({
@@ -301,6 +259,12 @@ describe('MindOS product server contract', () => {
       auth: 'required',
     });
     expect(contract.routes).toContainEqual({
+      id: 'skills.matrix',
+      method: 'GET',
+      path: '/api/skills/matrix',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
       id: 'skills.action',
       method: 'POST',
       path: '/api/skills',
@@ -337,6 +301,120 @@ describe('MindOS product server contract', () => {
       auth: 'required',
     });
     expect(contract.routes).toContainEqual({
+      id: 'agent-activity.append',
+      method: 'POST',
+      path: '/api/agent-activity',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'assistants.create',
+      method: 'POST',
+      path: '/api/assistants',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'assistants.delete',
+      method: 'DELETE',
+      path: '/api/assistants',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'assistants',
+      method: 'GET',
+      path: '/api/assistants',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes',
+      method: 'GET',
+      path: '/api/agent-runtimes',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.extensions',
+      method: 'GET',
+      path: '/api/agent-runtimes/extensions',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.extensions.preflight',
+      method: 'POST',
+      path: '/api/agent-runtimes/extensions/preflight',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.extensions.install',
+      method: 'POST',
+      path: '/api/agent-runtimes/extensions/install',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.mcp-projections',
+      method: 'GET',
+      path: '/api/agent-runtimes/mcp-projections',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.permission-projections',
+      method: 'GET',
+      path: '/api/agent-runtimes/permission-projections',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.artifact-projections',
+      method: 'GET',
+      path: '/api/agent-runtimes/artifact-projections',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.automation-projections',
+      method: 'GET',
+      path: '/api/agent-runtimes/automation-projections',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.readiness',
+      method: 'GET',
+      path: '/api/agent-runtimes/readiness',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.codex.models',
+      method: 'GET',
+      path: '/api/agent-runtimes/codex/models',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.codex.threads',
+      method: 'GET',
+      path: '/api/agent-runtimes/codex/threads',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.codex.thread',
+      method: 'GET',
+      path: '/api/agent-runtimes/codex/threads/[threadId]',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.codex.thread.fork',
+      method: 'POST',
+      path: '/api/agent-runtimes/codex/threads/[threadId]/fork',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.codex.thread.archive',
+      method: 'POST',
+      path: '/api/agent-runtimes/codex/threads/[threadId]/archive',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
+      id: 'agent-runtimes.codex.thread.unarchive',
+      method: 'POST',
+      path: '/api/agent-runtimes/codex/threads/[threadId]/unarchive',
+      auth: 'required',
+    });
+    expect(contract.routes).toContainEqual({
       id: 'bootstrap',
       method: 'GET',
       path: '/api/bootstrap',
@@ -346,7 +424,7 @@ describe('MindOS product server contract', () => {
       id: 'connect',
       method: 'GET',
       path: '/api/connect',
-      auth: 'required',
+      auth: 'public',
     });
     expect(contract.routes).toContainEqual({
       id: 'monitoring',
@@ -416,6 +494,212 @@ describe('MindOS product server contract', () => {
     });
   });
 
+  it('loads single-file Assistant Markdown profiles from the hidden assistant registry', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-assistants-'));
+    try {
+      mkdirSync(join(root, '.mindos', 'assistants'), { recursive: true });
+      writeFileSync(join(root, '.mindos', 'assistants', 'custom-research.md'), `---
+name: Research Queue
+description: Turns local research notes into a ranked queue.
+version: 2
+mode: subagent
+runtime: codex
+model: gpt-5
+permission: ask
+hidden: false
+color: amber
+steps: 8
+skills: super-researcher, mindos
+mcp: zotero
+---
+
+# Custom Research
+
+## Role
+
+Prepare a research reading queue from local notes.
+
+## Inputs
+
+- Paper notes
+- Daily radar notes
+
+## Output
+
+Write a ranked reading queue.
+
+## Boundaries
+
+- Do not cite papers that are not in the source notes.
+`, 'utf-8');
+      writeFileSync(join(root, '.mindos', 'assistants', 'Bad Name.md'), '# Unsafe name\n', 'utf-8');
+
+      const response = handleAssistantsGet({ mindRoot: root });
+      const body = response.body as {
+        root: string;
+        assistants: Array<{
+          id: string;
+          name: string;
+          description: string;
+          version: number;
+          mode: string;
+          runtime: string;
+          model: string;
+          permissionMode: string;
+          source: 'builtin' | 'custom';
+          deletable: boolean;
+          preferredAgent?: string;
+          skills: string[];
+          mcp: string[];
+          paths: { root: string; profile: string; prompt: string; file?: string };
+          prompt: { exists: boolean; content?: string };
+          health: { state: string; issues: Array<{ code: string }> };
+          promptReady: boolean;
+          profileReady: boolean;
+        }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(body.root).toBe('.mindos/assistants');
+      expect(body.assistants).toHaveLength(1);
+      expect(body.assistants[0]).toMatchObject({
+        id: 'custom-research',
+        name: 'Research Queue',
+        description: 'Turns local research notes into a ranked queue.',
+        version: 2,
+        mode: 'subagent',
+        runtime: 'codex',
+        model: 'gpt-5',
+        permissionMode: 'ask',
+        source: 'custom',
+        deletable: true,
+        preferredAgent: 'codex',
+        skills: ['super-researcher', 'mindos'],
+        mcp: ['zotero'],
+        paths: {
+          root: '.mindos/assistants',
+          profile: '.mindos/assistants/custom-research.md',
+          prompt: '.mindos/assistants/custom-research.md',
+          file: '.mindos/assistants/custom-research.md',
+        },
+        prompt: {
+          exists: true,
+        },
+        health: {
+          state: 'ready',
+          issues: [],
+        },
+        promptReady: true,
+        profileReady: true,
+      });
+      expect(body.assistants[0]?.prompt.content).toContain('# Custom Research');
+      expect(body.assistants[0]?.prompt.content).not.toContain('version: 2');
+      expect(body.assistants[0]).not.toHaveProperty('sections');
+      expect(body.assistants[0]).not.toHaveProperty('metadata');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('creates custom assistants as single Markdown profiles with version', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-assistant-create-'));
+    try {
+      const response = handleAssistantsPost({
+        id: 'research-scout',
+        name: 'Research Scout',
+        description: 'Finds useful local research follow-ups.',
+        runtime: 'codex',
+        model: 'gpt-5',
+        permission: 'ask',
+        permissionMode: 'ask',
+        skills: ['super-researcher', 'mindos'],
+        mcp: ['zotero'],
+        schedule: { mode: 'daily' },
+        surface: ['agents'],
+        outputPolicy: { mode: 'draft' },
+        tools: ['write_file'],
+      }, { mindRoot: root });
+      const body = response.body as {
+        ok: true;
+        id: string;
+        paths: { root: string; profile: string; prompt: string; file?: string };
+      };
+
+      expect(response.status).toBe(201);
+      expect(body).toMatchObject({
+        ok: true,
+        id: 'research-scout',
+        paths: {
+          root: '.mindos/assistants',
+          profile: '.mindos/assistants/research-scout.md',
+          prompt: '.mindos/assistants/research-scout.md',
+          file: '.mindos/assistants/research-scout.md',
+        },
+      });
+
+      const savedMarkdown = readFileSync(join(root, body.paths.file ?? body.paths.prompt), 'utf-8');
+      expect(savedMarkdown).toContain('name: Research Scout');
+      expect(savedMarkdown).toContain('description: Finds useful local research follow-ups.');
+      expect(savedMarkdown).toContain('version: 1');
+      expect(savedMarkdown).toContain('mode: subagent');
+      expect(savedMarkdown).toContain('runtime: codex');
+      expect(savedMarkdown).toContain('model: gpt-5');
+      expect(savedMarkdown).toContain('permissionMode: ask');
+      expect(savedMarkdown).toContain('skills: super-researcher, mindos');
+      expect(savedMarkdown).toContain('mcp: zotero');
+      expect(savedMarkdown).not.toContain('schemaVersion');
+      expect(savedMarkdown).not.toContain('permission:');
+      expect(savedMarkdown).not.toContain('schedule:');
+      expect(savedMarkdown).not.toContain('surface:');
+      expect(savedMarkdown).not.toContain('outputPolicy');
+      expect(savedMarkdown).not.toContain('tools:');
+      expect(savedMarkdown).toContain('# Research Scout');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('protects built-in assistants and deletes custom assistant files', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-assistant-delete-'));
+    try {
+      mkdirSync(join(root, '.mindos', 'assistants'), { recursive: true });
+      writeFileSync(join(root, '.mindos', 'assistants', 'dreaming.md'), `---
+name: Dreaming
+description: Review knowledge-base health.
+version: 1
+mode: subagent
+runtime: mindos
+model: default
+permission: ask
+hidden: true
+---
+
+# Dreaming
+`, 'utf-8');
+      const custom = handleAssistantsPost({ id: 'custom-research', name: 'Custom Research' }, { mindRoot: root });
+
+      const createBuiltin = handleAssistantsPost({ id: 'dreaming', name: 'Override' }, { mindRoot: root });
+      const deleteBuiltin = handleAssistantsDelete({ id: 'dreaming' }, { mindRoot: root });
+      const createEchoBuiltin = handleAssistantsPost({ id: 'echo-imprint', name: 'Override' }, { mindRoot: root });
+      const deleteEchoBuiltin = handleAssistantsDelete({ id: 'echo-imprint' }, { mindRoot: root });
+      const deleteCustom = handleAssistantsDelete({ id: 'custom-research' }, { mindRoot: root });
+      const listed = handleAssistantsGet({ mindRoot: root }).body as {
+        assistants: Array<{ id: string }>;
+      };
+
+      expect(custom.status).toBe(201);
+      expect(createBuiltin.status).toBe(409);
+      expect(deleteBuiltin.status).toBe(403);
+      expect(createEchoBuiltin.status).toBe(409);
+      expect(deleteEchoBuiltin.status).toBe(403);
+      expect(deleteCustom.status).toBe(200);
+      expect(listed.assistants.some((item) => item.id === 'dreaming')).toBe(true);
+      expect(listed.assistants.some((item) => item.id === 'custom-research')).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('creates a health payload with runtime metadata', () => {
     const health = createMindosHealth({
       version: '1.2.3',
@@ -434,6 +718,88 @@ describe('MindOS product server contract', () => {
         root: '/tmp/mindos-runtime',
       },
     });
+  });
+
+  it('reports persisted Web password protection through Product Server health', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-http-health-auth-'));
+    const app = createMindosHttpServer({
+      hostname: '127.0.0.1',
+      port: 0,
+      services: createDefaultMindosHttpServices({
+        homeDir: root,
+        readSettings: () => ({ mindRoot: root, webPassword: 'web-secret' }),
+      }),
+    });
+    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      expect(await (await fetch(`${base}/api/health`)).json()).toMatchObject({
+        ok: true,
+        authRequired: true,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('passes configured ACP agent overrides through Product Server session routes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-http-acp-session-'));
+    let observedOptions: { overrides?: Record<string, unknown>; cwd?: string } | undefined;
+    const app = createMindosHttpServer({
+      hostname: '127.0.0.1',
+      port: 0,
+      services: {
+        ...createDefaultMindosHttpServices({
+          readSettings: () => ({
+            mindRoot: root,
+            acpAgents: {
+              'custom-acp': { name: 'Custom ACP', command: 'custom-acp', args: ['--acp'] },
+            },
+          }),
+        }),
+        createSession: async (agentId: string, options?: { overrides?: Record<string, unknown>; cwd?: string }) => {
+          observedOptions = options;
+          return {
+            id: 'ses-custom',
+            agentId,
+            hasCustomOverride: Boolean(options?.overrides?.['custom-acp']),
+            cwd: options?.cwd,
+          };
+        },
+      },
+    });
+    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const response = await fetch(`${base}/api/acp/session`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+        body: JSON.stringify({ agentId: 'custom-acp', cwd: '/tmp/custom-acp' }),
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        session: {
+          id: 'ses-custom',
+          agentId: 'custom-acp',
+          hasCustomOverride: true,
+          cwd: '/tmp/custom-acp',
+        },
+      });
+      expect(observedOptions).toMatchObject({
+        cwd: '/tmp/custom-acp',
+        overrides: {
+          'custom-acp': { name: 'Custom ACP', command: 'custom-acp', args: ['--acp'] },
+        },
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('resolves product version from explicit env, repo root, or installed package root', () => {
@@ -483,15 +849,46 @@ describe('MindOS product server contract', () => {
     const root = mkdtempSync(join(tmpdir(), 'mindos-runtime-files-'));
     mkdirSync(join(root, 'Space'), { recursive: true });
     mkdirSync(join(root, '.git'), { recursive: true });
+    mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true });
+    mkdirSync(join(root, 'dist'), { recursive: true });
+    mkdirSync(join(root, 'coverage'), { recursive: true });
+    mkdirSync(join(root, '.turbo'), { recursive: true });
+    mkdirSync(join(root, '.cc-branch'), { recursive: true });
+    mkdirSync(join(root, '.claude', 'worktrees', 'task'), { recursive: true });
+    mkdirSync(join(root, '.obsidian'), { recursive: true });
+    mkdirSync(join(root, '.plugins', 'sample'), { recursive: true });
+    mkdirSync(join(root, '.mindos', 'assistant-runs'), { recursive: true });
     writeFileSync(join(root, 'a.md'), 'a');
     writeFileSync(join(root, 'Space', 'b.csv'), 'b');
     writeFileSync(join(root, '.git', 'ignored.md'), 'ignored');
+    writeFileSync(join(root, 'node_modules', 'pkg', 'ignored.md'), 'ignored');
+    writeFileSync(join(root, 'dist', 'ignored.md'), 'ignored');
+    writeFileSync(join(root, 'coverage', 'ignored.md'), 'ignored');
+    writeFileSync(join(root, '.turbo', 'ignored.md'), 'ignored');
+    writeFileSync(join(root, '.cc-branch', 'ignored.md'), 'ignored');
+    writeFileSync(join(root, '.claude', 'worktrees', 'task', 'ignored.md'), 'ignored');
+    writeFileSync(join(root, '.obsidian', 'workspace.json'), '{"private":true}');
+    writeFileSync(join(root, '.plugins', 'sample', 'data.json'), '{"private":true}');
+    writeFileSync(join(root, '.mindos', 'assistant-runs', 'run.md'), 'private');
     writeFileSync(join(root, 'ignored.txt'), 'ignored');
 
     expect(collectAllFilesFromMindRoot(root)).toEqual(['a.md', 'Space/b.csv']);
     expect(getRecentlyModifiedFromMindRoot(root, 1)).toHaveLength(1);
     expect(getTreeVersionFromMindRoot(root)).toBeGreaterThan(0);
     expect(getTreeVersionFromMindRoot(join(root, 'missing'))).toBe(0);
+  });
+
+  it('applies .mindosignore to runtime file collection without Web dependencies', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-runtime-ignore-'));
+    mkdirSync(join(root, 'Archive'), { recursive: true });
+    mkdirSync(join(root, 'Visible'), { recursive: true });
+    writeFileSync(join(root, '.mindosignore'), 'Archive/\nScratch/*.md\n');
+    writeFileSync(join(root, 'Archive', 'old.md'), 'archived');
+    mkdirSync(join(root, 'Scratch'), { recursive: true });
+    writeFileSync(join(root, 'Scratch', 'draft.md'), 'scratch');
+    writeFileSync(join(root, 'Visible', 'real.md'), 'visible');
+
+    expect(collectAllFilesFromMindRoot(root)).toEqual(['Visible/real.md']);
   });
 
   it('resolves mind root from product config before env fallback', () => {
@@ -509,8 +906,16 @@ describe('MindOS product server contract', () => {
   it('searches text files from a mind root without Web dependencies', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mindos-runtime-search-'));
     mkdirSync(join(root, 'Space'), { recursive: true });
+    mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true });
+    mkdirSync(join(root, 'dist'), { recursive: true });
+    mkdirSync(join(root, '.obsidian'), { recursive: true });
+    mkdirSync(join(root, '.plugins', 'sample'), { recursive: true });
     writeFileSync(join(root, 'Space', 'note.md'), 'Alpha project\nBeta detail');
     writeFileSync(join(root, 'data.csv'), 'name,value\nalpha,1');
+    writeFileSync(join(root, 'node_modules', 'pkg', 'index.md'), 'alpha private dependency');
+    writeFileSync(join(root, 'dist', 'generated.md'), 'alpha generated output');
+    writeFileSync(join(root, '.obsidian', 'app.json'), '{"query":"alpha private"}');
+    writeFileSync(join(root, '.plugins', 'sample', 'data.json'), '{"query":"alpha private"}');
     writeFileSync(join(root, 'image.png'), Buffer.from('alpha'));
 
     const results = await searchMindRoot(root, 'alpha', { limit: 10 });
@@ -523,11 +928,42 @@ describe('MindOS product server contract', () => {
     });
   });
 
+  it('does not return .mindosignore-excluded paths from runtime search', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-runtime-search-ignore-'));
+    mkdirSync(join(root, 'Archive'), { recursive: true });
+    mkdirSync(join(root, 'Visible'), { recursive: true });
+    writeFileSync(join(root, '.mindosignore'), 'Archive/\n');
+    writeFileSync(join(root, 'Archive', 'old.md'), 'alpha archived private');
+    writeFileSync(join(root, 'Visible', 'note.md'), 'alpha visible');
+
+    const results = await searchMindRoot(root, 'alpha', { limit: 10 });
+
+    expect(results.map((item) => item.path)).toEqual(['Visible/note.md']);
+  });
+
+  it('applies runtime search filters and tokenized CJK matching', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-runtime-search-filter-'));
+    mkdirSync(join(root, 'Projects'), { recursive: true });
+    mkdirSync(join(root, 'Archive'), { recursive: true });
+    writeFileSync(join(root, 'Projects', 'note.md'), '知识体系需要管理流程支持');
+    writeFileSync(join(root, 'Archive', 'old.md'), '知识体系也需要管理');
+    writeFileSync(join(root, 'Projects', 'data.csv'), 'name,value\n知识管理,1');
+
+    const results = await searchMindRoot(root, '知识管理', {
+      limit: 10,
+      scope: 'Projects',
+      file_type: 'md',
+    });
+
+    expect(results.map((item) => item.path)).toEqual(['Projects/note.md']);
+  });
+
   it('exposes the default MCP agent registry from the product HTTP runtime', async () => {
     const home = mkdtempSync(join(tmpdir(), 'mindos-product-agents-home-'));
     const root = mkdtempSync(join(tmpdir(), 'mindos-product-agents-root-'));
-    mkdirSync(join(home, '.claude'), { recursive: true });
-    mkdirSync(join(home, '.codex'), { recursive: true });
+    mkdirSync(join(home, '.claude', 'projects'), { recursive: true });
+    mkdirSync(join(home, '.codex', 'sessions'), { recursive: true });
+    mkdirSync(join(home, '.config', 'kilo'), { recursive: true });
     writeFileSync(join(home, '.claude.json'), JSON.stringify({
       mcpServers: {
         mindos: { type: 'stdio', command: 'mindos', args: ['mcp'] },
@@ -538,6 +974,16 @@ describe('MindOS product server contract', () => {
       'type = "stdio"',
       'command = "mindos"',
     ].join('\n'), 'utf-8');
+    writeFileSync(join(home, '.config', 'kilo', 'kilo.json'), JSON.stringify({
+      mcp: {
+        mindos: {
+          type: 'local',
+          command: ['mindos', 'mcp'],
+          environment: { MCP_TRANSPORT: 'stdio' },
+          enabled: true,
+        },
+      },
+    }), 'utf-8');
 
     const services = createDefaultMindosHttpServices({
       homeDir: home,
@@ -552,12 +998,13 @@ describe('MindOS product server contract', () => {
       projectRoot: root,
       env: {} as NodeJS.ProcessEnv,
       commandExists: () => false,
+      skillAgentRegistry: createDefaultSkillAgentRegistry(),
     });
 
-    expect(Object.keys(services.mcpAgents ?? {})).toHaveLength(26);
+    expect(Object.keys(services.mcpAgents ?? {})).toHaveLength(27);
     expect(response.status).toBe(200);
     const agents = response.body.agents;
-    expect(agents).toHaveLength(26);
+    expect(agents).toHaveLength(27);
     expect(agents.find((agent) => agent.key === 'mindos')).toMatchObject({
       present: true,
       installed: true,
@@ -572,11 +1019,28 @@ describe('MindOS product server contract', () => {
       installed: true,
       configuredMcpServers: ['mindos'],
     });
+    expect(agents.find((agent) => agent.key === 'kilo-code')).toMatchObject({
+      configKey: 'mcp',
+      entryStyle: 'kilo',
+      installed: true,
+      transport: 'stdio',
+      configPath: '~/.config/kilo/kilo.json',
+      configuredMcpServers: ['mindos'],
+      globalPath: '~/.config/kilo/kilo.jsonc',
+      skillMode: 'universal',
+      skillWorkspacePath: join(home, '.agents', 'skills'),
+    });
+    expect(agents.find((agent) => agent.key === 'warp')).toMatchObject({
+      configKey: 'mcpServers',
+      globalPath: '~/.warp/.mcp.json',
+      projectPath: '.warp/.mcp.json',
+    });
   });
 
   it('handles recent files and file read operations from product handlers', () => {
     const root = mkdtempSync(join(tmpdir(), 'mindos-file-handler-'));
     mkdirSync(join(root, 'Space'), { recursive: true });
+    writeFileSync(join(root, 'Space', 'INSTRUCTION.md'), '# Space instructions\n');
     writeFileSync(join(root, 'Space', 'note.md'), 'one\ntwo');
 
     const services = createDefaultMindosHttpServices({
@@ -585,9 +1049,12 @@ describe('MindOS product server contract', () => {
 
     expect(handleRecentFiles(new URLSearchParams('limit=3'), services).status).toBe(200);
     expect(handleFileGet(new URLSearchParams('op=list_spaces'), services).body).toEqual({
-      spaces: [expect.objectContaining({ name: 'Space', path: 'Space', fileCount: 1 })],
+      spaces: [expect.objectContaining({ name: 'Space', path: 'Space', fileCount: 2 })],
     });
-    expect(handleFileGet(new URLSearchParams('op=read_file&path=Space/note.md'), services).body).toEqual({ content: 'one\ntwo' });
+    expect(handleFileGet(new URLSearchParams('op=read_file&path=Space/note.md'), services).body).toMatchObject({
+      content: 'one\ntwo',
+      mtime: expect.any(Number),
+    });
     expect(handleFileGet(new URLSearchParams('op=read_lines&path=Space/note.md'), services).body).toEqual({ lines: ['one', 'two'] });
     expect(handleFileGet(new URLSearchParams('op=read_file&path=../secret.md'), services)).toMatchObject({
       status: 403,
@@ -595,9 +1062,59 @@ describe('MindOS product server contract', () => {
     });
   });
 
+  it('opens Mind paths in the native file manager without allowing path escapes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-open-file-manager-'));
+    mkdirSync(join(root, 'Space'), { recursive: true });
+    writeFileSync(join(root, 'Space', 'note.md'), 'hello', 'utf-8');
+
+    const execFileMock = vi.fn((command, args, _options, callback) => {
+      void command;
+      void args;
+      callback(null);
+    });
+
+    const rootResult = await handleOpenInFileManagerGet(new URLSearchParams('op=open_in_file_manager'), {
+      mindRoot: root,
+      platform: 'darwin',
+      osRelease: 'Darwin',
+      execFile: execFileMock,
+    });
+    expect(rootResult).toMatchObject({ status: 200, body: { ok: true } });
+    expect(execFileMock).toHaveBeenLastCalledWith(
+      'open',
+      [root],
+      expect.objectContaining({ timeout: 5000, windowsHide: true }),
+      expect.any(Function),
+    );
+
+    const fileResult = await handleOpenInFileManagerGet(new URLSearchParams('op=open_in_file_manager&path=Space/note.md'), {
+      mindRoot: root,
+      platform: 'darwin',
+      osRelease: 'Darwin',
+      execFile: execFileMock,
+    });
+    expect(fileResult).toMatchObject({ status: 200, body: { ok: true } });
+    expect(execFileMock).toHaveBeenLastCalledWith(
+      'open',
+      ['-R', join(root, 'Space', 'note.md')],
+      expect.objectContaining({ timeout: 5000, windowsHide: true }),
+      expect.any(Function),
+    );
+
+    const denied = await handleOpenInFileManagerGet(new URLSearchParams('op=open_in_file_manager&path=../secret.md'), {
+      mindRoot: root,
+      platform: 'darwin',
+      osRelease: 'Darwin',
+      execFile: execFileMock,
+    });
+    expect(denied).toMatchObject({ status: 403, body: { error: 'Access denied' } });
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+  });
+
   it('serves detailed spaces from the Product Server file handler when mindRoot is available', () => {
     const root = mkdtempSync(join(tmpdir(), 'mindos-spaces-detail-'));
     mkdirSync(join(root, 'SpaceA'), { recursive: true });
+    writeFileSync(join(root, 'SpaceA', 'INSTRUCTION.md'), '# Space A instructions\n', 'utf-8');
     writeFileSync(join(root, 'SpaceA', 'README.md'), '# Space A\n\nReadable description.\n', 'utf-8');
     writeFileSync(join(root, 'SpaceA', 'note.md'), 'hello', 'utf-8');
 
@@ -614,16 +1131,34 @@ describe('MindOS product server contract', () => {
       spaces: [expect.objectContaining({
         name: 'SpaceA',
         path: 'SpaceA',
-        fileCount: 2,
+        fileCount: 3,
         description: 'Readable description.',
       })],
     });
+  });
+
+  it('does not list Product Server folders without INSTRUCTION.md as spaces', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-spaces-require-instruction-'));
+    mkdirSync(join(root, 'FolderOnly'), { recursive: true });
+    writeFileSync(join(root, 'FolderOnly', 'README.md'), '# Folder\n\nNot a Space.\n', 'utf-8');
+
+    const res = handleFileGet(new URLSearchParams('op=list_spaces'), {
+      mindRoot: root,
+      readTextFile: () => '',
+      readLines: () => [],
+      listSpaces: () => [],
+      listDirectories: () => [],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ spaces: [] });
   });
 
   it('does not read Product Server space descriptions through symlinked README files', () => {
     const root = mkdtempSync(join(tmpdir(), 'mindos-spaces-readme-symlink-'));
     const outside = mkdtempSync(join(tmpdir(), 'mindos-spaces-readme-outside-'));
     mkdirSync(join(root, 'SpaceA'), { recursive: true });
+    writeFileSync(join(root, 'SpaceA', 'INSTRUCTION.md'), '# Space A instructions\n', 'utf-8');
     writeFileSync(join(root, 'SpaceA', 'note.md'), 'hello', 'utf-8');
     writeFileSync(join(outside, 'README.md'), '# Outside\n\nLeaked description.\n', 'utf-8');
     symlinkSync(join(outside, 'README.md'), join(root, 'SpaceA', 'README.md'), 'file');
@@ -641,7 +1176,7 @@ describe('MindOS product server contract', () => {
       spaces: [expect.objectContaining({
         name: 'SpaceA',
         path: 'SpaceA',
-        fileCount: 1,
+        fileCount: 2,
         description: '',
       })],
     });
@@ -702,6 +1237,39 @@ describe('MindOS product server contract', () => {
     expect(deleted.body).toMatchObject({ ok: true, trashId: expect.any(String) });
     expect(existsSync(join(root, 'note.md'))).toBe(false);
     expect(existsSync(join(root, '..', '.trash', (deleted.body as { trashId: string }).trashId))).toBe(true);
+  });
+
+  it('rejects destructive file operations against built-in Assistant files and directories', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-builtin-assistant-protect-'));
+    mkdirSync(join(root, '.mindos', 'assistants', 'dreaming'), { recursive: true });
+    mkdirSync(join(root, 'Archive'), { recursive: true });
+    writeFileSync(join(root, '.mindos', 'assistants', 'dreaming.md'), '# Dreaming\n', 'utf-8');
+    writeFileSync(join(root, '.mindos', 'assistants', 'dreaming', 'prompt.md'), '# Dreaming Legacy\n', 'utf-8');
+
+    const deleteDirectory = await handleFilePost(
+      { op: 'delete_file', path: '.mindos/assistants/dreaming' },
+      { mindRoot: root },
+    );
+    const deletePrompt = await handleFilePost(
+      { op: 'delete_file', path: '.mindos/assistants/dreaming.md' },
+      { mindRoot: root },
+    );
+    const renameDirectory = await handleFilePost(
+      { op: 'rename_space', path: '.mindos/assistants/dreaming', new_name: 'dreaming-old' },
+      { mindRoot: root },
+    );
+    const movePrompt = await handleFilePost(
+      { op: 'move_file', path: '.mindos/assistants/dreaming.md', to_path: 'Archive/dreaming.md' },
+      { mindRoot: root },
+    );
+
+    expect(deleteDirectory.status).toBe(403);
+    expect(deletePrompt.status).toBe(403);
+    expect(renameDirectory.status).toBe(403);
+    expect(movePrompt.status).toBe(403);
+    expect(existsSync(join(root, '.mindos', 'assistants', 'dreaming'))).toBe(true);
+    expect(readFileSync(join(root, '.mindos', 'assistants', 'dreaming.md'), 'utf-8')).toBe('# Dreaming\n');
+    expect(existsSync(join(root, 'Archive', 'dreaming.md'))).toBe(false);
   });
 
   it('returns POSIX knowledge paths after Product Server file moves', async () => {
@@ -792,19 +1360,16 @@ describe('MindOS product server contract', () => {
     expect(existsSync(join(outside, 'new.md'))).toBe(false);
   });
 
-  it('rejects Product Server legacy agent audit writes through symlinked metadata directories', async () => {
+  it('rejects Product Server agent activity writes through symlinked metadata directories', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mindos-file-audit-symlink-root-'));
     const outside = mkdtempSync(join(tmpdir(), 'mindos-file-audit-symlink-outside-'));
     symlinkSync(outside, join(root, '.mindos'), 'dir');
 
-    const res = await handleFilePost(
-      {
-        op: 'append_to_file',
-        path: '.agent-log.json',
-        content: '{"tool":"legacy","params":{},"result":"ok"}\n',
-      },
-      { mindRoot: root },
-    );
+    const res = handleAgentActivityPost({
+      tool: 'audit',
+      params: {},
+      result: 'ok',
+    }, { mindRoot: root });
 
     expect(res.status).toBe(403);
     expect(existsSync(join(outside, 'agent-audit-log.json'))).toBe(false);
@@ -855,6 +1420,20 @@ describe('MindOS product server contract', () => {
         runtimeRoot: '/runtime',
         homeDir: root,
         readSettings: () => ({ mindRoot: root }),
+        documentExtraction: {
+          extractPdf: async () => ({ text: 'PDF text', pages: 1 }),
+          extractDocx: async () => ({
+            text: 'Word text',
+            markdown: 'Word text',
+            extracted: true,
+            pages: 1,
+            chars: 9,
+            truncated: false,
+            charsTruncated: 0,
+            imageCount: 0,
+            hasCharts: false,
+          }),
+        },
       }),
     });
     await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
@@ -877,6 +1456,13 @@ describe('MindOS product server contract', () => {
       expect(await (await fetch(`${base}/api/changes?op=summary`)).json()).toMatchObject({ unreadCount: 0 });
       expect(await (await fetch(`${base}/api/backlinks?path=Space/note.md`)).json()).toEqual([]);
       expect(await (await fetch(`${base}/api/graph`)).json()).toMatchObject({ nodes: expect.any(Array), edges: expect.any(Array) });
+      const appendActivity = await fetch(`${base}/api/agent-activity`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tool: 'http_smoke_tool', params: {}, result: 'ok' }),
+      });
+      expect(appendActivity.status).toBe(201);
+      expect(await appendActivity.json()).toMatchObject({ ok: true, count: 1 });
       expect(await (await fetch(`${base}/api/agent-activity`)).json()).toMatchObject({ events: expect.any(Array) });
       expect(await (await fetch(`${base}/api/bootstrap`)).json()).toMatchObject({
         file_index: expect.stringContaining('Space/'),
@@ -897,7 +1483,7 @@ describe('MindOS product server contract', () => {
         body: JSON.stringify({ seed: 'abc' }),
       })).json()).toEqual({ token: 'ba78-16bf-8f01-cfea-4141-40de' });
       expect(await (await fetch(`${base}/api/workflows`)).json()).toEqual({ workflows: [] });
-      expect(await (await fetch(`${base}/api/ask-sessions`)).json()).toEqual([]);
+      expect(await (await fetch(`${base}/api/agent/sessions`)).json()).toEqual([]);
       expect(await (await fetch(`${base}/api/space-overview?space=Space`)).json()).toEqual({ fileCount: 1 });
       expect(await (await fetch(`${base}/api/git?op=is_repo`)).json()).toEqual({ isRepo: false });
       expect(await (await fetch(`${base}/api/inbox`)).json()).toMatchObject({ files: expect.any(Array) });
@@ -909,9 +1495,220 @@ describe('MindOS product server contract', () => {
         method: 'POST',
         body: JSON.stringify({ path: root }),
       })).json()).toMatchObject({ dirs: ['Inbox', 'Space'] });
-      expect(await (await fetch(`${base}/api/file?path=Space/note.md`)).json()).toEqual({ content: 'hello' });
+      expect(await (await fetch(`${base}/api/file?path=Space/note.md`)).json()).toMatchObject({
+        content: 'hello',
+        mtime: expect.any(Number),
+      });
       expect(await (await fetch(`${base}/api/file/raw?path=image.png`)).arrayBuffer()).toHaveProperty('byteLength', 3);
+      expect(await (await fetch(`${base}/api/extract-pdf`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'paper.pdf',
+          dataBase64: Buffer.from('%PDF-1.4').toString('base64'),
+        }),
+      })).json()).toMatchObject({ name: 'paper.pdf', extracted: 'success', text: 'PDF text' });
+      expect(await (await fetch(`${base}/api/extract-docx`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'brief.docx',
+          dataBase64: Buffer.from('docx').toString('base64'),
+        }),
+      })).json()).toMatchObject({ name: 'brief.docx', extracted: true, text: 'Word text' });
       expect((await fetch(`${base}/missing`)).status).toBe(404);
+    } finally {
+      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('serves the unified skill matrix with MindOS as the self column over HTTP', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-http-skill-matrix-'));
+    const app = createMindosHttpServer({
+      hostname: '127.0.0.1',
+      port: 0,
+      services: createDefaultMindosHttpServices({
+        homeDir: root,
+        readSettings: () => ({ mindRoot: root }),
+      }),
+    });
+    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const response = await fetch(`${base}/api/skills/matrix`);
+      expect(response.status).toBe(200);
+      const matrix = await response.json() as {
+        skills: unknown[];
+        agents: Array<{ key: string; name: string; mode: string }>;
+        state: Record<string, Record<string, boolean>>;
+        cells: Record<string, Record<string, { enabled: boolean; status: string }>>;
+      };
+      expect(Array.isArray(matrix.skills)).toBe(true);
+      expect(matrix.agents[0]).toMatchObject({ key: 'mindos', mode: 'self' });
+      expect(matrix.state).toEqual(expect.any(Object));
+      expect(matrix.cells).toEqual(expect.any(Object));
+    } finally {
+      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('keeps legacy copy-install records untouched when the skill matrix is read', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mindos-http-matrix-migrate-home-'));
+    const root = mkdtempSync(join(tmpdir(), 'mindos-http-matrix-migrate-root-'));
+    const configDir = join(home, '.mindos');
+    const installedSkillAgents = [{ agent: 'ghost-agent', skill: 'ghost-skill', path: join(home, 'ghost') }];
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+      mindRoot: root,
+      installedSkillAgents,
+    }), 'utf-8');
+
+    const app = createMindosHttpServer({
+      hostname: '127.0.0.1',
+      port: 0,
+      runtime: { homeDir: home },
+    });
+    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const response = await fetch(`${base}/api/skills/matrix`);
+      expect(response.status).toBe(200);
+      const saved = JSON.parse(readFileSync(join(configDir, 'config.json'), 'utf-8'));
+      expect(saved.installedSkillAgents).toEqual(installedSkillAgents);
+      expect(saved.mindRoot).toBe(root);
+    } finally {
+      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('routes Channel APIs through Product HTTP services instead of default stubs', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mindos-http-channel-home-'));
+    const root = mkdtempSync(join(tmpdir(), 'mindos-http-channel-root-'));
+    const configDir = join(home, '.mindos');
+    const imConfigPath = join(configDir, 'im.json');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(imConfigPath, JSON.stringify({
+      providers: {
+        telegram: { bot_token: '123456789:ABCdefGHIjklMNOpqrSTUvwxYZ' },
+      },
+    }), 'utf-8');
+
+    const verifyCalls: any[] = [];
+    const sendCalls: any[] = [];
+    const feishuConfig = {
+      app_id: 'cli_app',
+      app_secret: 'secret',
+      conversation: {
+        enabled: true,
+        transport: 'webhook',
+        public_base_url: 'https://mindos.example',
+        encrypt_key: 'encrypt',
+      },
+    };
+    const app = createMindosHttpServer({
+      hostname: '127.0.0.1',
+      port: 0,
+      services: {
+        ...createDefaultMindosHttpServices({
+          homeDir: home,
+          readSettings: () => ({ mindRoot: root }),
+        }),
+        channels: {
+          configPath: imConfigPath,
+          verifyCredentials: async (platform, credentials) => {
+            verifyCalls.push({ platform, credentials });
+            return { ok: true, botName: 'MindOS Telegram', botId: 'bot_1' };
+          },
+          sendIMMessage: async (message, signal, options) => {
+            sendCalls.push({ message, signal, options });
+            return { ok: true, messageId: 'msg_1', timestamp: '2026-06-10T00:00:00.000Z' };
+          },
+          hasAnyIMConfig: () => true,
+          listConfiguredIM: async () => [
+            { platform: 'feishu', connected: true, botName: 'MindOS Feishu', capabilities: ['text'] },
+          ],
+          getPlatformConfig: (platform) => platform === 'feishu' ? feishuConfig : undefined,
+          buildFeishuWebhookStatus: (config) => ({
+            platform: 'feishu',
+            state: config === feishuConfig ? 'ready' : 'disabled',
+            transport: 'webhook',
+            publicBaseUrl: 'https://mindos.example',
+            webhookUrl: 'https://mindos.example/api/im/webhook/feishu',
+          }),
+        },
+      },
+    });
+    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const config = await fetch(`${base}/api/im/config`);
+      expect(config.status).toBe(200);
+      expect(await config.json()).toMatchObject({
+        providers: {
+          telegram: { bot_token: '1234••••YZ' },
+        },
+      });
+
+      const verify = await fetch(`${base}/api/channels/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          platform: 'telegram',
+          credentials: { bot_token: '123456789:ABCdefGHIjklMNOpqrSTUvwxYZ' },
+        }),
+      });
+      expect(verify.status).toBe(200);
+      expect(await verify.json()).toEqual({ ok: true, botName: 'MindOS Telegram', botId: 'bot_1' });
+      expect(verifyCalls).toEqual([{
+        platform: 'telegram',
+        credentials: { bot_token: '123456789:ABCdefGHIjklMNOpqrSTUvwxYZ' },
+      }]);
+
+      const test = await fetch(`${base}/api/im/test`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ platform: 'feishu', recipient_id: 'ou_123', message: 'hello' }),
+      });
+      expect(test.status).toBe(200);
+      expect(await test.json()).toEqual({
+        ok: true,
+        messageId: 'msg_1',
+        timestamp: '2026-06-10T00:00:00.000Z',
+      });
+      expect(sendCalls).toEqual([{
+        message: { platform: 'feishu', recipientId: 'ou_123', text: 'hello', format: 'text' },
+        signal: undefined,
+        options: { activityType: 'test' },
+      }]);
+
+      const status = await fetch(`${base}/api/im/status`);
+      expect(status.status).toBe(200);
+      expect(await status.json()).toMatchObject({
+        platforms: [
+          {
+            platform: 'feishu',
+            connected: true,
+            webhook: {
+              state: 'ready',
+              webhookUrl: 'https://mindos.example/api/im/webhook/feishu',
+            },
+          },
+        ],
+      });
+
+      const webhook = await fetch(`${base}/api/im/webhook-status?platform=feishu`);
+      expect(webhook.status).toBe(200);
+      expect(await webhook.json()).toMatchObject({
+        status: {
+          platform: 'feishu',
+          state: 'ready',
+          webhookUrl: 'https://mindos.example/api/im/webhook/feishu',
+        },
+      });
     } finally {
       await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
     }
@@ -974,9 +1771,218 @@ describe('MindOS product server contract', () => {
       expect((await fetch(`${base}/api/files`, {
         headers: { 'sec-fetch-site': 'same-origin' },
       })).status).toBe(200);
+      const protectedCodexRoutes: Array<{ path: string; init?: RequestInit }> = [
+        { path: '/api/agent-runtimes/codex/models' },
+        { path: '/api/agent-runtimes/codex/threads' },
+        { path: '/api/agent-runtimes/codex/threads/thr-existing' },
+        { path: '/api/agent-runtimes/codex/threads/thr-existing/fork', init: { method: 'POST', body: '{}' } },
+        { path: '/api/agent-runtimes/codex/threads/thr-existing/archive', init: { method: 'POST' } },
+        { path: '/api/agent-runtimes/codex/threads/thr-existing/unarchive', init: { method: 'POST' } },
+        { path: '/api/agent-runtimes/codex/threads/thr-existing/delete', init: { method: 'POST' } },
+      ];
+      for (const route of protectedCodexRoutes) {
+        expect((await fetch(`${base}${route.path}`, route.init)).status, route.path).toBe(401);
+      }
+      expect((await fetch(`${base}/api/agent-runtimes/codex/threads/thr-existing/delete`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer secret-token' },
+      })).status).toBe(404);
     } finally {
       await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
     }
+  });
+
+  it('rejects spoofable same-origin Product Server API requests when the Web UI is password-protected', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-http-auth-web-password-'));
+    writeFileSync(join(root, 'note.md'), 'hello');
+
+    const app = createMindosHttpServer({
+      hostname: '127.0.0.1',
+      port: 0,
+      runtime: { readSettings: () => ({ mindRoot: root, authToken: 'secret-token', webPassword: 'web-secret' }) },
+    });
+    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      expect((await fetch(`${base}/api/files`, {
+        headers: { 'sec-fetch-site': 'same-origin' },
+      })).status).toBe(401);
+      expect((await fetch(`${base}/api/files`, {
+        headers: { authorization: 'Bearer secret-token' },
+      })).status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches Codex model and thread manager routes through the Product HTTP server without starting turns', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-http-codex-threads-'));
+    const calls: string[] = [];
+    const app = createMindosHttpServer({
+      hostname: '127.0.0.1',
+      port: 0,
+      services: {
+        ...createDefaultMindosHttpServices({
+          readSettings: () => ({ mindRoot: root, authToken: 'secret-token' }),
+        }),
+        createCodexClient: async () => ({
+          initialize: async () => {
+            calls.push('initialize');
+          },
+          listModels: async () => {
+            calls.push('model/list');
+            return {
+              data: [{
+                id: 'gpt-5.6-sol',
+                model: 'gpt-5.6-sol',
+                displayName: 'GPT-5.6 Sol',
+                description: 'Fast coding model',
+                hidden: false,
+                isDefault: true,
+                supportedReasoningEfforts: [
+                  { reasoningEffort: 'low', description: 'Fastest' },
+                  { reasoningEffort: 'ultra', description: 'Maximum reasoning with delegation' },
+                ],
+                defaultReasoningEffort: 'low',
+              }],
+              nextCursor: null,
+            };
+          },
+          listThreads: async () => {
+            calls.push('thread/list');
+            return {
+              data: [{
+                id: 'thr-existing',
+                sessionId: 'sess-existing',
+                preview: 'Existing Codex thread',
+                turns: [],
+              }],
+              nextCursor: null,
+              backwardsCursor: null,
+            };
+          },
+          readThread: async (input) => {
+            calls.push(`thread/read:${input.threadId}:${input.includeTurns ? 'turns' : 'summary'}`);
+            return {
+              thread: {
+                id: input.threadId,
+                preview: 'Existing Codex thread',
+                turns: input.includeTurns ? [{ id: 'turn-existing' }] : [],
+              },
+            };
+          },
+          forkThread: async (input) => {
+            calls.push(`thread/fork:${input.threadId}`);
+            return { thread: { id: 'thr-forked', forkedFromId: input.threadId, turns: [] } };
+          },
+          archiveThread: async (input) => {
+            calls.push(`thread/archive:${input.threadId}`);
+          },
+          unarchiveThread: async (input) => {
+            calls.push(`thread/unarchive:${input.threadId}`);
+            return { thread: { id: input.threadId, turns: [] } };
+          },
+          startThread: vi.fn(),
+          resumeThread: vi.fn(),
+          startTurn: vi.fn(),
+          close: async () => {
+            calls.push('close');
+          },
+        }),
+      },
+    });
+    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
+    const base = `http://127.0.0.1:${address.port}`;
+    const auth = { authorization: 'Bearer secret-token' };
+
+    try {
+      const models = await fetch(`${base}/api/agent-runtimes/codex/models`, { headers: auth });
+      const list = await fetch(`${base}/api/agent-runtimes/codex/threads?limit=10`, { headers: auth });
+      const read = await fetch(`${base}/api/agent-runtimes/codex/threads/thr-existing?includeTurns=1`, { headers: auth });
+      const fork = await fetch(`${base}/api/agent-runtimes/codex/threads/thr-existing/fork`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: '/tmp/forked' }),
+      });
+      const archive = await fetch(`${base}/api/agent-runtimes/codex/threads/thr-existing/archive`, {
+        method: 'POST',
+        headers: auth,
+      });
+      const unarchive = await fetch(`${base}/api/agent-runtimes/codex/threads/thr-existing/unarchive`, {
+        method: 'POST',
+        headers: auth,
+      });
+
+      expect(models.status).toBe(200);
+      expect(await models.json()).toEqual({
+        data: [expect.objectContaining({
+          id: 'gpt-5.6-sol',
+          defaultReasoningEffort: 'low',
+        })],
+        nextCursor: null,
+      });
+      expect(list.status).toBe(200);
+      expect(await list.json()).toEqual({
+        data: [expect.objectContaining({ id: 'thr-existing' })],
+        nextCursor: null,
+        backwardsCursor: null,
+      });
+      expect(read.status).toBe(200);
+      expect(await read.json()).toEqual({
+        thread: expect.objectContaining({
+          id: 'thr-existing',
+          turns: [{ id: 'turn-existing' }],
+        }),
+      });
+      expect(fork.status).toBe(200);
+      expect(archive.status).toBe(200);
+      expect(unarchive.status).toBe(200);
+      expect(calls).toEqual([
+        'initialize',
+        'model/list',
+        'close',
+        'initialize',
+        'thread/list',
+        'close',
+        'initialize',
+        'thread/read:thr-existing:turns',
+        'close',
+        'initialize',
+        'thread/fork:thr-existing',
+        'close',
+        'initialize',
+        'thread/archive:thr-existing',
+        'close',
+        'initialize',
+        'thread/unarchive:thr-existing',
+        'close',
+      ]);
+      expect(calls).not.toContain('turn/start');
+    } finally {
+      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('returns structured Codex thread diagnostics when the local runtime is unavailable', async () => {
+    const res = await handleCodexThreadsGet(new URLSearchParams('limit=10'), {
+      resolveRuntimeCommand: async () => '/usr/local/bin/codex',
+      checkCodexRuntimeHealth: async () => ({
+        status: 'signed-out',
+        reason: 'Codex model provider "custom" requires STAFF_KEY.',
+      }),
+    });
+
+    expect(res).toEqual({
+      status: 409,
+      body: {
+        error: 'Codex is signed out. Codex model provider "custom" requires STAFF_KEY.',
+      },
+    });
   });
 
   it('serves every Product Server route declared in the runtime contract', async () => {
@@ -1006,6 +2012,136 @@ describe('MindOS product server contract', () => {
       })).status).toBe(200);
     } finally {
       await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('preserves unrelated Product Server config fields when settings are saved', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mindos-http-settings-merge-home-'));
+    const root = mkdtempSync(join(tmpdir(), 'mindos-http-settings-merge-root-'));
+    const configDir = join(home, '.mindos');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+      mindRoot: root,
+      authToken: 'secret-token',
+      ai: {
+        activeProvider: 'p_openai01',
+        providers: [
+          { id: 'p_openai01', name: 'OpenAI', protocol: 'openai', apiKey: '', model: 'gpt-5.4', baseUrl: '' },
+        ],
+      },
+      webSearch: { provider: 'auto', exaApiKey: 'old-key' },
+      disabledSkills: ['legacy-skill'],
+      acpAgents: { codex: { enabled: true } },
+      customAgents: [{ key: 'local-agent', name: 'Local Agent' }],
+      installedSkillAgents: [{ agent: 'codex', skill: 'mindos', path: '/tmp/skill' }],
+    }), 'utf-8');
+
+    const app = createMindosHttpServer({
+      hostname: '127.0.0.1',
+      port: 0,
+      runtime: { homeDir: home },
+    });
+    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const response = await fetch(`${base}/api/settings`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+        body: JSON.stringify({
+          ai: {
+            activeProvider: 'anthropic',
+            providers: [
+              { id: 'p_openai01', name: 'OpenAI', protocol: 'openai', apiKey: '', model: 'gpt-5.4', baseUrl: '' },
+              { id: 'p_anthropic01', name: 'Anthropic', protocol: 'anthropic', apiKey: '', model: 'claude-sonnet-4-6', baseUrl: '' },
+            ],
+          },
+          webSearch: { provider: 'exa', exaApiKey: 'new-key' },
+        }),
+      });
+      expect(response.status).toBe(200);
+      const saved = JSON.parse(readFileSync(join(configDir, 'config.json'), 'utf-8'));
+      expect(saved.ai.activeProvider).toBe('p_anthropic01');
+      expect(saved.webSearch).toEqual({ provider: 'exa', exaApiKey: 'new-key' });
+      expect(saved.disabledSkills).toEqual(['legacy-skill']);
+      expect(saved.acpAgents).toEqual({ codex: { enabled: true } });
+      expect(saved.customAgents).toEqual([{ key: 'local-agent', name: 'Local Agent' }]);
+      expect(saved.installedSkillAgents).toEqual([{ agent: 'codex', skill: 'mindos', path: '/tmp/skill' }]);
+    } finally {
+      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('resolves Product Server p_* provider routes with env fallback', async () => {
+    const oldOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'env-openai-key';
+
+    const fakeApi = createNodeServer((req, res) => {
+      expect(req.headers.authorization).toBe('Bearer env-openai-key');
+      if (req.url === '/v1/models') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ id: 'gpt-test' }] }));
+        return;
+      }
+      if (req.url === '/v1/chat/completions') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }));
+        return;
+      }
+      res.writeHead(404);
+      res.end('not found');
+    });
+    await new Promise<void>((resolve) => fakeApi.listen(0, '127.0.0.1', resolve));
+    const fakeAddress = fakeApi.address();
+    if (!fakeAddress || typeof fakeAddress === 'string') throw new Error('expected fake TCP server address');
+    const fakeBaseUrl = `http://127.0.0.1:${fakeAddress.port}/v1`;
+
+    const home = mkdtempSync(join(tmpdir(), 'mindos-http-provider-home-'));
+    const root = mkdtempSync(join(tmpdir(), 'mindos-http-provider-root-'));
+    const configDir = join(home, '.mindos');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+      mindRoot: root,
+      authToken: 'secret-token',
+      ai: {
+        activeProvider: 'p_saved',
+        providers: [
+          { id: 'p_saved', name: 'OpenAI', protocol: 'openai', apiKey: '', model: 'gpt-test', baseUrl: fakeBaseUrl },
+        ],
+      },
+    }), 'utf-8');
+
+    const app = createMindosHttpServer({
+      hostname: '127.0.0.1',
+      port: 0,
+      runtime: { homeDir: home },
+    });
+    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const list = await fetch(`${base}/api/settings/list-models`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer secret-token' },
+        body: JSON.stringify({ provider: 'p_saved' }),
+      });
+      expect(list.status).toBe(200);
+      expect(await list.json()).toEqual({ ok: true, models: ['gpt-test'] });
+
+      const test = await fetch(`${base}/api/settings/test-key`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer secret-token' },
+        body: JSON.stringify({ provider: 'p_saved' }),
+      });
+      expect(test.status).toBe(200);
+      expect(await test.json()).toMatchObject({ ok: true });
+    } finally {
+      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
+      await new Promise<void>((resolve, reject) => fakeApi.close((error) => error ? reject(error) : resolve()));
+      if (oldOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = oldOpenAiKey;
     }
   });
 
@@ -1096,7 +2232,7 @@ describe('MindOS product server contract', () => {
     });
   });
 
-  it('handles search empty query and delegates non-empty query to injected services', async () => {
+  it('handles search empty query and delegates parsed options to injected services', async () => {
     const empty = await handleSearch(new URLSearchParams('q='), {
       search: async () => {
         throw new Error('should not search empty query');
@@ -1104,12 +2240,34 @@ describe('MindOS product server contract', () => {
     });
     expect(empty).toEqual({ status: 200, body: [] });
 
-    const found = await handleSearch(new URLSearchParams('q=hello'), {
-      search: async (query, options) => [{ path: 'hello.md', query, limit: options.limit }],
+    const found = await handleSearch(new URLSearchParams('q=hello&limit=5&scope=Projects&file_type=md&modified_after=2026-01-01T00%3A00%3A00.000Z'), {
+      search: async (query, options) => [{ path: 'hello.md', query, options }],
     });
     expect(found.status).toBe(200);
-    expect(found.body).toEqual([{ path: 'hello.md', query: 'hello', limit: 20 }]);
-    expect(found.headers?.['Cache-Control']).toBe('private, max-age=300');
+    expect(found.body).toEqual([{
+      path: 'hello.md',
+      query: 'hello',
+      options: {
+        limit: 5,
+        scope: 'Projects',
+        file_type: 'md',
+        modified_after: '2026-01-01T00:00:00.000Z',
+      },
+    }]);
+    expect(found.headers?.['Cache-Control']).toBe('no-store');
+  });
+
+  it('clamps invalid search limits and ignores invalid file_type filters', async () => {
+    const found = await handleSearch(new URLSearchParams('q=hello&limit=500&file_type=pdf'), {
+      search: async (query, options) => [{ path: 'hello.md', query, options }],
+    });
+
+    expect(found.status).toBe(200);
+    expect(found.body).toEqual([{
+      path: 'hello.md',
+      query: 'hello',
+      options: { limit: 100 },
+    }]);
   });
 
   it('handles search prewarm from product file collection services', () => {
@@ -1140,2947 +2298,6 @@ describe('MindOS product server contract', () => {
     expect(injected.body).toMatchObject({
       cacheState: 'hit',
       core: { cacheState: 'built', fileCount: 2 },
-    });
-  });
-
-  it('lists skills from product-owned skill directories without Web dependencies', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-skills-'));
-    const builtinRoot = join(root, 'skills');
-    const userRoot = join(root, 'mind', '.skills');
-    mkdirSync(join(builtinRoot, 'mindos'), { recursive: true });
-    mkdirSync(join(userRoot, 'custom-skill'), { recursive: true });
-    writeFileSync(join(builtinRoot, 'mindos', 'SKILL.md'), '---\nname: mindos\ndescription: Builtin skill\n---\n');
-    writeFileSync(join(userRoot, 'custom-skill', 'SKILL.md'), '---\nname: custom-skill\ndescription: User skill\n---\n');
-
-    const res = handleSkillsGet({
-      disabledSkills: ['mindos'],
-      skillRoots: [
-        { path: builtinRoot, source: 'builtin', origin: 'project-builtin', editable: false },
-        { path: userRoot, source: 'user', origin: 'mindos-user', editable: true },
-      ],
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.headers?.['Cache-Control']).toBe('no-store');
-    expect(res.body.skills).toEqual([
-      expect.objectContaining({ name: 'custom-skill', description: 'User skill', source: 'user', enabled: true, editable: true }),
-      expect.objectContaining({ name: 'mindos', description: 'Builtin skill', source: 'builtin', enabled: false, editable: false }),
-    ]);
-  });
-
-  it('lists external skill directories when entries are symlinks', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-symlinked-external-skills-'));
-    const codexSkillsRoot = join(root, 'codex-skills');
-    const agentSkillsRoot = join(root, 'agent-skills');
-    mkdirSync(codexSkillsRoot, { recursive: true });
-    mkdirSync(join(agentSkillsRoot, 'linked-skill'), { recursive: true });
-    writeFileSync(join(agentSkillsRoot, 'linked-skill', 'SKILL.md'), '---\nname: linked-skill\ndescription: Linked skill\n---\n');
-    symlinkSync(join(agentSkillsRoot, 'linked-skill'), join(codexSkillsRoot, 'linked-skill'), 'dir');
-
-    const res = handleSkillsGet({
-      disabledSkills: [],
-      skillRoots: [
-        { path: codexSkillsRoot, source: 'user', origin: 'custom', editable: true },
-      ],
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.body.skills).toEqual([
-      expect.objectContaining({
-        name: 'linked-skill',
-        description: 'Linked skill',
-        source: 'user',
-        origin: 'custom',
-        editable: true,
-      }),
-    ]);
-  });
-
-  it('lists and reads custom skill paths when the path points directly at a skill directory', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-direct-custom-skill-'));
-    const home = join(root, 'home');
-    const directSkillRoot = join(home, 'custom-skills', 'direct-skill');
-    mkdirSync(directSkillRoot, { recursive: true });
-    writeFileSync(join(directSkillRoot, 'SKILL.md'), '---\nname: direct-skill\ndescription: Direct custom skill\n---\n\nDirect body');
-
-    const skillRoots = getSkillRootsFromRuntime({
-      mindRoot: join(root, 'mind'),
-      runtimeRoot: join(root, 'runtime'),
-      homeDir: home,
-      settings: { skillPaths: { custom: ['~/custom-skills/direct-skill'] } },
-    });
-
-    expect(skillRoots.find((skillRoot) => skillRoot.origin === 'custom')?.path).toBe(directSkillRoot);
-
-    const listed = handleSkillsGet({
-      disabledSkills: [],
-      skillRoots,
-    });
-    expect(listed.body.skills).toEqual([
-      expect.objectContaining({
-        name: 'direct-skill',
-        description: 'Direct custom skill',
-        origin: 'custom',
-        path: join(directSkillRoot, 'SKILL.md'),
-      }),
-    ]);
-
-    expect(handleSkillsPost({ action: 'read', name: 'direct-skill' }, {
-      mindRoot: join(root, 'mind'),
-      skillRoots,
-      readSettings: () => ({}),
-      writeSettings: () => undefined,
-    })).toMatchObject({
-      status: 200,
-      body: { content: expect.stringContaining('Direct body') },
-    });
-
-    expect(handleSkillsPost({ action: 'read-native', name: 'direct-skill', sourcePath: directSkillRoot }, {
-      mindRoot: join(root, 'mind'),
-      skillRoots,
-      readSettings: () => ({}),
-      writeSettings: () => undefined,
-    })).toMatchObject({
-      status: 200,
-      body: { content: expect.stringContaining('Direct body'), description: 'Direct custom skill' },
-    });
-  });
-
-  it('handles skill writes and reads from the product runtime', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-skill-post-'));
-    const mindRoot = join(root, 'mind');
-    const builtinRoot = join(root, 'skills');
-    const userRoot = join(mindRoot, '.skills');
-    mkdirSync(join(builtinRoot, 'builtin-skill'), { recursive: true });
-    writeFileSync(join(builtinRoot, 'builtin-skill', 'SKILL.md'), '---\nname: builtin-skill\ndescription: Builtin\n---\n');
-
-    let settings: MindosSkillsSettings = { disabledSkills: [] };
-    const services = {
-      mindRoot,
-      skillRoots: [
-        { path: builtinRoot, source: 'builtin' as const, origin: 'project-builtin' as const, editable: false },
-        { path: userRoot, source: 'user' as const, origin: 'mindos-user' as const, editable: true },
-      ],
-      readSettings: () => settings,
-      writeSettings: (next: typeof settings) => { settings = next; },
-    };
-
-    expect(handleSkillsPost({ action: 'create', name: '../../../etc/passwd' }, services)).toMatchObject({
-      status: 400,
-      body: { error: expect.stringMatching(/Invalid skill name/) },
-    });
-    expect(handleSkillsPost({ action: 'create', name: 'builtin-skill' }, services)).toMatchObject({
-      status: 409,
-      body: { error: 'A built-in skill with this name already exists' },
-    });
-    expect(handleSkillsPost({ action: 'create', name: 'user-skill', description: 'User skill' }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-    expect(readFileSync(join(userRoot, 'user-skill', 'SKILL.md'), 'utf-8')).toContain('description: User skill');
-
-    expect(handleSkillsPost({
-      action: 'update',
-      name: 'user-skill',
-      content: '---\nname: user-skill\ndescription: Updated\n---\n\nBody',
-    }, services)).toMatchObject({ status: 200, body: { ok: true } });
-    expect(handleSkillsPost({ action: 'read', name: 'user-skill' }, services)).toMatchObject({
-      status: 200,
-      body: { content: expect.stringContaining('Updated') },
-    });
-    expect(handleSkillsPost({ action: 'read-native', name: 'builtin-skill', sourcePath: builtinRoot }, services)).toMatchObject({
-      status: 200,
-      body: { content: expect.stringContaining('Builtin') },
-    });
-
-    const outsideRoot = mkdtempSync(join(tmpdir(), 'mindos-skill-read-native-outside-'));
-    mkdirSync(join(outsideRoot, 'secret-skill'), { recursive: true });
-    writeFileSync(join(outsideRoot, 'secret-skill', 'SKILL.md'), '---\nname: secret-skill\n---\nsecret');
-    expect(handleSkillsPost({ action: 'read-native', name: 'secret-skill', sourcePath: outsideRoot }, services)).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid sourcePath' },
-    });
-
-    expect(handleSkillsPost({ action: 'toggle', name: 'user-skill', enabled: false }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-    expect(settings.disabledSkills).toContain('user-skill');
-
-    expect(handleSkillsPost({ action: 'record-install', name: 'user-skill', agentKey: 'codex', installPath: '/tmp/skill' }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-    expect(settings.installedSkillAgents).toEqual([{ agent: 'codex', skill: 'user-skill', path: '/tmp/skill' }]);
-
-    expect(handleSkillsPost({ action: 'delete', name: 'user-skill' }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-  });
-
-  it('rejects product skill writes through symlinked user skill directories', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-skill-symlink-root-'));
-    const mindRoot = join(root, 'mind');
-    const builtinRoot = join(root, 'builtin-skills');
-    const outside = mkdtempSync(join(tmpdir(), 'mindos-skill-symlink-outside-'));
-    mkdirSync(mindRoot, { recursive: true });
-    mkdirSync(join(builtinRoot, 'builtin-skill'), { recursive: true });
-    writeFileSync(join(builtinRoot, 'builtin-skill', 'SKILL.md'), '---\nname: builtin-skill\n---\nBuiltin');
-    symlinkSync(outside, join(mindRoot, '.skills'), 'dir');
-
-    const services = {
-      mindRoot,
-      skillRoots: [
-        { path: builtinRoot, source: 'builtin' as const, origin: 'project-builtin' as const, editable: false },
-        { path: join(mindRoot, '.skills'), source: 'user' as const, origin: 'mindos-user' as const, editable: true },
-      ],
-      readSettings: () => ({}),
-      writeSettings: () => {},
-    };
-
-    expect(handleSkillsGet({
-      skillRoots: services.skillRoots,
-    }).body.skills).toEqual([
-      expect.objectContaining({ name: 'builtin-skill' }),
-    ]);
-    expect(handleSkillsPost({ action: 'read', name: 'builtin-skill' }, services)).toMatchObject({
-      status: 200,
-      body: { content: expect.stringContaining('Builtin') },
-    });
-    expect(handleSkillsPost({ action: 'create', name: 'external-skill' }, services)).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-    expect(existsSync(join(outside, 'external-skill', 'SKILL.md'))).toBe(false);
-  });
-
-  it('resets auth tokens from the product runtime', () => {
-    let settings = { ai: {}, authToken: 'old-token' };
-    const response = handleSettingsResetTokenPost({
-      readSettings: () => settings,
-      writeSettings: (next) => { settings = next; },
-    });
-
-    expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ ok: true, token: expect.stringMatching(/^[a-f0-9]{4}(-[a-f0-9]{4}){5}$/) });
-    expect(settings.authToken).toBe(response.body.token);
-  });
-
-  it('handles custom agent create, update, and delete from the product runtime', () => {
-    let settings: CustomAgentSettings = { customAgents: [] };
-    const services = {
-      readSettings: () => settings,
-      writeSettings: (next: CustomAgentSettings) => { settings = next; },
-      builtInAgentKeys: ['mindos', 'codex'],
-    };
-
-    expect(handleCustomAgentsPost({ name: '', baseDir: '~/.qclaw/' }, services)).toMatchObject({
-      status: 400,
-      body: { error: 'name and baseDir are required' },
-    });
-    expect(handleCustomAgentsPost({ name: 'Codex', baseDir: '~/.codex/', key: 'codex' }, services)).toMatchObject({
-      status: 400,
-      body: { error: expect.stringContaining('Conflicts with built-in agent') },
-    });
-    expect(handleCustomAgentsPost({ name: 'Pollute', baseDir: '~/.pollute/', key: '__proto__' }, services)).toMatchObject({
-      status: 400,
-      body: { error: expect.stringContaining('Agent key') },
-    });
-    expect(handleCustomAgentsPost({ name: 'Bad Path', baseDir: '~/../bad/' }, services)).toMatchObject({
-      status: 400,
-      body: { error: expect.stringContaining('parent directory') },
-    });
-    expect(handleCustomAgentsPost({
-      name: 'Bad Config',
-      baseDir: '~/.bad/',
-      configKey: '__proto__.servers',
-    }, services)).toMatchObject({
-      status: 400,
-      body: { error: expect.stringContaining('unsafe key') },
-    });
-    expect(handleCustomAgentsPost({
-      name: 'Bad Format',
-      baseDir: '~/.bad/',
-      format: 'yaml' as never,
-    }, services)).toMatchObject({
-      status: 400,
-      body: { error: 'format must be "json" or "toml"' },
-    });
-
-    const created = handleCustomAgentsPost({ name: 'QClaw Local', baseDir: '~/.qclaw/' }, services);
-    expect(created).toMatchObject({
-      status: 201,
-      body: {
-        agent: {
-          key: 'qclaw-local',
-          global: '~/.qclaw/mcp.json',
-          skillDir: '~/.qclaw/skills/',
-        },
-      },
-    });
-    expect(settings.customAgents).toEqual([expect.objectContaining({ key: 'qclaw-local' })]);
-
-    expect(handleCustomAgentsPut({
-      key: 'qclaw-local',
-      globalNestedKey: 'mcp.__proto__',
-    }, services)).toMatchObject({
-      status: 400,
-      body: { error: expect.stringContaining('unsafe key') },
-    });
-    expect(handleCustomAgentsPut({
-      key: 'qclaw-local',
-      presenceDirs: ['~/../bad/'],
-    }, services)).toMatchObject({
-      status: 400,
-      body: { error: expect.stringContaining('parent directory') },
-    });
-
-    expect(handleCustomAgentsPut({
-      key: 'qclaw-local',
-      baseDir: '~/.qclaw-next/',
-      preferredTransport: 'http',
-      presenceCli: '',
-    }, services)).toMatchObject({
-      status: 200,
-      body: {
-        agent: {
-          baseDir: '~/.qclaw-next/',
-          preferredTransport: 'http',
-          presenceDirs: ['~/.qclaw-next/'],
-          skillDir: '~/.qclaw-next/skills/',
-        },
-      },
-    });
-
-    const originalPlatform = process.platform;
-    try {
-      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
-      expect(handleCustomAgentsPut({
-        key: 'qclaw-local',
-        baseDir: 'C:\\Users\\Ada\\.qclaw\\',
-      }, services)).toMatchObject({
-        status: 200,
-        body: {
-          agent: {
-            baseDir: 'C:\\Users\\Ada\\.qclaw\\',
-            presenceDirs: ['C:\\Users\\Ada\\.qclaw\\'],
-            skillDir: 'C:\\Users\\Ada\\.qclaw\\skills/',
-          },
-        },
-      });
-    } finally {
-      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
-    }
-
-    expect(handleCustomAgentsDelete({ key: 'qclaw-local' }, services)).toMatchObject({
-      status: 200,
-      body: { removed: 'qclaw-local' },
-    });
-    expect(settings.customAgents).toEqual([]);
-  });
-
-  it('detects custom agent configs and copies skills from product handlers', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'mindos-agent-home-'));
-    const agentRoot = join(home, '.qclaw');
-    mkdirSync(join(agentRoot, 'skills', 'agent-skill'), { recursive: true });
-    writeFileSync(join(agentRoot, 'mcp.json'), JSON.stringify({
-      mcpServers: {
-        mindos: { command: 'mindos' },
-      },
-    }));
-
-    expect(handleCustomAgentDetectPost({ baseDir: '~/.qclaw/' }, { homeDir: home })).toMatchObject({
-      status: 200,
-      body: {
-        exists: true,
-        detectedConfig: '~/.qclaw/mcp.json',
-        detectedConfigKey: 'mcpServers',
-        mcpServers: ['mindos'],
-        skillNames: ['agent-skill'],
-      },
-    });
-    expect(handleCustomAgentDetectPost({ baseDir: '/tmp/qclaw' }, { homeDir: home })).toMatchObject({
-      status: 200,
-      body: { exists: false, hasSkillsDir: false },
-    });
-
-    const skillRoot = join(home, 'mindos-skills');
-    mkdirSync(join(skillRoot, 'mindos'), { recursive: true });
-    writeFileSync(join(skillRoot, 'mindos', 'SKILL.md'), '# MindOS');
-    const targetRoot = join(home, 'target..skills');
-
-    await expect(handleAgentCopySkillPost({
-      skillName: '../mindos',
-      targetPath: targetRoot,
-    }, {
-      skillRoots: [{ path: skillRoot, source: 'builtin', origin: 'project-builtin', editable: false }],
-      homeDir: home,
-    })).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'Invalid skill name' },
-    });
-
-    await expect(handleAgentCopySkillPost({
-      skillName: 'mindos',
-      targetPath: `${home}/parent/../target-skills`,
-    }, {
-      skillRoots: [{ path: skillRoot, source: 'builtin', origin: 'project-builtin', editable: false }],
-      homeDir: home,
-    })).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'Invalid target path' },
-    });
-
-    mkdirSync(join(skillRoot, 'agent..skill'), { recursive: true });
-    writeFileSync(join(skillRoot, 'agent..skill', 'SKILL.md'), '# Agent Dotted Skill');
-    const dottedTargetRoot = join(home, 'target-dotted-skills');
-
-    await expect(handleAgentCopySkillPost({
-      skillName: 'agent..skill',
-      targetPath: dottedTargetRoot,
-    }, {
-      skillRoots: [{ path: skillRoot, source: 'builtin', origin: 'project-builtin', editable: false }],
-      homeDir: home,
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { success: true, skillName: 'agent..skill', targetPath: join(dottedTargetRoot, 'agent..skill') },
-    });
-    expect(existsSync(join(dottedTargetRoot, 'agent..skill', 'SKILL.md'))).toBe(true);
-
-    await expect(handleAgentCopySkillPost({
-      skillName: 'mindos',
-      targetPath: targetRoot,
-    }, {
-      skillRoots: [{ path: skillRoot, source: 'builtin', origin: 'project-builtin', editable: false }],
-      homeDir: home,
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { success: true, skillName: 'mindos', targetPath: join(targetRoot, 'mindos') },
-    });
-    expect(existsSync(join(targetRoot, 'mindos', 'SKILL.md'))).toBe(true);
-  });
-
-  it('installs and uninstalls MCP config entries from the product runtime', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'mindos-mcp-install-'));
-    const agents: Record<string, MindosMcpAgentDef> = {
-      codex: {
-        name: 'Codex',
-        project: null,
-        global: '~/.codex/config.toml',
-        key: 'mcp_servers',
-        format: 'toml',
-        preferredTransport: 'stdio',
-      },
-      copaw: {
-        name: 'CoPaw',
-        project: null,
-        global: '~/.copaw/config.json',
-        key: 'mcp',
-        globalNestedKey: 'mcp.clients',
-        preferredTransport: 'stdio',
-      },
-    };
-
-    await expect(handleMcpInstallPost({
-      agents: [{ key: 'missing', scope: 'global' }],
-      transport: 'stdio',
-    }, { agents, homeDir: home })).resolves.toMatchObject({
-      status: 200,
-      body: { results: [{ agent: 'missing', status: 'error', message: 'Unknown agent: missing' }] },
-    });
-    await expect(handleMcpInstallPost({
-      agents: [{ key: 'unsafe-key', scope: 'global' }],
-      transport: 'stdio',
-    }, {
-      agents: {
-        'unsafe-key': {
-          name: 'Unsafe',
-          project: null,
-          global: '~/.unsafe/config.json',
-          key: '__proto__',
-          preferredTransport: 'stdio',
-        },
-      },
-      homeDir: home,
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { results: [{ agent: 'unsafe-key', status: 'error', message: expect.stringContaining('Invalid agent config key') }] },
-    });
-    await expect(handleMcpInstallPost({
-      agents: [{ key: 'unsafe-nested', scope: 'global' }],
-      transport: 'stdio',
-    }, {
-      agents: {
-        'unsafe-nested': {
-          name: 'Unsafe Nested',
-          project: null,
-          global: '~/.unsafe-nested/config.json',
-          key: 'mcp',
-          globalNestedKey: 'mcp.__proto__',
-          preferredTransport: 'stdio',
-        },
-      },
-      homeDir: home,
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { results: [{ agent: 'unsafe-nested', status: 'error', message: expect.stringContaining('Invalid nested config path') }] },
-    });
-    expect(({} as Record<string, unknown>).mindos).toBeUndefined();
-
-    await expect(handleMcpInstallPost({
-      agents: [{ key: 'codex', scope: 'global' }],
-      transport: 'stdio',
-    }, { agents, homeDir: home })).resolves.toMatchObject({
-      status: 200,
-      body: { results: [{ agent: 'codex', status: 'ok', path: '~/.codex/config.toml', transport: 'stdio' }] },
-    });
-    expect(readFileSync(join(home, '.codex', 'config.toml'), 'utf-8')).toContain('[mcp_servers.mindos]');
-
-    await expect(handleMcpInstallPost({
-      agents: [{ key: 'copaw', scope: 'global' }],
-      transport: 'stdio',
-    }, { agents, homeDir: home })).resolves.toMatchObject({
-      status: 200,
-      body: { results: [{ agent: 'copaw', status: 'ok' }] },
-    });
-    const copawConfig = JSON.parse(readFileSync(join(home, '.copaw', 'config.json'), 'utf-8'));
-    expect(copawConfig.mcp.clients.mindos).toMatchObject({ type: 'stdio', command: 'mindos' });
-
-    const specialAgents: Record<string, MindosMcpAgentDef> = {
-      codex: {
-        name: 'Codex',
-        project: null,
-        global: '~/.codex/config.toml',
-        key: 'mcp_servers',
-        format: 'toml',
-        preferredTransport: 'http',
-      },
-      hermes: {
-        name: 'Hermes',
-        project: null,
-        global: '~/.hermes/config.yaml',
-        key: 'mcp_servers',
-        format: 'yaml',
-        preferredTransport: 'http',
-      },
-    };
-    await expect(handleMcpInstallPost({
-      agents: [
-        { key: 'codex', scope: 'global' },
-        { key: 'hermes', scope: 'global' },
-      ],
-      transport: 'http',
-      url: 'http://localhost:8781/mcp?label="main"',
-      token: 'tok"line\nnext',
-    }, { agents: specialAgents, homeDir: home })).resolves.toMatchObject({
-      status: 200,
-      body: { results: [{ agent: 'codex', status: 'ok' }, { agent: 'hermes', status: 'ok' }] },
-    });
-    const specialToml = readFileSync(join(home, '.codex', 'config.toml'), 'utf-8');
-    expect(specialToml).toContain('url = "http://localhost:8781/mcp?label=\\"main\\""');
-    expect(specialToml).toContain('Authorization = "Bearer tok\\"line\\nnext"');
-    const specialYaml = readFileSync(join(home, '.hermes', 'config.yaml'), 'utf-8');
-    expect(specialYaml).toContain('url: "http://localhost:8781/mcp?label=\\"main\\""');
-    expect(specialYaml).toContain('Authorization: "Bearer tok\\"line\\nnext"');
-
-    expect(handleMcpUninstallPost({
-      agents: [{ key: 'copaw', scope: 'global' }],
-    }, { agents, homeDir: home })).toMatchObject({
-      status: 200,
-      body: { results: [{ agent: 'copaw', status: 'ok', path: '~/.copaw/config.json' }] },
-    });
-    const afterUninstall = JSON.parse(readFileSync(join(home, '.copaw', 'config.json'), 'utf-8'));
-    expect(afterUninstall.mcp.clients.mindos).toBeUndefined();
-  });
-
-  it('expands Windows-style home-relative MCP config paths', () => {
-    const home = mkdtempSync(join(tmpdir(), 'mindos-mcp-install-home-backslash-'));
-    const configPath = join(home, '.copaw\\config.json');
-    writeFileSync(configPath, JSON.stringify({
-      mcp: {
-        clients: {
-          mindos: { type: 'stdio', command: 'mindos' },
-          search: { type: 'stdio', command: 'search' },
-        },
-      },
-    }), 'utf-8');
-
-    const agents: Record<string, MindosMcpAgentDef> = {
-      copaw: {
-        name: 'CoPaw',
-        project: null,
-        global: '~\\.copaw\\config.json',
-        key: 'mcp',
-        globalNestedKey: 'mcp.clients',
-        preferredTransport: 'stdio',
-      },
-    };
-
-    expect(handleMcpUninstallPost({
-      agents: [{ key: 'copaw', scope: 'global' }],
-    }, { agents, homeDir: home })).toMatchObject({
-      status: 200,
-      body: { results: [{ agent: 'copaw', status: 'ok', path: '~\\.copaw\\config.json' }] },
-    });
-
-    const afterUninstall = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(afterUninstall.mcp.clients.mindos).toBeUndefined();
-    expect(afterUninstall.mcp.clients.search).toMatchObject({ command: 'search' });
-  });
-
-  it('lists MCP tools and updates direct tool exposure from product handlers', () => {
-    let directTools: boolean | string[] = false;
-    const tools = handleMcpToolsGet({
-      readMcpConfig: () => ({
-        mcpServers: {
-          github: { lifecycle: 'keep-alive', directTools },
-          docs: {},
-        },
-      }),
-      readMcpToolCache: () => ({
-        github: {
-          tools: [
-            { name: 'search', description: 'Search issues' },
-            { name: 'read' },
-          ],
-        },
-      }),
-    });
-
-    expect(tools).toMatchObject({
-      status: 200,
-      body: {
-        servers: [
-          {
-            name: 'github',
-            toolCount: 2,
-            directTools: false,
-            lifecycle: 'keep-alive',
-            cached: true,
-          },
-          {
-            name: 'docs',
-            toolCount: 0,
-            directTools: false,
-            lifecycle: 'lazy',
-            cached: false,
-          },
-        ],
-      },
-    });
-
-    expect(handleMcpDirectToolsPost({ directTools: true }, {
-      updateServerDirectTools: () => {
-        throw new Error('should not update invalid request');
-      },
-    })).toMatchObject({
-      status: 400,
-      body: { error: 'Missing or invalid "server" field' },
-    });
-
-    expect(handleMcpDirectToolsPost({ server: '__proto__', directTools: true }, {
-      updateServerDirectTools: () => {
-        throw new Error('should not update unsafe server name');
-      },
-    })).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid server name' },
-    });
-    expect(({} as Record<string, unknown>).directTools).toBeUndefined();
-
-    expect(handleMcpDirectToolsPost({ server: 'github', directTools: ['search'] }, {
-      updateServerDirectTools: (_server, next) => { directTools = next; },
-    })).toMatchObject({
-      status: 200,
-      body: { ok: true, server: 'github', directTools: ['search'] },
-    });
-    expect(directTools).toEqual(['search']);
-  });
-
-  it('aggregates MCP agent discovery through the product runtime handler', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'mindos-mcp-agents-home-'));
-    const root = mkdtempSync(join(tmpdir(), 'mindos-mcp-agents-root-'));
-    mkdirSync(join(home, '.mindos'), { recursive: true });
-    mkdirSync(join(home, '.custom', 'skills', 'mindos'), { recursive: true });
-    writeFileSync(join(home, '.mindos', 'mcp.json'), JSON.stringify({
-      mcpServers: { filesystem: {}, github: {} },
-    }));
-    writeFileSync(join(home, '.custom', 'mcp.json'), JSON.stringify({
-      mcpServers: { mindos: {}, search: {} },
-    }));
-
-    const agents: Record<string, MindosMcpAgentRegistryDef> = {
-      mindos: {
-        name: 'MindOS',
-        project: null,
-        global: '~/.mindos/mcp.json',
-        key: 'mcpServers',
-        preferredTransport: 'stdio',
-        presenceDirs: ['~/.mindos/'],
-      },
-      'claude-code': {
-        name: 'Claude Code',
-        project: '.mcp.json',
-        global: '~/.claude.json',
-        key: 'mcpServers',
-        preferredTransport: 'stdio',
-        presenceDirs: ['~/.claude/'],
-      },
-      'custom-one': {
-        name: 'Custom One',
-        project: null,
-        global: '~/.custom/mcp.json',
-        key: 'mcpServers',
-        preferredTransport: 'stdio',
-        presenceDirs: ['~/.custom/'],
-      },
-    };
-    const customAgents: MindosCustomMcpAgentDef[] = [{
-      name: 'Custom One',
-      key: 'custom-one',
-      baseDir: '~/.custom/',
-      global: '~/.custom/mcp.json',
-      configKey: 'mcpServers',
-      format: 'json',
-      preferredTransport: 'stdio',
-      presenceDirs: ['~/.custom/'],
-    }];
-
-    const response = await handleMcpAgentsGet({
-      agents,
-      builtInAgents: {
-        mindos: agents.mindos,
-        'claude-code': agents['claude-code'],
-      },
-      customAgents,
-      readSettings: () => ({ mcpPort: 7777 }),
-      env: {} as NodeJS.ProcessEnv,
-      homeDir: home,
-      mindRoot: join(home, '.mindos'),
-      projectRoot: root,
-      now: () => new Date('2026-04-30T00:00:00.000Z'),
-      detectAgentPresence: (key) => key === 'claude-code',
-      detectInstalled: (key) => key === 'claude-code'
-        ? { installed: true, scope: 'global', transport: 'http', url: 'http://127.0.0.1:8567/mcp' }
-        : { installed: false },
-      resolveSkillWorkspaceProfile: () => ({
-        mode: 'additional',
-        workspacePath: join(home, '.claude', 'skills'),
-      }),
-      detectAgentRuntimeSignals: () => ({
-        hiddenRootPath: join(home, '.claude'),
-        hiddenRootPresent: false,
-        conversationSignal: false,
-        usageSignal: false,
-      }),
-      detectAgentConfiguredMcpServers: () => ({ servers: ['mindos'], sources: ['global:~/.claude.json'] }),
-      detectAgentInstalledSkills: () => ({ skills: [], sourcePath: join(home, '.claude', 'skills') }),
-      loadMindosSkills: () => ({
-        names: ['mindos'],
-        sourcePath: join(root, 'skills'),
-        workspacePath: join(home, '.agents', 'skills'),
-      }),
-      fetchHead: async () => ({ status: 200 }),
-    });
-
-    expect(response.status).toBe(200);
-    const profiles = response.body.agents;
-    expect(profiles.map((agent) => agent.key)).toEqual(['mindos', 'claude-code', 'custom-one']);
-    expect(profiles[0]).toMatchObject({
-      key: 'mindos',
-      present: true,
-      installed: true,
-      scope: 'builtin',
-      transport: 'http :7777',
-      configuredMcpServers: ['filesystem', 'github'],
-      installedSkillNames: ['mindos'],
-      hiddenRootPresent: true,
-      runtimeLastActivityAt: '2026-04-30T00:00:00.000Z',
-    });
-    expect(profiles[2]).toMatchObject({
-      key: 'custom-one',
-      present: true,
-      installed: true,
-      scope: 'global',
-      isCustom: true,
-      customBaseDir: '~/.custom/',
-      configuredMcpServers: ['mindos', 'search'],
-      installedSkillNames: ['mindos'],
-    });
-  });
-
-  it('discovers custom MCP agents with Windows-style home-relative config paths', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'mindos-mcp-agents-home-backslash-'));
-    const configPath = join(home, '.custom\\mcp.json');
-    writeFileSync(configPath, JSON.stringify({
-      mcpServers: {
-        mindos: {},
-        search: {},
-      },
-    }), 'utf-8');
-
-    const agents: Record<string, MindosMcpAgentRegistryDef> = {
-      'custom-one': {
-        name: 'Custom One',
-        project: null,
-        global: '~\\.custom\\mcp.json',
-        key: 'mcpServers',
-        preferredTransport: 'stdio',
-        presenceDirs: ['~\\.custom\\'],
-      },
-    };
-    const customAgents: MindosCustomMcpAgentDef[] = [{
-      name: 'Custom One',
-      key: 'custom-one',
-      baseDir: '~\\.custom\\',
-      global: '~\\.custom\\mcp.json',
-      configKey: 'mcpServers',
-      format: 'json',
-      preferredTransport: 'stdio',
-      presenceDirs: ['~\\.custom\\'],
-    }];
-
-    const response = await handleMcpAgentsGet({
-      agents,
-      builtInAgents: {},
-      customAgents,
-      homeDir: home,
-      pathExists: (targetPath) => targetPath === configPath,
-      readTextFile: (targetPath) => {
-        expect(targetPath).toBe(configPath);
-        return readFileSync(targetPath, 'utf-8');
-      },
-      listSkillNames: () => [],
-    });
-
-    expect(response.status).toBe(200);
-    expect(response.body.agents[0]).toMatchObject({
-      key: 'custom-one',
-      installed: true,
-      configuredMcpServers: ['mindos', 'search'],
-      configuredMcpSources: [`local:${configPath}`],
-    });
-  });
-
-  it('marks installed HTTP MCP agents inactive when endpoint verification fails', async () => {
-    const response = await handleMcpAgentsGet({
-      agents: {
-        'claude-code': {
-          name: 'Claude Code',
-          project: null,
-          global: '~/.claude.json',
-          key: 'mcpServers',
-          preferredTransport: 'stdio',
-        },
-      },
-      detectInstalled: () => ({
-        installed: true,
-        scope: 'global',
-        transport: 'http',
-        url: 'http://127.0.0.1:1/mcp',
-      }),
-      fetchHead: async () => ({ status: 503 }),
-    });
-
-    expect(response.status).toBe(200);
-    expect(response.body.agents[0]).toMatchObject({
-      key: 'claude-code',
-      installed: false,
-    });
-  });
-
-  it('installs MindOS skills through the product runtime installer handler', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-install-skill-'));
-    const localSkills = join(root, 'skills');
-    mkdirSync(localSkills, { recursive: true });
-    const commands: Array<{ command: string; args: string[] }> = [];
-
-    expect(handleMcpInstallSkillPost({ agents: [] }, {
-      runCommand: () => {
-        throw new Error('should not run invalid request');
-      },
-    })).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid skill name' },
-    });
-    expect(handleMcpInstallSkillPost({ skill: 'mindos', agents: ['--help'] }, {
-      runCommand: () => {
-        throw new Error('should not run invalid agent request');
-      },
-    })).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid agent name' },
-    });
-    expect(handleMcpInstallSkillPost({ skill: 'mindos', agents: ['__proto__'] }, {
-      runCommand: () => {
-        throw new Error('should not run invalid agent request');
-      },
-    })).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid agent name' },
-    });
-
-    expect(handleMcpInstallSkillPost({
-      skill: 'mindos-zh',
-      agents: ['cursor', 'claude-code', 'unknown-agent'],
-    }, {
-      projectRoot: root,
-      pathExists: (path) => path === localSkills,
-      skillAgentRegistry: {
-        cursor: { mode: 'universal' },
-        'claude-code': { mode: 'additional', skillAgentName: 'claude-code' },
-      },
-      runCommand: (command, args) => {
-        commands.push({ command, args });
-        if (commands.length === 1) {
-          const error = new Error('network down') as Error & { stdout: string; stderr: string };
-          error.stdout = '';
-          error.stderr = 'network down';
-          throw error;
-        }
-        return 'Done!\n';
-      },
-    })).toMatchObject({
-      status: 200,
-      body: {
-        ok: true,
-        skill: 'mindos-zh',
-        agents: ['claude-code', 'unknown-agent'],
-        stdout: 'Done!',
-      },
-    });
-
-    expect(commands).toEqual([
-      {
-        command: 'npx',
-        args: ['skills', 'add', 'GeminiLight/MindOS', '--skill', 'mindos-zh', '-a', 'claude-code', '-a', 'unknown-agent', '-g', '-y'],
-      },
-      {
-        command: 'npx',
-        args: ['skills', 'add', localSkills, '--skill', 'mindos-zh', '-a', 'claude-code', '-a', 'unknown-agent', '-g', '-y'],
-      },
-    ]);
-
-    expect(handleMcpInstallSkillPost({ skill: 'mindos', agents: ['cursor'] }, {
-      skillAgentRegistry: { cursor: { mode: 'universal' } },
-      pathExists: () => false,
-      runCommand: () => 'Done!\n',
-    })).toMatchObject({
-      status: 200,
-      body: {
-        ok: true,
-        agents: [],
-        cmd: 'npx skills add "GeminiLight/MindOS" --skill mindos -a universal -g -y',
-      },
-    });
-  });
-
-  it('runs MindOS skill installation through argv-safe subprocess args', () => {
-    const calls: Array<{ command: string; args: string[] }> = [];
-
-    expect(handleMcpInstallSkillPost({ skill: 'mindos', agents: ['claude-code'] }, {
-      skillAgentRegistry: { 'claude-code': { mode: 'additional', skillAgentName: 'claude-code' } },
-      pathExists: () => false,
-      runCommand: (command, args) => {
-        calls.push({ command, args });
-        return 'Done!\n';
-      },
-    })).toMatchObject({
-      status: 200,
-      body: {
-        ok: true,
-        cmd: 'npx skills add "GeminiLight/MindOS" --skill mindos -a claude-code -g -y',
-      },
-    });
-
-    expect(calls).toEqual([{
-      command: 'npx',
-      args: ['skills', 'add', 'GeminiLight/MindOS', '--skill', 'mindos', '-a', 'claude-code', '-g', '-y'],
-    }]);
-
-    const source = readFileSync(join(__dirname, 'server', 'handlers', 'mcp-install-skill.ts'), 'utf-8');
-    expect(source).not.toContain('execSync(cmd');
-    expect(source).toContain('execFileSync(invocation.command, invocation.args');
-  });
-
-  it('resolves npx through the npm CLI on Windows without shell shims', () => {
-    const npxCliPath = '/node/node_modules/npm/bin/npx-cli.js';
-
-    expect(resolveNpxInvocation(['skills', 'add', 'GeminiLight/MindOS'], {
-      platform: 'win32',
-      nodeExecPath: '/node/node.exe',
-      pathExists: (path) => path === npxCliPath,
-      env: {},
-    })).toEqual({
-      command: '/node/node.exe',
-      args: [npxCliPath, 'skills', 'add', 'GeminiLight/MindOS'],
-    });
-  });
-
-  it('restarts MCP through the product process-control handler', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-mcp-restart-'));
-    const bundlePath = join(root, 'packages', 'mindos', 'dist', 'protocols', 'mcp-server', 'index.cjs');
-    const packageRoot = join(root, 'packages', 'mindos');
-    const killedPorts: number[] = [];
-    const spawned: Array<{ command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }> = [];
-
-    await expect(handleMcpRestartPost({
-      readSettings: () => ({ mcpPort: 9991, authToken: 'from-settings' }),
-      env: { MINDOS_MANAGED: '1' } as NodeJS.ProcessEnv,
-      projectRoot: root,
-      killByPort: (port) => { killedPorts.push(port); },
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true, port: 9991, note: 'ProcessManager will respawn' },
-    });
-    expect(killedPorts).toEqual([9991]);
-
-    await expect(handleMcpRestartPost({
-      readSettings: () => ({ mcpPort: 9992 }),
-      env: {} as NodeJS.ProcessEnv,
-      projectRoot: root,
-      killByPort: () => {},
-      waitForPortFree: async () => false,
-    })).resolves.toMatchObject({
-      status: 500,
-      body: { error: 'MCP port 9992 still in use after kill' },
-    });
-
-    await expect(handleMcpRestartPost({
-      readSettings: () => ({ mcpPort: 9993 }),
-      env: {} as NodeJS.ProcessEnv,
-      projectRoot: root,
-      killByPort: () => {},
-      waitForPortFree: async () => true,
-      pathExists: () => false,
-    })).resolves.toMatchObject({
-      status: 500,
-      body: { error: 'MCP bundle not found — reinstall @geminilight/mindos' },
-    });
-
-    await expect(handleMcpRestartPost({
-      readSettings: () => ({ mcpPort: 9994, authToken: 'from-settings' }),
-      env: { MINDOS_WEB_PORT: '4567', MCP_HOST: '127.0.0.1' } as NodeJS.ProcessEnv,
-      projectRoot: root,
-      execPath: '/node',
-      killByPort: (port) => { killedPorts.push(port); },
-      waitForPortFree: async () => true,
-      pathExists: (path) => path === bundlePath,
-      spawnDetached: (command, args, options) => {
-        spawned.push({ command, args, cwd: options.cwd, env: options.env });
-        return { pid: 12345, unref: () => {} };
-      },
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true, pid: 12345, port: 9994 },
-    });
-
-    await expect(handleMcpRestartPost({
-      readSettings: () => ({ mcpPort: 9995 }),
-      env: { MINDOS_WEB_PORT: '5678' } as NodeJS.ProcessEnv,
-      projectRoot: packageRoot,
-      execPath: '/node',
-      killByPort: (port) => { killedPorts.push(port); },
-      waitForPortFree: async () => true,
-      pathExists: (path) => path === bundlePath,
-      spawnDetached: (command, args, options) => {
-        spawned.push({ command, args, cwd: options.cwd, env: options.env });
-        return { pid: 12346, unref: () => {} };
-      },
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true, pid: 12346, port: 9995 },
-    });
-
-    expect(spawned).toEqual([{
-      command: '/node',
-      args: [bundlePath],
-      cwd: packageRoot,
-      env: expect.objectContaining({
-        MCP_TRANSPORT: 'http',
-        MCP_PORT: '9994',
-        MCP_HOST: '127.0.0.1',
-        MINDOS_URL: 'http://127.0.0.1:4567',
-        AUTH_TOKEN: 'from-settings',
-      }),
-    }, {
-      command: '/node',
-      args: [bundlePath],
-      cwd: packageRoot,
-      env: expect.objectContaining({
-        MCP_TRANSPORT: 'http',
-        MCP_PORT: '9995',
-        MCP_HOST: '0.0.0.0',
-        MINDOS_URL: 'http://127.0.0.1:5678',
-      }),
-    }]);
-  });
-
-  it('finds MCP restart port owners without shell-interpolated process lookup', () => {
-    expect(parseNetstatListeningPids(8781, [
-      '  TCP    0.0.0.0:8781       0.0.0.0:0       LISTENING       111',
-      '  TCP    [::]:8781          [::]:0          LISTENING       222',
-      '  TCP    127.0.0.1:87810    0.0.0.0:0       LISTENING       333',
-      '  TCP    127.0.0.1:8781     0.0.0.0:0       ESTABLISHED     444',
-    ].join('\r\n'))).toEqual([111, 222]);
-
-    const winCalls: Array<{ command: string; args: string[] }> = [];
-    const winPids = findMcpProcessIdsByPort(8781, {
-      platform: 'win32',
-      execFile: (command, args) => {
-        winCalls.push({ command, args });
-        if (command === 'netstat') {
-          return [
-            '  TCP    0.0.0.0:8781       0.0.0.0:0       LISTENING       1234',
-            '  TCP    127.0.0.1:87810    0.0.0.0:0       LISTENING       5678',
-          ].join('\r\n');
-        }
-        return '';
-      },
-      getCommandLine: (pid) => pid === 1234
-        ? 'C:\\Program Files\\MindOS\\node.exe C:\\Users\\me\\.mindos\\runtime\\dist\\protocols\\mcp-server\\index.cjs'
-        : 'C:\\Windows\\System32\\svchost.exe',
-    });
-    expect(winPids).toEqual([1234]);
-    expect(winCalls).toEqual([{ command: 'netstat', args: ['-ano'] }]);
-
-    const unixCalls: Array<{ command: string; args: string[] }> = [];
-    const unixPids = findMcpProcessIdsByPort(8781, {
-      platform: 'linux',
-      execFile: (command, args) => {
-        unixCalls.push({ command, args });
-        if (command === 'lsof') throw new Error('lsof unavailable');
-        if (command === 'ss') {
-          return [
-            'LISTEN 0 4096 0.0.0.0:8781 0.0.0.0:* users:(("node",pid=2468,fd=20))',
-            'LISTEN 0 4096 0.0.0.0:87810 0.0.0.0:* users:(("node",pid=1357,fd=20))',
-          ].join('\n');
-        }
-        return '';
-      },
-      getCommandLine: (pid) => pid === 2468
-        ? '/usr/bin/node /home/me/.mindos/runtime/dist/protocols/mcp-server/index.cjs'
-        : '/usr/bin/python -m http.server 8781',
-    });
-    expect(unixPids).toEqual([2468]);
-    expect(unixCalls).toEqual([
-      { command: 'lsof', args: ['-ti', ':8781'] },
-      { command: 'ss', args: ['-tlnp'] },
-    ]);
-
-    const source = readFileSync(join(__dirname, 'server', 'handlers', 'mcp-restart.ts'), 'utf-8');
-    expect(source).not.toContain('execSync(');
-    expect(source).not.toContain('lsof -ti :${port}');
-    expect(source).not.toContain('| xargs kill');
-    expect(source).toContain("execFileSync('powershell.exe', [");
-    expect(source).toContain("execFileSync('wmic', ['process', 'where', `ProcessId=${pid}`");
-  });
-
-  it('filters MCP restart port owners by MindOS MCP command line before killing', () => {
-    expect(isMindosMcpCommandLine('/usr/bin/node /home/me/.mindos/runtime/dist/protocols/mcp-server/index.cjs')).toBe(true);
-    expect(isMindosMcpCommandLine('C:\\MindOS\\node.exe C:\\MindOS\\dist\\protocols\\mcp-server\\index.cjs')).toBe(true);
-    expect(isMindosMcpCommandLine('/usr/bin/python -m http.server 8781')).toBe(false);
-
-    const pids = findMcpProcessIdsByPort(8781, {
-      platform: 'linux',
-      execFile: (command) => {
-        if (command === 'lsof') return '111\n222\n';
-        return '';
-      },
-      getCommandLine: (pid) => pid === 111
-        ? '/usr/bin/node /opt/mindos/dist/protocols/mcp-server/index.cjs'
-        : '/usr/bin/node /srv/other-service/server.js',
-    });
-
-    expect(pids).toEqual([111]);
-  });
-
-  it('handles content changes summary, list, and mark_seen from product runtime', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-changes-'));
-    const summary = await handleChangesGet(new URLSearchParams('op=summary'), { mindRoot: root });
-    expect(summary).toMatchObject({ status: 200, body: { unreadCount: 0, totalCount: 0 } });
-
-    const list = await handleChangesGet(new URLSearchParams('op=list&limit=10'), { mindRoot: root });
-    expect(list).toMatchObject({ status: 200, body: { events: [] } });
-
-    const marked = await handleChangesPost({ op: 'mark_seen' }, { mindRoot: root });
-    expect(marked).toEqual({ status: 200, body: { ok: true } });
-  });
-
-  it('handles backlinks and graph data from markdown links', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-graph-'));
-    mkdirSync(join(root, 'Space'), { recursive: true });
-    writeFileSync(join(root, 'source.md'), 'See [[target]] and [Target](Space/target.md).');
-    writeFileSync(join(root, 'Space', 'target.md'), '# Target');
-
-    const backlinks = handleBacklinks(new URLSearchParams('path=Space/target.md'), { mindRoot: root });
-    expect(backlinks.status).toBe(200);
-    expect(backlinks.body).toEqual([
-      expect.objectContaining({ filePath: 'source.md', snippets: [expect.stringContaining('Target')] }),
-    ]);
-
-    const graph = handleGraph({ mindRoot: root });
-    expect(graph.status).toBe(200);
-    expect(graph.body.nodes).toEqual(expect.arrayContaining([
-      { id: 'source.md', label: 'source', folder: '.' },
-      { id: 'Space/target.md', label: 'target', folder: 'Space' },
-    ]));
-    expect(graph.body.edges).toEqual(expect.arrayContaining([
-      { source: 'source.md', target: 'Space/target.md' },
-    ]));
-  });
-
-  it('lists agent activity from the product audit log', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-agent-activity-'));
-    mkdirSync(join(root, '.mindos'), { recursive: true });
-    writeFileSync(join(root, '.mindos', 'agent-audit-log.json'), JSON.stringify({
-      version: 1,
-      events: [
-        { id: '1', ts: '2026-01-01T00:00:00.000Z', tool: 'write_file', params: {}, result: 'ok' },
-        { id: '2', ts: '2026-01-02T00:00:00.000Z', tool: 'read_file', params: {}, result: 'ok' },
-      ],
-    }));
-
-    const response = await handleAgentActivity(new URLSearchParams('limit=1'), { mindRoot: root });
-    expect(response.status).toBe(200);
-    expect(response.body).toEqual({
-      events: [
-        { id: '1', ts: '2026-01-01T00:00:00.000Z', tool: 'write_file', params: {}, result: 'ok' },
-      ],
-    });
-  });
-
-  it('persists ask sessions in the product runtime store', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-ask-sessions-'));
-    const storePath = join(root, 'sessions.json');
-    const session = {
-      id: 's1',
-      title: 'Session 1',
-      updatedAt: 1,
-      messages: [{ role: 'user', content: 'hello' }],
-    };
-
-    expect(handleAskSessionsGet({ storePath }).body).toEqual([]);
-    expect(handleAskSessionsPost({ session }, { storePath })).toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-    expect(JSON.parse(readFileSync(storePath, 'utf-8'))).toEqual([session]);
-    expect(handleAskSessionsGet({ storePath }).body).toEqual([session]);
-    expect(handleAskSessionsDelete({ id: 's1' }, { storePath })).toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-    expect(handleAskSessionsGet({ storePath }).body).toEqual([]);
-  });
-
-  it('returns lightweight space overview stats without Web compile dependencies', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-space-overview-'));
-    mkdirSync(join(root, 'Space', 'Nested'), { recursive: true });
-    writeFileSync(join(root, 'Space', 'a.md'), 'a');
-    writeFileSync(join(root, 'Space', 'Nested', 'b.md'), 'b');
-    writeFileSync(join(root, 'Other.md'), 'other');
-
-    expect(handleSpaceOverviewGet(new URLSearchParams('space=Space'), { mindRoot: root })).toMatchObject({
-      status: 200,
-      body: { fileCount: 2 },
-    });
-    expect(handleSpaceOverviewGet(new URLSearchParams(), { mindRoot: root })).toMatchObject({
-      status: 400,
-      body: { error: 'space parameter required' },
-    });
-    expect(handleSpaceOverviewGet(new URLSearchParams('space=../outside'), { mindRoot: root })).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-  });
-
-  it('rejects Product Server space overview through symlinked spaces outside mindRoot', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-space-overview-symlink-root-'));
-    const outside = mkdtempSync(join(tmpdir(), 'mindos-space-overview-symlink-outside-'));
-    writeFileSync(join(outside, 'secret.md'), 'outside');
-    symlinkSync(outside, join(root, 'Linked'), 'dir');
-
-    expect(handleSpaceOverviewGet(new URLSearchParams('space=Linked'), { mindRoot: root })).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-  });
-
-  it('handles git status, history, and show through injectable product services', async () => {
-    const services = {
-      isGitRepo: async () => true,
-      gitLog: async (_path: string, limit: number) => [
-        { hash: 'abc', date: '2026-01-01T00:00:00.000Z', message: `limit ${limit}`, author: 'MindOS' },
-      ],
-      gitShowFile: async (path: string, commit: string) => `${commit}:${path}`,
-    };
-
-    await expect(handleGit(new URLSearchParams('op=is_repo'), services)).resolves.toMatchObject({
-      status: 200,
-      body: { isRepo: true },
-    });
-    await expect(handleGit(new URLSearchParams('op=history&path=note.md&limit=5'), services)).resolves.toMatchObject({
-      status: 200,
-      body: { entries: [{ hash: 'abc', message: 'limit 5' }] },
-    });
-    await expect(handleGit(new URLSearchParams('op=show&path=note.md&commit=abc'), services)).resolves.toMatchObject({
-      status: 200,
-      body: { content: 'abc:note.md' },
-    });
-    await expect(handleGit(new URLSearchParams('op=history'), services)).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'missing path' },
-    });
-  });
-
-  it('handles inbox list, save, and archive without Web dependencies', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-inbox-'));
-
-    const empty = handleInboxGet({ mindRoot: root });
-    expect(empty.status).toBe(200);
-    expect(empty.body).toEqual({ files: [] });
-
-    const saved = handleInboxPost({
-      files: [{ name: 'todo.txt', content: 'Buy milk' }],
-      source: 'test',
-    }, { mindRoot: root });
-    expect(saved.status).toBe(200);
-    expect(saved.body).toMatchObject({
-      saved: [{ original: 'todo.txt', path: 'Inbox/todo.md' }],
-      skipped: [],
-      source: 'test',
-    });
-    expect(readFileSync(join(root, 'Inbox', 'todo.md'), 'utf-8')).toContain('# Todo');
-
-    const invalidBase64 = handleInboxPost({
-      files: [{ name: 'broken.txt', content: 'not base64!!!', encoding: 'base64' }],
-    }, { mindRoot: root });
-    expect(invalidBase64.status).toBe(200);
-    expect(invalidBase64.body).toMatchObject({
-      saved: [],
-      skipped: [{ name: 'broken.txt', reason: expect.stringContaining('Invalid base64 content') }],
-    });
-    expect(existsSync(join(root, 'Inbox', 'broken.md'))).toBe(false);
-
-    const pdfBytes = Buffer.from('%PDF original bytes');
-    const savedBinary = handleInboxPost({
-      files: [{ name: 'source.pdf', content: pdfBytes.toString('base64'), encoding: 'base64' }],
-    }, { mindRoot: root });
-    expect(savedBinary.status).toBe(200);
-    expect(savedBinary.body).toMatchObject({
-      saved: [{ original: 'source.pdf', path: 'Inbox/source.pdf' }],
-      skipped: [],
-    });
-    expect(readFileSync(join(root, 'Inbox', 'source.pdf'))).toEqual(pdfBytes);
-
-    const listed = handleInboxGet({ mindRoot: root });
-    expect(listed.body.files).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: 'todo.md', path: 'Inbox/todo.md' }),
-      expect.objectContaining({ name: 'source.pdf', path: 'Inbox/source.pdf' }),
-    ]));
-
-    const archived = handleInboxDelete({ names: ['todo.md'] }, { mindRoot: root });
-    expect(archived.status).toBe(200);
-    expect(archived.body.archived[0]).toMatchObject({
-      original: 'todo.md',
-    });
-    expect(archived.body.archived[0].archivedPath).toMatch(/^Inbox\/\.processed\/\d{8}-\d{6}_todo\.md$/);
-    expect(handleInboxDelete({}, { mindRoot: root })).toMatchObject({
-      status: 400,
-      body: { error: 'Request body must contain a non-empty names array' },
-    });
-  });
-
-  it('rejects inbox operations when Inbox is a symlink outside mindRoot', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-inbox-symlink-root-'));
-    const outside = mkdtempSync(join(tmpdir(), 'mindos-inbox-symlink-outside-'));
-    symlinkSync(outside, join(root, 'Inbox'), 'dir');
-
-    expect(handleInboxGet({ mindRoot: root })).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-    expect(handleInboxPost({
-      files: [{ name: 'todo.txt', content: 'Buy milk' }],
-    }, { mindRoot: root })).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-    expect(existsSync(join(outside, 'todo.md'))).toBe(false);
-
-    expect(handleInboxDelete({ names: ['todo.md'] }, { mindRoot: root })).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-  });
-
-  it('rejects inbox archive when .processed is a symlink outside mindRoot', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-inbox-processed-symlink-root-'));
-    const outside = mkdtempSync(join(tmpdir(), 'mindos-inbox-processed-symlink-outside-'));
-    mkdirSync(join(root, 'Inbox'), { recursive: true });
-    writeFileSync(join(root, 'Inbox', 'todo.md'), '# Todo', 'utf-8');
-    symlinkSync(outside, join(root, 'Inbox', '.processed'), 'dir');
-
-    expect(handleInboxDelete({ names: ['todo.md'] }, { mindRoot: root })).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-    expect(existsSync(join(root, 'Inbox', 'todo.md'))).toBe(true);
-    expect(existsSync(join(outside, 'todo.md'))).toBe(false);
-  });
-
-  it('handles setup path checks and directory listing without Web dependencies', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-setup-path-'));
-    mkdirSync(join(root, 'Documents'), { recursive: true });
-    mkdirSync(join(root, 'Projects'), { recursive: true });
-    writeFileSync(join(root, '.hidden'), 'secret');
-
-    expect(handleSetupCheckPath({ path: root })).toMatchObject({
-      status: 200,
-      body: { exists: true, empty: false, count: 2, unsafe: false },
-    });
-    expect(handleSetupListDirectories({ path: root })).toMatchObject({
-      status: 200,
-      body: { dirs: ['Documents', 'Projects'] },
-    });
-    expect(handleSetupCheckPath({ path: join(root, '.mindos') }, { homeDir: root })).toMatchObject({
-      status: 200,
-      body: {
-        exists: false,
-        empty: true,
-        count: 0,
-        unsafe: true,
-        reason: expect.stringContaining('system directory'),
-      },
-    });
-    expect(handleSetupCheckPath({ path: 'relative-notes' })).toMatchObject({
-      status: 200,
-      body: {
-        exists: false,
-        empty: true,
-        count: 0,
-        unsafe: true,
-        reason: expect.stringContaining('absolute path'),
-      },
-    });
-    expect(handleSetupListDirectories({ path: '.' })).toMatchObject({
-      status: 200,
-      body: { dirs: [] },
-    });
-    expect(handleSetupCheckPath({ path: '' })).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid path' },
-    });
-    expect(handleSetupListDirectories({ path: '' })).toMatchObject({
-      status: 200,
-      body: { dirs: [] },
-    });
-  });
-
-  it('handles bootstrap context without Web tree dependencies', () => {
-    const files = new Map([
-      ['INSTRUCTION.md', '# Instructions'],
-      ['README.md', '# Index'],
-      ['CONFIG.json', '{"key":"value"}'],
-      ['.mindos/user-preferences.md', 'Prefer concise answers'],
-      ['Workflows/README.md', '# Workflows'],
-      ['Workflows/INSTRUCTION.md', '# Workflow Instructions'],
-      ['..Notes/README.md', '# Dotted Notes'],
-      ['..Notes/INSTRUCTION.md', '# Dotted Notes Instructions'],
-      ['Projects/roadmap.md', '# Roadmap'],
-      ['Projects/pricing.md', '# Pricing'],
-      ['notes.md', 'Notes'],
-    ]);
-    const services = {
-      collectAllFiles: () => [...files.keys()].filter((filePath) => !filePath.startsWith('.mindos/')),
-      readTextFile: (filePath: string) => {
-        const content = files.get(filePath);
-        if (content == null) throw new Error('missing');
-        return content;
-      },
-    };
-
-    const result = handleBootstrapGet(new URLSearchParams('target_dir=Workflows'), services);
-    expect(result.status).toBe(200);
-    expect(result.body).toMatchObject({
-      instruction: '# Instructions',
-      index: '# Index',
-      config_json: '{"key":"value"}',
-      user_skill_rules: 'Prefer concise answers',
-      target_readme: '# Workflows',
-      target_instruction: '# Workflow Instructions',
-    });
-    expect(result.body.file_index).toContain('Projects/ (2 files)');
-    expect(result.body.file_index).toContain('notes.md');
-    expect(handleBootstrapGet(new URLSearchParams('target_dir=..Notes'), services)).toMatchObject({
-      status: 200,
-      body: {
-        target_readme: '# Dotted Notes',
-        target_instruction: '# Dotted Notes Instructions',
-      },
-    });
-    expect(handleBootstrapGet(new URLSearchParams('target_dir=../secret'), services)).toMatchObject({
-      status: 400,
-      body: { error: 'invalid target_dir' },
-    });
-    expect(handleBootstrapGet(new URLSearchParams('target_dir=C:/Users/Ada'), services)).toMatchObject({
-      status: 400,
-      body: { error: 'invalid target_dir' },
-    });
-    expect(handleBootstrapGet(new URLSearchParams('target_dir=C:\\Users\\Ada'), services)).toMatchObject({
-      status: 400,
-      body: { error: 'invalid target_dir' },
-    });
-  });
-
-  it('handles local connection metadata without Web dependencies', () => {
-    expect(handleConnectGet({
-      port: '4567',
-      hostname: () => 'test-host',
-      networkInterfaces: () => ({
-        lo: [{ family: 'IPv4', internal: true, address: '127.0.0.1' }],
-        docker0: [{ family: 'IPv4', internal: false, address: '172.17.0.1' }],
-        en0: [{ family: 'IPv4', internal: false, address: '192.168.1.20' }],
-      }),
-    })).toMatchObject({
-      status: 200,
-      body: {
-        url: 'http://192.168.1.20:4567',
-        ip: '192.168.1.20',
-        port: 4567,
-        hostname: 'test-host',
-      },
-    });
-  });
-
-  it('handles update status and update checks without Web dependencies', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-update-'));
-    const statusPath = join(root, 'update-status.json');
-    writeFileSync(statusPath, JSON.stringify({ stage: 'done', version: '1.2.3' }));
-
-    expect(handleUpdateStatusGet({ statusPath })).toMatchObject({
-      status: 200,
-      body: { stage: 'done', version: '1.2.3' },
-    });
-    expect(handleUpdateStatusGet({ statusPath: join(root, 'missing.json') })).toMatchObject({
-      status: 200,
-      body: { stage: 'idle', stages: [], error: null, version: null, startedAt: null },
-    });
-
-    await expect(handleUpdateCheckGet({
-      currentVersion: '1.0.0',
-      registries: ['https://registry.example/latest'],
-      fetcher: async () => ({
-        ok: true,
-        json: async () => ({ version: '1.0.1' }),
-      }),
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { current: '1.0.0', latest: '1.0.1', hasUpdate: true },
-    });
-  });
-
-  it('runs restart and update process controls with sanitized child environments', () => {
-    const spawned: Array<{ command: string; args: string[]; options: Record<string, unknown>; unrefCalled: boolean }> = [];
-    const spawn = (command: string, args: string[], options: Record<string, unknown>) => {
-      const record = { command, args, options, unrefCalled: false };
-      spawned.push(record);
-      return { unref: () => { record.unrefCalled = true; } };
-    };
-    const env = {
-      PATH: '/usr/bin',
-      MINDOS_WEB_PORT: '3011',
-      MINDOS_MCP_PORT: '8787',
-      MINDOS_PROJECT_ROOT: '/old',
-      MIND_ROOT: '/old/mind',
-      AUTH_TOKEN: 'secret-token',
-      WEB_PASSWORD: 'secret-password',
-      NODE_OPTIONS: '--inspect',
-    };
-    const scheduledExit: number[] = [];
-
-    const restart = handleRestartPost({
-      cliPath: '/opt/mindos/bin/cli.js',
-      nodeBin: '/usr/local/bin/node',
-      env,
-      spawn,
-      scheduleExit: (delayMs) => { scheduledExit.push(delayMs); },
-    });
-    expect(restart.status).toBe(200);
-    expect(spawned[0]).toMatchObject({
-      command: '/usr/local/bin/node',
-      args: ['/opt/mindos/bin/cli.js', 'restart'],
-      unrefCalled: true,
-    });
-    expect(spawned[0].options).toMatchObject({ detached: true, stdio: 'ignore' });
-    expect(spawned[0].options.env).toMatchObject({
-      PATH: '/usr/bin',
-      MINDOS_OLD_WEB_PORT: '3011',
-      MINDOS_OLD_MCP_PORT: '8787',
-    });
-    expect((spawned[0].options.env as Record<string, string | undefined>).MINDOS_WEB_PORT).toBeUndefined();
-    expect((spawned[0].options.env as Record<string, string | undefined>).MIND_ROOT).toBeUndefined();
-    expect((spawned[0].options.env as Record<string, string | undefined>).AUTH_TOKEN).toBeUndefined();
-    expect((spawned[0].options.env as Record<string, string | undefined>).NODE_OPTIONS).toBeUndefined();
-    expect(scheduledExit).toEqual([1500]);
-
-    const update = handleUpdatePost({
-      cliPath: '/opt/mindos/bin/cli.js',
-      nodeBin: '/usr/local/bin/node',
-      env,
-      spawn,
-    });
-    expect(update.status).toBe(200);
-    expect(spawned[1]).toMatchObject({
-      command: '/usr/local/bin/node',
-      args: ['/opt/mindos/bin/cli.js', 'update'],
-      unrefCalled: true,
-    });
-    expect((spawned[1].options.env as Record<string, string | undefined>).MINDOS_OLD_WEB_PORT).toBeUndefined();
-    expect((spawned[1].options.env as Record<string, string | undefined>).MINDOS_PROJECT_ROOT).toBeUndefined();
-    expect((spawned[1].options.env as Record<string, string | undefined>).WEB_PASSWORD).toBeUndefined();
-    expect(scheduledExit).toEqual([1500]);
-  });
-
-  it('runs uninstall through the product process control without deleting knowledge data', () => {
-    const writes: string[] = [];
-    const spawned: Array<{ command: string; args: string[]; options: Record<string, unknown>; unrefCalled: boolean; stdinEnded: boolean }> = [];
-    const spawn = (command: string, args: string[], options: Record<string, unknown>) => {
-      const record = { command, args, options, unrefCalled: false, stdinEnded: false };
-      spawned.push(record);
-      return {
-        stdin: {
-          write: (value: string) => { writes.push(value); },
-          end: () => { record.stdinEnded = true; },
-        },
-        unref: () => { record.unrefCalled = true; },
-      };
-    };
-
-    const response = handleUninstallPost({ removeConfig: false }, {
-      cliPath: '/opt/mindos/bin/cli.js',
-      nodeBin: '/usr/local/bin/node',
-      env: { PATH: '/usr/bin', MIND_ROOT: '/private/mind', AUTH_TOKEN: 'secret' },
-      spawn,
-    });
-
-    expect(response.status).toBe(200);
-    expect(response.body).toEqual({ ok: true });
-    expect(spawned[0]).toMatchObject({
-      command: '/usr/local/bin/node',
-      args: ['/opt/mindos/bin/cli.js', 'uninstall'],
-      unrefCalled: true,
-      stdinEnded: true,
-    });
-    expect(spawned[0].options).toMatchObject({ detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
-    expect(writes).toEqual(['Y\nN\nN\n']);
-
-    const childEnv = spawned[0].options.env as Record<string, string | undefined>;
-    expect(childEnv.PATH).toBe('/usr/bin');
-    expect(childEnv.MIND_ROOT).toBeUndefined();
-    expect(childEnv.AUTH_TOKEN).toBeUndefined();
-  });
-
-  it('applies init templates idempotently from the product runtime', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-init-'));
-    const templateRoot = join(root, 'templates');
-    const mindRoot = join(root, 'mind');
-    mkdirSync(join(templateRoot, 'en', 'Space'), { recursive: true });
-    writeFileSync(join(templateRoot, 'en', 'README.md'), 'template readme');
-    writeFileSync(join(templateRoot, 'en', 'Space', 'note.md'), 'template note');
-    mkdirSync(mindRoot, { recursive: true });
-    writeFileSync(join(mindRoot, 'README.md'), 'existing readme');
-
-    expect(handleInitPost({ template: 'en' }, {
-      mindRoot,
-      templateRoots: [templateRoot],
-    })).toMatchObject({
-      status: 200,
-      body: { ok: true, template: 'en' },
-    });
-    expect(readFileSync(join(mindRoot, 'README.md'), 'utf-8')).toBe('existing readme');
-    expect(readFileSync(join(mindRoot, 'Space', 'note.md'), 'utf-8')).toBe('template note');
-
-    expect(handleInitPost({ template: '../bad' }, {
-      mindRoot,
-      templateRoots: [templateRoot],
-    })).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid template: ../bad' },
-    });
-    expect(handleInitPost({ template: 'zh' }, {
-      mindRoot,
-      templateRoots: [templateRoot],
-    })).toMatchObject({
-      status: 404,
-      body: { error: expect.stringContaining('Template "zh" not found') },
-    });
-  });
-
-  it('handles sync status and actions through product-owned operations', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-sync-'));
-    const mindRoot = join(root, 'mind');
-    mkdirSync(join(mindRoot, '.git'), { recursive: true });
-    mkdirSync(join(mindRoot, '..notes'), { recursive: true });
-    writeFileSync(join(mindRoot, 'note.md'), 'local');
-    writeFileSync(join(mindRoot, 'note.md.sync-conflict'), 'remote');
-    writeFileSync(join(mindRoot, '..notes', 'note.md'), 'dotted local');
-    writeFileSync(join(mindRoot, '..notes', 'note.md.sync-conflict'), 'dotted remote');
-
-    let config: Record<string, any> = {
-      mindRoot,
-      sync: { enabled: true, provider: 'git', autoCommitInterval: 45, autoPullInterval: 600 },
-    };
-    let state: Record<string, any> = {
-      lastSync: '2026-05-09T10:00:00Z',
-      conflicts: [{ file: 'note.md' }],
-    };
-    const cliCalls: Array<{ args: string[]; timeoutMs?: number }> = [];
-    const services = {
-      readConfig: () => config,
-      writeConfig: (next: Record<string, any>) => { config = next; },
-      readState: () => state,
-      writeState: (next: Record<string, any>) => { state = next; },
-      isGitRepo: () => true,
-      getRemoteUrl: () => 'git@example.com:mind/repo.git',
-      getBranch: () => 'main',
-      getUnpushedCount: () => '2',
-      runCli: async (args: string[], timeoutMs?: number) => { cliCalls.push({ args, timeoutMs }); },
-    };
-
-    await expect(handleSyncGet(services)).resolves.toMatchObject({
-      status: 200,
-      body: {
-        enabled: true,
-        remote: 'git@example.com:mind/repo.git',
-        branch: 'main',
-        unpushed: '2',
-        conflicts: [{ file: 'note.md' }],
-      },
-    });
-
-    await expect(handleSyncPost({ action: 'init', remote: 'https://example.com/repo.git', branch: 'dev', token: 'tok' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { success: true, message: 'Sync initialized' },
-    });
-    expect(cliCalls[0]).toEqual({
-      args: ['sync', 'init', '--non-interactive', '--remote', 'https://example.com/repo.git', '--branch', 'dev', '--token', 'tok'],
-      timeoutMs: 120000,
-    });
-
-    expect(await handleSyncPost({ action: 'off' }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true, enabled: false },
-    });
-    expect(config.sync.enabled).toBe(false);
-
-    expect(await handleSyncPost({ action: 'gitignore-save', content: 'node_modules\n' }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-    expect(readFileSync(join(mindRoot, '.gitignore'), 'utf-8')).toBe('node_modules\n');
-
-    expect(await handleSyncPost({ action: 'conflict-preview', remote: 'note.md' }, services)).toMatchObject({
-      status: 200,
-      body: { local: 'local', remote: 'remote' },
-    });
-    expect(await handleSyncPost({ action: 'conflict-preview', remote: '..notes/note.md' }, services)).toMatchObject({
-      status: 200,
-      body: { local: 'dotted local', remote: 'dotted remote' },
-    });
-    expect(await handleSyncPost({ action: 'resolve-conflict', remote: '../outside.md' }, services)).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid file path' },
-    });
-    expect(await handleSyncPost({ action: 'conflict-preview', remote: '..\\outside.md' }, services)).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid file path' },
-    });
-    expect(await handleSyncPost({ action: 'update-intervals', autoCommitInterval: 1 }, services)).toMatchObject({
-      status: 400,
-      body: { error: 'autoCommitInterval must be an integer between 10 and 300 seconds' },
-    });
-  });
-
-  it('allows sync reset when the knowledge root is missing', async () => {
-    let config: Record<string, any> = {
-      sync: { enabled: true, provider: 'git' },
-    };
-    let state: Record<string, any> = {
-      lastError: 'Git repository not found',
-      conflicts: [{ file: 'note.md' }],
-    };
-    const services = {
-      readConfig: () => config,
-      writeConfig: (next: Record<string, any>) => { config = next; },
-      readState: () => state,
-      writeState: (next: Record<string, any>) => { state = next; },
-    };
-
-    expect(await handleSyncPost({ action: 'reset' }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true, enabled: false },
-    });
-    expect(config.sync).toBeUndefined();
-    expect(state).toEqual({});
-  });
-
-  it('rejects sync file operations through symlinks outside mindRoot', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-sync-symlink-root-'));
-    const mindRoot = join(root, 'mind');
-    const outside = mkdtempSync(join(tmpdir(), 'mindos-sync-symlink-outside-'));
-    mkdirSync(mindRoot, { recursive: true });
-    writeFileSync(join(outside, '.gitignore'), 'outside\n', 'utf-8');
-    writeFileSync(join(outside, 'note.md'), 'outside local', 'utf-8');
-    writeFileSync(join(outside, 'note.md.sync-conflict'), 'outside remote', 'utf-8');
-    symlinkSync(join(outside, '.gitignore'), join(mindRoot, '.gitignore'), 'file');
-    symlinkSync(outside, join(mindRoot, 'Linked'), 'dir');
-
-    const services = {
-      readConfig: () => ({ mindRoot, sync: { enabled: true } }),
-      writeConfig: () => {},
-      readState: () => ({ conflicts: [{ file: 'Linked/note.md' }] }),
-      writeState: () => {},
-    };
-
-    expect(await handleSyncPost({ action: 'gitignore-save', content: 'node_modules\n' }, services)).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-    expect(readFileSync(join(outside, '.gitignore'), 'utf-8')).toBe('outside\n');
-
-    expect(await handleSyncPost({ action: 'conflict-preview', remote: 'Linked/note.md' }, services)).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid file path' },
-    });
-    expect(await handleSyncPost({ action: 'resolve-conflict', remote: 'Linked/note.md', branch: 'keep-remote' }, services)).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid file path' },
-    });
-    expect(readFileSync(join(outside, 'note.md'), 'utf-8')).toBe('outside local');
-  });
-
-  it('reads sync git metadata through argv-safe git commands', () => {
-    const source = readFileSync(join(__dirname, 'server', 'handlers', 'sync.ts'), 'utf-8');
-
-    expect(source).not.toContain('execSync(');
-    expect(source).toContain("execFileSync('git', args");
-    expect(source).toContain("runGit(cwd, ['remote', 'get-url', 'origin'])");
-    expect(source).toContain("runGit(cwd, ['rev-list', '--count', '@{u}..HEAD'])");
-  });
-
-  it('verifies channel credentials through product validation and injected verifier', async () => {
-    const verified = await handleChannelsVerifyPost({
-      platform: 'telegram',
-      credentials: { bot_token: '123456789:ABCdefGHIjklMNOpqrSTUvwxYZ' },
-    }, {
-      verifyCredentials: async (platform, credentials) => ({
-        ok: true,
-        botName: `${platform}-bot`,
-        botId: (credentials as { bot_token: string }).bot_token.slice(0, 3),
-      }),
-    });
-
-    expect(verified).toMatchObject({
-      status: 200,
-      body: { ok: true, botName: 'telegram-bot', botId: '123' },
-    });
-
-    await expect(handleChannelsVerifyPost({ platform: 'unknown', credentials: {} })).resolves.toMatchObject({
-      status: 400,
-      body: { ok: false, error: 'Invalid platform' },
-    });
-    await expect(handleChannelsVerifyPost({ platform: 'telegram' })).resolves.toMatchObject({
-      status: 400,
-      body: { ok: false, error: 'Missing credentials' },
-    });
-    await expect(handleChannelsVerifyPost({ platform: 'telegram', credentials: { bot_token: 'bad' } })).resolves.toMatchObject({
-      status: 400,
-      body: { ok: false, error: 'Missing required fields: bot_token' },
-    });
-    await expect(handleChannelsVerifyPost({
-      platform: 'telegram',
-      credentials: { bot_token: '123456789:ABCdefGHIjklMNOpqrSTUvwxYZ' },
-    }, {
-      verifyCredentials: async () => ({ ok: false, error: 'Unauthorized: check bot_token' }),
-    })).resolves.toMatchObject({
-      status: 401,
-      body: { ok: false, error: 'Unauthorized: check bot_token' },
-    });
-  });
-
-  it('lists IM activity with platform validation and clamped limit', () => {
-    expect(handleImActivityGet(new URLSearchParams('platform=bad'), {
-      getActivities: () => [],
-    })).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid or missing platform parameter' },
-    });
-
-    expect(handleImActivityGet(new URLSearchParams('platform=feishu&limit=500'), {
-      getActivities: (platform, limit) => [{ id: '1', platform, limit }],
-    })).toMatchObject({
-      status: 200,
-      body: { activities: [{ id: '1', platform: 'feishu', limit: 100 }] },
-    });
-  });
-
-  it('manages IM config through product-owned masking, validation, and deletes', () => {
-    let config: any = {
-      providers: {
-        telegram: { bot_token: '123456789:ABCdefGHIjklMNOpqrSTUvwxYZ' },
-        feishu: { app_id: 'cli_app', app_secret: 'secret123' },
-      },
-    };
-    const services = {
-      readConfig: () => config,
-      writeConfig: (next: any) => { config = next; },
-    };
-
-    expect(handleImConfigGet(services)).toMatchObject({
-      status: 200,
-      body: {
-        providers: {
-          telegram: { bot_token: '1234••••YZ' },
-          feishu: { app_id: 'cli_••••pp', app_secret: 'secr••••23' },
-        },
-      },
-    });
-
-    expect(handleImConfigPut({ platform: 'telegram', credentials: { bot_token: 'bad' } }, services)).toMatchObject({
-      status: 422,
-      body: { error: 'Invalid config: missing bot_token', missing: ['bot_token'] },
-    });
-
-    expect(handleImConfigPut({
-      platform: 'feishu',
-      conversation: { enabled: true, transport: 'long_connection', allow_group_mentions: false },
-    }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true, platform: 'feishu' },
-    });
-    expect(config.providers.feishu.conversation).toMatchObject({
-      enabled: true,
-      transport: 'long_connection',
-      allow_group_mentions: false,
-    });
-
-    expect(handleImConfigDelete(new URLSearchParams('platform=telegram'), services)).toMatchObject({
-      status: 200,
-      body: { ok: true, platform: 'telegram' },
-    });
-    expect(config.providers.telegram).toBeUndefined();
-  });
-
-  it('reports IM status and Feishu webhook diagnostics through injected product services', async () => {
-    const feishuConfig = {
-      app_id: 'cli_app',
-      app_secret: 'secret',
-      conversation: {
-        enabled: true,
-        transport: 'webhook',
-        public_base_url: 'https://mindos.example/',
-        encrypt_key: 'encrypt',
-      },
-    };
-    const services = {
-      hasAnyIMConfig: () => true,
-      listConfiguredIM: async () => [
-        { platform: 'feishu', connected: true, botName: 'MindOS', capabilities: ['text'] },
-        { platform: 'telegram', connected: false, capabilities: ['text'] },
-      ],
-      getPlatformConfig: (platform: string) => platform === 'feishu' ? feishuConfig : undefined,
-      buildFeishuWebhookStatus: (config: unknown) => ({
-        platform: 'feishu',
-        state: config === feishuConfig ? 'ready' : 'disabled',
-        transport: 'webhook',
-        publicBaseUrl: 'https://mindos.example',
-        webhookUrl: 'https://mindos.example/api/im/webhook/feishu',
-      }),
-    };
-
-    await expect(handleImStatusGet(services)).resolves.toMatchObject({
-      status: 200,
-      body: {
-        platforms: [
-          {
-            platform: 'feishu',
-            connected: true,
-            webhook: {
-              state: 'ready',
-              webhookUrl: 'https://mindos.example/api/im/webhook/feishu',
-            },
-          },
-          { platform: 'telegram', connected: false },
-        ],
-      },
-    });
-
-    expect(handleImWebhookStatusGet(new URLSearchParams('platform=feishu'), services)).toMatchObject({
-      status: 200,
-      body: {
-        status: {
-          platform: 'feishu',
-          state: 'ready',
-          webhookUrl: 'https://mindos.example/api/im/webhook/feishu',
-        },
-      },
-    });
-
-    expect(handleImWebhookStatusGet(new URLSearchParams('platform=telegram'), services)).toMatchObject({
-      status: 400,
-      body: { error: 'Invalid or unsupported platform parameter' },
-    });
-  });
-
-  it('sends IM test messages with product validation and normalized errors', async () => {
-    const calls: any[] = [];
-    const services = {
-      sendIMMessage: async (message: any, signal: AbortSignal | undefined, options: { activityType?: string } | undefined) => {
-        calls.push({ message, signal, options });
-        return { ok: true, messageId: 'msg_1', timestamp: '2026-05-09T00:00:00.000Z' };
-      },
-    };
-
-    await expect(handleImTestPost({
-      platform: 'feishu',
-      recipient_id: 'ou_123',
-      message: 'hello',
-    }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true, messageId: 'msg_1', timestamp: '2026-05-09T00:00:00.000Z' },
-    });
-    expect(calls).toEqual([{
-      message: {
-        platform: 'feishu',
-        recipientId: 'ou_123',
-        text: 'hello',
-        format: 'text',
-      },
-      signal: undefined,
-      options: { activityType: 'test' },
-    }]);
-
-    await expect(handleImTestPost({ platform: 'feishu', recipient_id: 'ou_123' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { ok: false, error: 'Missing required fields: platform, recipient_id, message' },
-    });
-    await expect(handleImTestPost({
-      platform: 'feishu',
-      recipient_id: 'ou_123',
-      message: 'hello',
-    }, {
-      sendIMMessage: async () => ({ ok: false, error: 'invalid recipient', timestamp: '2026-05-09T00:00:00.000Z' }),
-    })).resolves.toMatchObject({
-      status: 422,
-      body: { ok: false, error: 'invalid recipient' },
-    });
-  });
-
-  it('controls Feishu long connection lifecycle and persists transport state', async () => {
-    let config: any = {
-      providers: {
-        feishu: {
-          app_id: 'cli_app',
-          app_secret: 'secret',
-          conversation: { enabled: false, transport: 'webhook' },
-        },
-      },
-    };
-    let running = false;
-    const services = {
-      readConfig: () => config,
-      writeConfig: (next: any) => { config = next; },
-      getFeishuWSClientStatus: () => ({ running, startedAt: running ? '2026-05-09T00:00:00.000Z' : undefined }),
-      startFeishuWSClient: async (feishuConfig: any) => {
-        expect(feishuConfig.app_id).toBe('cli_app');
-        running = true;
-      },
-      stopFeishuWSClient: () => { running = false; },
-    };
-
-    expect(handleImFeishuLongConnectionGet(services)).toMatchObject({
-      status: 200,
-      body: { ok: true, running: false },
-    });
-
-    await expect(handleImFeishuLongConnectionPost(services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true, running: true, startedAt: '2026-05-09T00:00:00.000Z' },
-    });
-    expect(config.providers.feishu.conversation).toMatchObject({
-      enabled: true,
-      transport: 'long_connection',
-    });
-
-    expect(handleImFeishuLongConnectionDelete(services)).toMatchObject({
-      status: 200,
-      body: { ok: true, running: false },
-    });
-    expect(config.providers.feishu.conversation.transport).toBe('webhook');
-
-    config = { providers: {} };
-    await expect(handleImFeishuLongConnectionPost(services)).resolves.toMatchObject({
-      status: 422,
-      body: { ok: false, error: 'Feishu is not configured. Save App ID and App Secret first.' },
-    });
-  });
-
-  it('handles monitoring snapshots without Web dependencies', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-monitoring-'));
-    mkdirSync(join(root, 'Space'), { recursive: true });
-    writeFileSync(join(root, 'Space', 'note.md'), 'hello');
-    writeFileSync(join(root, '.DS_Store'), 'ignored');
-
-    expect(handleMonitoringGet({
-      mindRoot: root,
-      metricsSnapshot: () => ({
-        processStartTime: Date.now() - 100,
-        agentRequests: 2,
-        toolExecutions: 3,
-        totalTokens: { input: 5, output: 8 },
-        avgResponseTimeMs: 42,
-        errors: 1,
-      }),
-      memoryUsage: () => ({ heapUsed: 1, heapTotal: 2, rss: 3 }),
-      nodeVersion: 'v-test',
-      mcpPort: 9999,
-    })).toMatchObject({
-      status: 200,
-      body: {
-        system: { memory: { heapUsed: 1, heapTotal: 2, rss: 3 }, nodeVersion: 'v-test' },
-        application: { agentRequests: 2, toolExecutions: 3, errors: 1 },
-        knowledgeBase: { root, fileCount: 1, totalSizeBytes: 5 },
-        mcp: { running: true, port: 9999 },
-      },
-    });
-  });
-
-  it('handles setup port checks and token generation without Web dependencies', async () => {
-    await expect(handleSetupCheckPort(
-      { port: 4567 },
-      { myWebPort: 4567, myMcpPort: 8567 },
-    )).resolves.toMatchObject({
-      status: 200,
-      body: { available: true, isSelf: true },
-    });
-    await expect(handleSetupCheckPort(
-      { port: 4568 },
-      {
-        isPortInUse: async () => true,
-        isSelfPort: async () => false,
-        findFreePort: async () => 4570,
-      },
-    )).resolves.toMatchObject({
-      status: 200,
-      body: { available: false, isSelf: false, suggestion: 4570 },
-    });
-    await expect(handleSetupCheckPort({ port: 80 })).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'Invalid port' },
-    });
-
-    expect(handleSetupGenerateToken({ seed: 'abc' })).toMatchObject({
-      status: 200,
-      body: { token: 'ba78-16bf-8f01-cfea-4141-40de' },
-    });
-    expect(handleSetupGenerateToken({}, { randomBytes: () => Buffer.from('123456789012') })).toMatchObject({
-      status: 200,
-      body: { token: '3132-3334-3536-3738-3930-3132' },
-    });
-  });
-
-  it('handles workflow listing and creation without Web dependencies', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-workflows-'));
-    mkdirSync(join(root, '.mindos', 'workflows'), { recursive: true });
-    writeFileSync(join(root, '.mindos', 'workflows', 'existing.flow.yaml'), [
-      'title: Existing Flow',
-      'description: Test flow',
-      'steps:',
-      '  - id: one',
-      '  - id: two',
-      '',
-    ].join('\n'));
-
-    expect(handleWorkflowsGet({ mindRoot: root })).toMatchObject({
-      status: 200,
-      body: {
-        workflows: [
-          expect.objectContaining({
-            path: '.mindos/workflows/existing.flow.yaml',
-            title: 'Existing Flow',
-            description: 'Test flow',
-            stepCount: 2,
-          }),
-        ],
-      },
-    });
-
-    const created = handleWorkflowsPost({ name: 'New Flow' }, { mindRoot: root });
-    expect(created).toMatchObject({
-      status: 200,
-      body: { path: '.mindos/workflows/New Flow.flow.yaml' },
-    });
-    expect(readFileSync(join(root, '.mindos', 'workflows', 'New Flow.flow.yaml'), 'utf-8')).toContain("title: 'New Flow'");
-    expect(handleWorkflowsPost({}, { mindRoot: root })).toMatchObject({
-      status: 400,
-      body: { error: 'name is required' },
-    });
-    expect(handleWorkflowsPost({ name: 'New Flow' }, { mindRoot: root })).toMatchObject({
-      status: 409,
-      body: { error: 'Workflow already exists' },
-    });
-  });
-
-  it('escapes workflow titles and sanitizes workflow filenames', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-workflows-title-'));
-    mkdirSync(join(root, '.mindos', 'workflows'), { recursive: true });
-
-    const created = handleWorkflowsPost({
-      name: "Bad\nsteps:\n  - id: injected 'quote'",
-    }, { mindRoot: root });
-
-    expect(created).toMatchObject({
-      status: 200,
-      body: { path: ".mindos/workflows/Bad steps- - id- injected 'quote'.flow.yaml" },
-    });
-    const content = readFileSync(join(root, '.mindos', 'workflows', "Bad steps- - id- injected 'quote'.flow.yaml"), 'utf-8');
-    expect(content).toContain("title: 'Bad steps: - id: injected ''quote'''");
-    expect(content.match(/^\s*-\s+/gm)).toHaveLength(1);
-
-    expect(handleWorkflowsPost({ name: '////' }, { mindRoot: root })).toMatchObject({
-      status: 400,
-      body: { error: 'name must contain at least one valid filename character' },
-    });
-  });
-
-  it('rejects workflow creation through symlinked metadata directories', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-workflows-symlink-root-'));
-    const outside = mkdtempSync(join(tmpdir(), 'mindos-workflows-symlink-outside-'));
-    symlinkSync(outside, join(root, '.mindos'), 'dir');
-
-    expect(handleWorkflowsGet({ mindRoot: root })).toMatchObject({
-      status: 200,
-      body: { workflows: [] },
-    });
-    expect(handleWorkflowsPost({ name: 'External Flow' }, { mindRoot: root })).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-    expect(existsSync(join(outside, 'workflows', 'External Flow.flow.yaml'))).toBe(false);
-  });
-
-  it('handles tree version through an injectable product service', () => {
-    const res = handleTreeVersion({ getTreeVersion: () => 123 });
-    expect(res).toMatchObject({ status: 200, body: { v: 123 } });
-    expect(res.headers?.['Cache-Control']).toBe('private, max-age=0');
-  });
-
-  it('validates ask stream requests and returns a product-owned SSE stream', async () => {
-    const invalid = handleAskStream({}, {
-      askStream: async function* () {
-        throw new Error('should not stream invalid ask requests');
-      },
-    });
-    expect(invalid).toMatchObject({
-      ok: false,
-      status: 400,
-      body: { error: 'messages must be an array' },
-    });
-
-    const valid = handleAskStream({
-      messages: [{ role: 'user', content: 'hello' }],
-      mode: 'chat',
-      attachedFiles: ['note.md', 123],
-    }, {
-      askStream: async function* (input) {
-        yield { type: 'status', message: `mode=${input.mode}` };
-        yield { type: 'text_delta', delta: String(input.messages[0]?.content ?? '') };
-        yield { type: 'done' };
-      },
-    });
-
-    expect(valid.ok).toBe(true);
-    if (!valid.ok) throw new Error('expected ask stream');
-    const events = [];
-    for await (const event of valid.body) events.push(event);
-    expect(events).toEqual([
-      { type: 'status', message: 'mode=chat' },
-      { type: 'text_delta', delta: 'hello' },
-      { type: 'done' },
-    ]);
-  });
-
-  it('serves ask SSE through the product HTTP server with injected runtime', async () => {
-    const app = createMindosHttpServer({
-      hostname: '127.0.0.1',
-      port: 0,
-      services: {
-        ...createDefaultMindosHttpServices({
-          readSettings: () => ({ mindRoot: mkdtempSync(join(tmpdir(), 'mindos-http-ask-')) }),
-        }),
-        askStream: async function* (input) {
-          const request = input as { messages?: Array<{ content?: string }> };
-          yield { type: 'status', message: 'started' };
-          yield { type: 'text_delta', delta: request.messages?.[0]?.content ?? '' };
-          yield { type: 'done' };
-        },
-      },
-    });
-    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
-    const address = app.server.address();
-    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
-    const base = `http://127.0.0.1:${address.port}`;
-    try {
-      const response = await fetch(`${base}/api/ask`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'hello' }] }),
-      });
-      expect(response.status).toBe(200);
-      expect(response.headers.get('content-type')).toContain('text/event-stream');
-      expect(await response.text()).toContain('data:{"type":"text_delta","delta":"hello"}');
-    } finally {
-      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
-    }
-  });
-
-  it('serves static Web artifacts without a Next server', async () => {
-    const staticRoot = mkdtempSync(join(tmpdir(), 'mindos-static-web-'));
-    mkdirSync(join(staticRoot, '_next', 'static'), { recursive: true });
-    writeFileSync(join(staticRoot, 'index.html'), '<main>MindOS</main>');
-    writeFileSync(join(staticRoot, '_next', 'static', 'app.js'), 'console.log("mindos")');
-
-    const index = handleStaticArtifact({ staticRoot, path: '/' });
-    expect(index?.status).toBe(200);
-    expect(index?.headers?.['Content-Type']).toBe('text/html; charset=utf-8');
-    expect(index?.body?.toString()).toContain('MindOS');
-
-    const asset = handleStaticArtifact({ staticRoot, path: '/_next/static/app.js' });
-    expect(asset?.status).toBe(200);
-    expect(asset?.headers?.['Content-Type']).toBe('text/javascript; charset=utf-8');
-    expect(asset?.headers?.['Cache-Control']).toContain('immutable');
-
-    expect(handleStaticArtifact({ staticRoot, path: '/../secret.js' })).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-  });
-
-  it('rejects static Web artifacts through symlinks outside the static root', () => {
-    const staticRoot = mkdtempSync(join(tmpdir(), 'mindos-static-web-symlink-'));
-    const outside = mkdtempSync(join(tmpdir(), 'mindos-static-web-outside-'));
-    mkdirSync(join(staticRoot, 'assets'), { recursive: true });
-    writeFileSync(join(staticRoot, 'index.html'), '<main>MindOS</main>');
-    writeFileSync(join(outside, 'secret.js'), 'window.secret=1');
-    symlinkSync(outside, join(staticRoot, 'assets', 'linked'), 'dir');
-
-    expect(handleStaticArtifact({ staticRoot, path: '/assets/linked/secret.js' })).toMatchObject({
-      status: 403,
-      body: { error: 'Access denied' },
-    });
-  });
-
-  it('serves static Web artifact fallback through the product HTTP server', async () => {
-    const staticRoot = mkdtempSync(join(tmpdir(), 'mindos-http-static-'));
-    mkdirSync(join(staticRoot, 'assets'), { recursive: true });
-    writeFileSync(join(staticRoot, 'index.html'), '<main>MindOS shell</main>');
-    writeFileSync(join(staticRoot, 'assets', 'app.12345678.js'), 'window.__mindos=1');
-
-    const app = createMindosHttpServer({
-      hostname: '127.0.0.1',
-      port: 0,
-      staticRoot,
-      services: createDefaultMindosHttpServices({
-        staticRoot,
-        readSettings: () => ({ mindRoot: mkdtempSync(join(tmpdir(), 'mindos-http-static-root-')) }),
-      }),
-    });
-    await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve));
-    const address = app.server.address();
-    if (!address || typeof address === 'string') throw new Error('expected TCP server address');
-    const base = `http://127.0.0.1:${address.port}`;
-    try {
-      const shell = await fetch(`${base}/wiki`);
-      expect(shell.status).toBe(200);
-      expect(await shell.text()).toContain('MindOS shell');
-
-      const asset = await fetch(`${base}/assets/app.12345678.js`);
-      expect(asset.status).toBe(200);
-      expect(asset.headers.get('cache-control')).toContain('immutable');
-      expect(await asset.text()).toContain('__mindos');
-    } finally {
-      await new Promise<void>((resolve, reject) => app.server.close((error) => error ? reject(error) : resolve()));
-    }
-  });
-
-  it('handles settings read with masked secrets and provider env overrides', () => {
-    const res = handleSettingsGet({
-      env: { AI_PROVIDER: 'openai', MIND_ROOT: '/mind', MINDOS_WEB_PORT: '4567' },
-      readSettings: () => ({
-        ai: { activeProvider: 'openai', providers: { openai: { apiKey: 'secret' } } },
-        authToken: 'mindos-secret-token',
-        mcpPort: 8567,
-      }),
-      writeSettings: () => undefined,
-      readWebSearchConfig: () => ({ provider: 'exa', exaApiKey: 'exa-key' }),
-      writeWebSearchConfig: () => undefined,
-      parseProviders: (providers) => providers,
-      getEmbeddingStatus: () => ({ ready: true }),
-      invalidateCache: () => undefined,
-      providerEnv: {
-        ids: ['openai'],
-        getApiKeyEnvVar: () => 'OPENAI_API_KEY',
-        getApiKeyFromEnv: () => 'env-secret',
-      },
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({
-      authToken: 'mindos-••••-token',
-      allowNetworkAccess: false,
-      port: 4567,
-      mcpPort: 8567,
-      webSearch: { provider: 'exa', exaApiKey: '••••••' },
-      envOverrides: { AI_PROVIDER: true, MIND_ROOT: true, OPENAI_API_KEY: true },
-      envValues: { AI_PROVIDER: 'openai', MIND_ROOT: '/mind', OPENAI_API_KEY: '***set***' },
-    });
-  });
-
-  it('handles settings write without accepting incoming auth token replacement', () => {
-    let settings: any = {
-      ai: { activeProvider: 'openai', providers: { openai: {} } },
-      authToken: 'keep-me',
-      allowNetworkAccess: false,
-      mindRoot: '/old',
-      skillPaths: { enableAgentsDir: true, custom: ['/old-skills'] },
-      baseUrlCompat: { openai: { streaming: false } },
-    };
-    let webSearch = { provider: 'exa', exaApiKey: 'old-key' };
-    let invalidated = false;
-
-    const res = handleSettingsPost({
-      ai: { activeProvider: 'anthropic', providers: { anthropic: {} } },
-      authToken: 'replace-me',
-      allowNetworkAccess: true,
-      mindRoot: '/new',
-      webSearch: { provider: 'perplexity', exaApiKey: '••••••' },
-      connectionMode: { cli: false, mcp: true },
-      skillPaths: { enableAgentsDir: false, custom: ['/custom-skills', 42, '  '] } as never,
-    }, {
-      readSettings: () => settings,
-      writeSettings: (next) => {
-        settings = next as typeof settings;
-      },
-      readWebSearchConfig: () => webSearch,
-      writeWebSearchConfig: (next) => {
-        webSearch = next as typeof webSearch;
-      },
-      parseProviders: (providers) => ({ parsed: providers }),
-      getEmbeddingStatus: () => ({}),
-      invalidateCache: () => {
-        invalidated = true;
-      },
-      providerEnv: {
-        ids: [],
-        getApiKeyEnvVar: () => undefined,
-        getApiKeyFromEnv: () => undefined,
-      },
-    });
-
-    expect(res).toEqual({ status: 200, body: { ok: true } });
-    expect(settings.authToken).toBe('keep-me');
-    expect(settings.allowNetworkAccess).toBe(true);
-    expect(settings.mindRoot).toBe('/new');
-    expect(settings.connectionMode).toEqual({ cli: false, mcp: true });
-    expect(settings.skillPaths).toEqual({ enableAgentsDir: false, custom: ['/custom-skills'] });
-    expect(settings.baseUrlCompat).toEqual({});
-    expect(webSearch).toEqual({ provider: 'perplexity', exaApiKey: 'old-key' });
-    expect(invalidated).toBe(true);
-  });
-
-  it('ignores malformed runtime custom skill paths', () => {
-    const roots = getSkillRootsFromRuntime({
-      mindRoot: '/mind',
-      runtimeRoot: '/runtime',
-      homeDir: '/home/ada',
-      settings: {
-        skillPaths: {
-          custom: ['/extra-skills', 42 as never, '  '],
-        },
-      },
-    });
-
-    expect(roots.filter((root) => root.origin === 'custom').map((root) => root.path)).toEqual(['/extra-skills']);
-  });
-
-  it('expands home-relative runtime custom skill paths', () => {
-    const roots = getSkillRootsFromRuntime({
-      mindRoot: '/mind',
-      runtimeRoot: '/runtime',
-      homeDir: '/home/ada',
-      settings: {
-        skillPaths: {
-          custom: ['~/direct-skill'],
-        },
-      },
-    });
-
-    expect(roots.filter((root) => root.origin === 'custom').map((root) => root.path)).toEqual(['/home/ada/direct-skill']);
-  });
-
-  it('tests AI provider keys with product-owned validation and error classification', async () => {
-    const services = {
-      isProviderId: (value: string) => ['anthropic', 'openai', 'google'].includes(value),
-      isProviderEntryId: (value: string) => value.startsWith('p_'),
-      readSettings: () => ({ ai: { providers: [{ id: 'p_saved', protocol: 'openai', apiKey: 'saved-key', model: 'gpt-5.4', baseUrl: 'https://api.example/v1' }] } }),
-      findProvider: (providers: any[], id: string) => providers.find((provider) => provider.id === id),
-      effectiveAiConfig: (provider: string) => ({ provider, apiKey: provider === 'anthropic' ? '' : 'env-key', model: 'default-model', baseUrl: '' }),
-      testModel: async () => undefined,
-      clearCompatCacheForBaseUrl: () => undefined,
-    };
-
-    await expect(handleSettingsTestKeyPost({ provider: 'invalid', apiKey: 'test' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { ok: false, code: 'unknown', error: 'Invalid provider' },
-    });
-    await expect(handleSettingsTestKeyPost({ provider: 'anthropic' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: false, code: 'auth_error', error: 'No API key configured' },
-    });
-    await expect(handleSettingsTestKeyPost({ provider: 'anthropic', apiKey: 'sk-test', model: 'claude-sonnet-4-6' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-    await expect(handleSettingsTestKeyPost({ provider: 'p_saved' }, {
-      ...services,
-      testModel: async ({ provider, apiKey, model, baseUrl }: any) => {
-        expect({ provider, apiKey, model, baseUrl }).toEqual({
-          provider: 'openai',
-          apiKey: 'saved-key',
-          model: 'gpt-5.4',
-          baseUrl: 'https://api.example/v1',
-        });
-      },
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-    await expect(handleSettingsTestKeyPost({ provider: 'google', apiKey: 'AI-key-test' }, {
-      ...services,
-      testModel: async () => {
-        const error = new Error('The operation was aborted');
-        error.name = 'AbortError';
-        throw error;
-      },
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { ok: false, code: 'network_error', error: 'Request timed out' },
-    });
-    await expect(handleSettingsTestKeyPost({ provider: 'anthropic', apiKey: 'sk-test', model: 'missing' }, {
-      ...services,
-      testModel: async () => {
-        throw new Error('404 Model not found: missing does not exist');
-      },
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { ok: false, code: 'model_not_found' },
-    });
-  });
-
-  it('lists AI provider models through product-owned provider resolution', async () => {
-    const services = {
-      isProviderId: (value: string) => ['anthropic', 'openai', 'ollama'].includes(value),
-      isProviderEntryId: (value: string) => value.startsWith('p_'),
-      readSettings: () => ({ ai: { providers: [{ id: 'p_saved', protocol: 'openai', apiKey: 'saved-key', baseUrl: 'https://api.example/v1' }] } }),
-      findProvider: (providers: any[], id: string) => providers.find((provider) => provider.id === id),
-      effectiveAiConfig: (provider: string) => ({ provider, apiKey: provider === 'openai' ? 'env-key' : '', baseUrl: '' }),
-      supportsListModels: (provider: string) => provider !== 'anthropic',
-      getRegistryModels: (provider: string) => [`${provider}-static`],
-      getProviderApiType: () => 'openai-completions',
-      getDefaultBaseUrl: (provider: string) => provider === 'openai' ? 'https://api.openai.test/v1' : '',
-      buildEndpointCandidates: (baseUrl: string, path: string) => [`${baseUrl}${path}`],
-      fetch: async () => ({
-        ok: true,
-        status: 200,
-        text: async () => '',
-        json: async () => ({ data: [{ id: 'gpt-5.4' }, { id: 'gpt-5.3' }] }),
-      }),
-    };
-
-    await expect(handleSettingsListModelsPost({ provider: 'invalid' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { ok: false, error: 'Invalid provider' },
-    });
-    await expect(handleSettingsListModelsPost({ provider: 'anthropic' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true, models: ['anthropic-static'] },
-    });
-    await expect(handleSettingsListModelsPost({ provider: 'openai' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true, models: ['gpt-5.3', 'gpt-5.4'] },
-    });
-    await expect(handleSettingsListModelsPost({ provider: 'p_saved' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true, models: ['gpt-5.3', 'gpt-5.4'] },
-    });
-    await expect(handleSettingsListModelsPost({ provider: 'ollama' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: false, error: 'No API key configured' },
-    });
-  });
-
-  it('handles embedding status and download state through injected services', async () => {
-    let resolveDownload!: (ok: boolean) => void;
-    const downloadPromise = new Promise<boolean>((resolve) => { resolveDownload = resolve; });
-    const services = {
-      isLocalModelDownloaded: async (model?: string) => model === 'custom-model',
-      downloadLocalModel: async () => downloadPromise,
-      getEmbeddingStatus: () => ({ ready: false, building: true, docCount: 2 }),
-      defaultLocalModel: 'default-model',
-      localModelOptions: [{ id: 'default-model', label: 'Default' }],
-    };
-
-    await expect(handleEmbeddingGet(services)).resolves.toMatchObject({
-      status: 200,
-      body: {
-        downloaded: false,
-        defaultModel: 'default-model',
-        models: [{ id: 'default-model', label: 'Default' }],
-        ready: false,
-        building: true,
-        docCount: 2,
-      },
-    });
-
-    await expect(handleEmbeddingPost({ action: 'download', model: 'custom-model' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true, message: 'Downloading custom-model...' },
-    });
-    await expect(handleEmbeddingPost({ action: 'download', model: 'custom-model' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: false, error: 'Download already in progress' },
-    });
-    await expect(handleEmbeddingPost({ action: 'status', model: 'custom-model' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { downloading: true, downloaded: true, error: null },
-    });
-
-    resolveDownload(false);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    await expect(handleEmbeddingPost({ action: 'status', model: 'custom-model' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: {
-        downloading: false,
-        downloaded: true,
-        error: 'Download failed. Check your network connection and try again.',
-      },
-    });
-
-    await expect(handleEmbeddingPost({ action: 'unknown' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { ok: false, error: 'Unknown action' },
-    });
-  });
-
-  it('surfaces optional local embedding runtime install errors clearly', async () => {
-    const services = {
-      isLocalModelDownloaded: async () => false,
-      downloadLocalModel: async () => {
-        throw new Error('npm is required to install the optional local embedding runtime.');
-      },
-    };
-
-    await expect(handleEmbeddingPost({ action: 'download', model: 'custom-model' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true, message: 'Downloading custom-model...' },
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    await expect(handleEmbeddingPost({ action: 'status', model: 'custom-model' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: {
-        downloading: false,
-        downloaded: false,
-        error: 'npm is required to install the optional local embedding runtime. Install Node.js/npm, or use API mode.',
-      },
-    });
-  });
-
-  it('handles A2A JSON-RPC and discovery facades through injected protocol services', async () => {
-    const task = { id: 'task-1', status: { state: 'TASK_STATE_COMPLETED', timestamp: '2026-05-09T00:00:00.000Z' } };
-    const services = {
-      handleSendMessage: async (params: any) => ({ ...task, history: [params.message] }),
-      handleGetTask: (params: any) => params.id === 'task-1' ? task : null,
-      handleCancelTask: (params: any) => params.id === 'task-1'
-        ? { task: { ...task, status: { state: 'TASK_STATE_CANCELED', timestamp: '2026-05-09T00:00:00.000Z' } }, reason: 'canceled' as const }
-        : { task: null, reason: 'not_found' as const },
-      getDiscoveredAgents: () => [{ id: 'agent-1', endpoint: 'http://agent/api/a2a' }],
-      getDelegationHistory: () => [{ id: 'delegation-1', agentId: 'agent-1' }],
-      discoverAgent: async (url: string) => url === 'http://agent'
-        ? { id: 'agent-1', endpoint: 'http://agent/api/a2a' }
-        : null,
-    };
-
-    await expect(handleA2aPost({
-      contentLength: 100_001,
-      body: {},
-    }, services)).resolves.toMatchObject({
-      status: 413,
-      body: { jsonrpc: '2.0', id: null, error: { code: -32600 } },
-    });
-
-    await expect(handleA2aPost({
-      body: { jsonrpc: '2.0', id: '1', method: 'SendMessage', params: { message: { role: 'ROLE_USER', parts: [{ text: 'hi' }] } } },
-    }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { jsonrpc: '2.0', id: '1', result: { id: 'task-1' } },
-    });
-
-    await expect(handleA2aPost({
-      body: { jsonrpc: '2.0', id: '2', method: 'GetTask', params: { id: 'missing' } },
-    }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { jsonrpc: '2.0', id: '2', error: { code: -32001, message: 'Task not found' } },
-    });
-
-    expect(handleA2aAgentsGet(services)).toMatchObject({
-      status: 200,
-      body: { agents: [{ id: 'agent-1' }] },
-    });
-    expect(handleA2aDelegationsGet(services)).toMatchObject({
-      status: 200,
-      body: { delegations: [{ id: 'delegation-1' }] },
-    });
-    await expect(handleA2aDiscoverPost({ url: '' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'URL is required' },
-    });
-    await expect(handleA2aDiscoverPost({ url: 'file:///etc/passwd' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'Invalid URL', agent: null },
-    });
-    await expect(handleA2aDiscoverPost({ url: 'https://user:pass@example.com' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'Invalid URL', agent: null },
-    });
-    await expect(handleA2aDiscoverPost({ url: 'http://agent' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { agent: { id: 'agent-1' } },
-    });
-    expect(handleA2aOptions()).toMatchObject({
-      status: 204,
-      headers: { 'Access-Control-Allow-Origin': '*' },
-    });
-  });
-
-  it('handles ACP control-plane routes through injected protocol services', async () => {
-    let settings: { acpAgents?: Record<string, any> } = {
-      acpAgents: { gemini: { command: 'gemini', args: ['--experimental-acp'] } },
-    };
-    let detectCalls = 0;
-    const activeSession = { id: 'ses-1', agentId: 'gemini', state: 'idle' };
-    const services = {
-      readSettings: () => settings,
-      writeSettings: (next: typeof settings) => {
-        settings = next;
-      },
-      detectLocalAcpAgents: async (options?: any) => {
-        detectCalls += 1;
-        return {
-          installed: [{ id: 'gemini', name: 'Gemini', binaryPath: '/usr/bin/gemini', overrides: options?.overrides }],
-          notInstalled: [],
-        };
-      },
-      installPackage: async (agentId: string, packageName: string) => ({ status: 'installing', agentId, packageName }),
-      fetchAcpRegistry: async () => ({ version: 'test', agents: [{ id: 'gemini', name: 'Gemini' }], fetchedAt: '2026-05-09T00:00:00.000Z' }),
-      findAcpAgent: async (agentId: string) => agentId === 'gemini' ? { id: 'gemini', name: 'Gemini' } : null,
-      getActiveSessions: () => [activeSession],
-      getSession: (sessionId: string) => sessionId === 'ses-1' ? activeSession : null,
-      createSession: async (agentId: string, options?: any) => ({ ...activeSession, agentId, cwd: options?.cwd }),
-      loadSession: async (agentId: string, sessionId: string) => ({ id: sessionId, agentId, state: 'idle' }),
-      prompt: async (sessionId: string, text: string) => ({ sessionId, text: `echo:${text}`, done: true }),
-      cancelPrompt: async () => {},
-      closeSession: async () => {},
-      setMode: async () => {},
-      setConfigOption: async () => [{ id: 'tone', value: 'direct' }],
-      listSessions: async () => ({ sessions: [{ sessionId: 'remote-1', title: 'Prior' }] }),
-    };
-
-    expect(handleAcpConfigGet(services)).toMatchObject({
-      status: 200,
-      body: { agents: { gemini: { command: 'gemini' } } },
-    });
-    expect(handleAcpConfigPost({
-      agentId: 'claude',
-      config: { command: ' claude ', args: ['--acp', 1], env: { GOOD: 'yes', BAD: 1, ['__proto__']: 'polluted' }, enabled: false },
-    }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true, agents: { claude: { command: 'claude', args: ['--acp'], env: { GOOD: 'yes' }, enabled: false } } },
-    });
-    expect(handleAcpConfigPost({
-      agentId: '__proto__',
-      config: { command: 'bad' },
-    }, services)).toMatchObject({
-      status: 400,
-      body: { error: 'agentId is required' },
-    });
-    expect(({} as Record<string, unknown>).command).toBeUndefined();
-    expect(handleAcpConfigDelete({ agentId: 'claude' }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-
-    await expect(handleAcpDetectGet(new URLSearchParams(), services)).resolves.toMatchObject({
-      status: 200,
-      body: { installed: [{ id: 'gemini' }] },
-    });
-    await expect(handleAcpDetectGet(new URLSearchParams(), services)).resolves.toMatchObject({
-      status: 200,
-      body: { installed: [{ id: 'gemini' }] },
-    });
-    expect(detectCalls).toBe(1);
-    await handleAcpDetectGet(new URLSearchParams('force=1'), services);
-    expect(detectCalls).toBe(2);
-
-    await expect(handleAcpInstallPost({ agentId: 'claude', packageName: '../bad' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'Invalid package name' },
-    });
-    await expect(handleAcpInstallPost({ agentId: '--help', packageName: 'agent-plugin' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'agentId and packageName are required' },
-    });
-    await expect(handleAcpInstallPost({ agentId: 'claude', packageName: 'agent..plugin' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { status: 'installing', agentId: 'claude', packageName: 'agent..plugin' },
-    });
-    await expect(handleAcpInstallPost({ agentId: 'claude', packageName: '@anthropic-ai/claude-code' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { status: 'installing', agentId: 'claude' },
-    });
-
-    await expect(handleAcpRegistryGet(new URLSearchParams('agent=gemini'), services)).resolves.toMatchObject({
-      status: 200,
-      body: { agent: { id: 'gemini' } },
-    });
-    await expect(handleAcpRegistryGet(new URLSearchParams('agent=missing'), services)).resolves.toMatchObject({
-      status: 404,
-      body: { error: 'Agent not found', agent: null },
-    });
-    await expect(handleAcpRegistryGet(new URLSearchParams('agent=__proto__'), services)).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'Invalid agent id', agent: null },
-    });
-    await expect(handleAcpRegistryGet(new URLSearchParams(), services)).resolves.toMatchObject({
-      status: 200,
-      body: { registry: { agents: [{ id: 'gemini' }] } },
-    });
-
-    expect(handleAcpSessionGet(services)).toMatchObject({
-      status: 200,
-      body: { sessions: [activeSession] },
-    });
-    await expect(handleAcpSessionPost({ agentId: 'gemini', cwd: '/tmp' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { session: { id: 'ses-1', cwd: '/tmp' } },
-    });
-    await expect(handleAcpSessionPost({ agentId: '__proto__' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'agentId is required' },
-    });
-    await expect(handleAcpSessionPost({ action: 'prompt', sessionId: 'ses-1', text: 'hi' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { response: { text: 'echo:hi' } },
-    });
-    await expect(handleAcpSessionPost({ action: 'set_config', sessionId: 'ses-1', configId: 'tone', value: 'direct' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { configOptions: [{ id: 'tone', value: 'direct' }] },
-    });
-    await expect(handleAcpSessionPost({ action: 'unknown' }, services)).resolves.toMatchObject({
-      status: 400,
-      body: { error: 'Unknown action: unknown' },
-    });
-    await expect(handleAcpSessionDelete({ sessionId: 'ses-1' }, services)).resolves.toMatchObject({
-      status: 200,
-      body: { ok: true },
-    });
-  });
-
-  it('resolves ACP npm installs through node on Windows instead of npm.cmd', () => {
-    const invocation = resolveNpmInvocation(['install', '-g', '@agent/package'], {
-      platform: 'win32',
-      nodeExecPath: 'C:\\Program Files\\MindOS\\node.exe',
-      env: { npm_execpath: 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js' },
-      pathExists: (filePath) => filePath.endsWith('npm-cli.js'),
-    });
-
-    expect(invocation).toEqual({
-      command: 'C:\\Program Files\\MindOS\\node.exe',
-      args: ['C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js', 'install', '-g', '@agent/package'],
-    });
-  });
-
-  it('keeps ACP npm installs on PATH lookup outside Windows', () => {
-    expect(resolveNpmInvocation(['install', '-g', '@agent/package'], { platform: 'darwin' })).toEqual({
-      command: 'npm',
-      args: ['install', '-g', '@agent/package'],
-    });
-  });
-
-  it('handles MCP status with endpoint derivation and self-health check', async () => {
-    const res = await handleMcpStatus({
-      env: { MINDOS_MCP_PORT: '8567' },
-      readSettings: () => ({
-        authToken: 'token-secret',
-        connectionMode: { cli: false, mcp: true },
-      }),
-      fetchHealth: async (url, timeoutMs) => {
-        expect(url).toBe('http://127.0.0.1:8567/api/health');
-        expect(timeoutMs).toBe(2000);
-        return { ok: true, body: { ok: true, service: 'mindos' } };
-      },
-      getLocalIP: () => '192.168.1.2',
-      maskToken: (token) => `masked:${token}`,
-    }, {
-      host: 'mindos.local:4567',
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({
-      running: true,
-      transport: 'http',
-      endpoint: 'http://mindos.local:8567/mcp',
-      port: 8567,
-      toolCount: 24,
-      authConfigured: true,
-      maskedToken: 'masked:token-secret',
-      authToken: 'token-secret',
-      localIP: '192.168.1.2',
-      connectionMode: { cli: false, mcp: true },
-    });
-  });
-
-  it('treats MCP health failures as not running', async () => {
-    const res = await handleMcpStatus({
-      readSettings: () => ({}),
-      fetchHealth: async () => {
-        throw new Error('connection refused');
-      },
-      getLocalIP: () => null,
-      maskToken: (token) => token,
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({
-      running: false,
-      endpoint: 'http://127.0.0.1:8781/mcp',
-      toolCount: 0,
-      authConfigured: false,
-      connectionMode: { cli: true, mcp: false },
     });
   });
 });

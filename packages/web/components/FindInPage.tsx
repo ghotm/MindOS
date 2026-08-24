@@ -164,7 +164,7 @@ export default function FindInPage({ containerRef, onClose }: FindInPageProps) {
           outline: 2px solid rgba(250, 204, 21, 0.5);
         }
       `}</style>
-      <div className="sticky top-[98px] md:top-[46px] z-30 flex justify-end px-4 md:px-6 pointer-events-none" data-find-in-page>
+      <div className="sticky top-[calc(52px+var(--workspace-header-h))] md:top-[var(--workspace-header-h)] z-30 flex justify-end px-4 md:px-6 pointer-events-none" data-find-in-page>
         <div className="pointer-events-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-card shadow-lg">
           <input
             ref={inputRef}
@@ -185,7 +185,7 @@ export default function FindInPage({ containerRef, onClose }: FindInPageProps) {
           <button
             onClick={goPrev}
             disabled={totalMarks === 0}
-            className="p-1 rounded text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
+            className="hit-target-box p-1 text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-sm)]"
             aria-label="Previous match"
           >
             <ChevronUp size={14} />
@@ -193,14 +193,14 @@ export default function FindInPage({ containerRef, onClose }: FindInPageProps) {
           <button
             onClick={goNext}
             disabled={totalMarks === 0}
-            className="p-1 rounded text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
+            className="hit-target-box p-1 text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-sm)]"
             aria-label="Next match"
           >
             <ChevronDown size={14} />
           </button>
           <button
             onClick={onClose}
-            className="p-1 rounded text-muted-foreground hover:text-foreground transition-colors"
+            className="hit-target-box p-1 text-muted-foreground hover:text-foreground transition-colors [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-sm)]"
             aria-label="Close find"
           >
             <X size={14} />

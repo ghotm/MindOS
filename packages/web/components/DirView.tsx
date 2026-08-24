@@ -1,14 +1,16 @@
 'use client';
 
-import { useSyncExternalStore, useMemo, useState, useCallback, useRef, useEffect } from 'react';
+import { forwardRef, useSyncExternalStore, useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FileText, Table, Folder, FolderOpen, LayoutGrid, List, FilePlus, ScrollText, BookOpen, Copy, AlertTriangle, Sparkles, Loader2, Check } from 'lucide-react';
+import { Virtuoso, VirtuosoGrid, type Components as VirtuosoComponents, type GridComponents } from 'react-virtuoso';
 import Breadcrumb from '@/components/Breadcrumb';
 import { encodePath, relativeTime } from '@/lib/utils';
 import { FileNode, SYSTEM_FILES } from '@/lib/types';
 import type { SpacePreview } from '@/lib/core/types';
 import { useLocale } from '@/lib/stores/locale-store';
+import { openTab } from '@/lib/workspace-tabs';
 
 async function copyPathToClipboard(path: string) {
   try { await navigator.clipboard.writeText(path); } catch { /* noop */ }
@@ -39,6 +41,7 @@ function countFiles(node: FileNode): number {
 
 const DIR_VIEW_KEY = 'mindos-dir-view';
 const HIDDEN_FILES_KEY = 'show-hidden-files';
+const VIRTUAL_DIR_ENTRY_THRESHOLD = 200;
 
 function subscribeHiddenFiles(cb: () => void) {
   const handler = (e: StorageEvent) => { if (e.key === HIDDEN_FILES_KEY) cb(); };
@@ -455,6 +458,107 @@ function DirContextMenu({ x, y, path, label, onClose }: {
   );
 }
 
+type DirEntryItemProps = {
+  entry: FileNode;
+  fileCountText?: string;
+  mtimeText?: string;
+  onContextMenu: (e: React.MouseEvent, path: string) => void;
+};
+
+function DirGridEntryItem({ entry, fileCountText, mtimeText, onContextMenu }: DirEntryItemProps) {
+  return (
+    <Link
+      data-dir-view-entry={entry.path}
+      href={`/view/${encodePath(entry.path)}`}
+      onContextMenu={(e) => onContextMenu(e, entry.path)}
+      className={
+        entry.type === 'directory'
+          ? 'flex h-full min-h-[112px] flex-col items-center gap-1.5 p-3 rounded-xl border border-border bg-card hover:bg-accent hover:border-border/80 transition-all duration-100 text-center'
+          : 'flex h-full min-h-[112px] flex-col items-center gap-2 p-4 rounded-xl border border-border bg-card hover:bg-accent hover:border-border/80 transition-all duration-100 text-center'
+      }
+    >
+      {entry.type === 'directory'
+        ? <FolderOpen size={22} className="text-yellow-400" />
+        : <FileIconLarge node={entry} />}
+      <span className="text-xs text-foreground leading-snug line-clamp-2 w-full" title={entry.name} suppressHydrationWarning>
+        {entry.name}
+      </span>
+      {fileCountText && (
+        <span className="text-2xs text-muted-foreground">{fileCountText}</span>
+      )}
+      {mtimeText && (
+        <span className="text-2xs text-muted-foreground" suppressHydrationWarning>
+          {mtimeText}
+        </span>
+      )}
+    </Link>
+  );
+}
+
+function DirListEntryItem({ entry, fileCountText, mtimeText, onContextMenu }: DirEntryItemProps) {
+  return (
+    <Link
+      data-dir-view-entry={entry.path}
+      href={`/view/${encodePath(entry.path)}`}
+      onContextMenu={(e) => onContextMenu(e, entry.path)}
+      className="flex items-center gap-3 px-4 py-3 bg-card hover:bg-accent transition-colors duration-100"
+    >
+      <FileIcon node={entry} />
+      <span className="flex-1 text-sm text-foreground truncate" title={entry.name} suppressHydrationWarning>
+        {entry.name}
+      </span>
+      {fileCountText ? (
+        <span className="text-xs text-muted-foreground shrink-0">{fileCountText}</span>
+      ) : mtimeText ? (
+        <span className="text-xs text-muted-foreground shrink-0 tabular-nums" suppressHydrationWarning>
+          {mtimeText}
+        </span>
+      ) : null}
+    </Link>
+  );
+}
+
+const VirtualDirGridList = forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  function VirtualDirGridList({ className, ...props }, ref) {
+    return (
+      <div
+        {...props}
+        ref={ref}
+        data-dir-view-virtualized="grid"
+        className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3 ${className ?? ''}`}
+      />
+    );
+  },
+);
+
+const VirtualDirGridItem = forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  function VirtualDirGridItem({ className, ...props }, ref) {
+    return <div {...props} ref={ref} className={`min-w-0 ${className ?? ''}`} />;
+  },
+);
+
+const VirtualDirList = forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  function VirtualDirList({ className, ...props }, ref) {
+    return (
+      <div
+        {...props}
+        ref={ref}
+        data-dir-view-virtualized="list"
+        className={`flex flex-col divide-y divide-border border border-border rounded-xl overflow-hidden ${className ?? ''}`}
+      />
+    );
+  },
+);
+
+const VIRTUAL_GRID_COMPONENTS = {
+  List: VirtualDirGridList,
+  Item: VirtualDirGridItem,
+} as unknown as GridComponents;
+
+const VIRTUAL_LIST_COMPONENTS = {
+  List: VirtualDirList,
+} as unknown as VirtuosoComponents;
+
 // ─── DirView ──────────────────────────────────────────────────────────────────
 
 export default function DirView({ dirPath, entries, spacePreview }: DirViewProps) {
@@ -480,18 +584,47 @@ export default function DirView({ dirPath, entries, spacePreview }: DirViewProps
     return map;
   }, [visibleEntries]);
 
+  const shouldVirtualizeEntries = visibleEntries.length > VIRTUAL_DIR_ENTRY_THRESHOLD;
+
+  const renderGridEntry = useCallback((entry: FileNode | undefined) => {
+    if (!entry) return null;
+    return (
+      <DirGridEntryItem
+        entry={entry}
+        fileCountText={entry.type === 'directory' ? t.dirView.fileCount(fileCounts.get(entry.path) ?? 0) : undefined}
+        mtimeText={entry.type === 'file' && entry.mtime ? formatTime(entry.mtime) : undefined}
+        onContextMenu={handleCtx}
+      />
+    );
+  }, [fileCounts, formatTime, handleCtx, t.dirView]);
+
+  const renderListEntry = useCallback((entry: FileNode | undefined) => {
+    if (!entry) return null;
+    return (
+      <DirListEntryItem
+        entry={entry}
+        fileCountText={entry.type === 'directory' ? t.dirView.fileCount(fileCounts.get(entry.path) ?? 0) : undefined}
+        mtimeText={entry.type === 'file' && entry.mtime ? formatTime(entry.mtime) : undefined}
+        onContextMenu={handleCtx}
+      />
+    );
+  }, [fileCounts, formatTime, handleCtx, t.dirView]);
+
   return (
-    <div className="flex flex-col min-h-screen">
+    <div className="flex flex-col min-h-[calc(100vh-var(--app-titlebar-h))]">
       {/* Topbar */}
-      <div className="sticky top-[52px] md:top-0 z-20 border-b border-border px-4 md:px-6 h-[46px] flex items-center bg-background">
+      <div className="sticky top-[52px] md:top-0 z-20 border-b border-border px-4 md:px-6 h-[var(--workspace-header-h)] flex items-center bg-background">
         <div className="w-full flex items-center justify-between gap-2">
           <div className="min-w-0 flex-1">
             <Breadcrumb filePath={dirPath} />
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <Link
-              href={`/view/${encodePath(dirPath ? `${dirPath}/Untitled.md` : 'Untitled.md')}`}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg transition-colors text-muted-foreground hover:text-foreground hover:bg-muted"
+              href={dirPath ? `/view/Untitled.md?dir=${encodeURIComponent(dirPath)}` : '/view/Untitled.md'}
+              onClick={() => {
+                openTab('doc', 'Untitled.md', 'Untitled.md');
+              }}
+              className="hit-target-box flex items-center gap-1.5 px-2.5 py-1.5 text-xs transition-colors text-muted-foreground hover:text-foreground [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-lg)]"
             >
               <FilePlus size={13} />
               <span className="hidden sm:inline">{t.dirView.newFile}</span>
@@ -499,14 +632,16 @@ export default function DirView({ dirPath, entries, spacePreview }: DirViewProps
             <div className="flex items-center gap-1 p-1 bg-muted rounded-lg">
               <button
                 onClick={() => setView('grid')}
-                className={`inline-flex h-8 w-8 items-center justify-center rounded transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation ${view === 'grid' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                data-hit-active={view === 'grid' ? 'true' : undefined}
+                className={`hit-target-box inline-flex h-8 w-8 items-center justify-center transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation [--hit-target-active-bg:var(--card)] [--hit-target-hover-bg:var(--card)] [--hit-target-radius:var(--radius-sm)] [--hit-target-active-shadow:0_1px_2px_0_color-mix(in_srgb,var(--foreground)_8%,transparent)] ${view === 'grid' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
                 title={t.dirView.gridView}
               >
                 <LayoutGrid size={14} />
               </button>
               <button
                 onClick={() => setView('list')}
-                className={`inline-flex h-8 w-8 items-center justify-center rounded transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation ${view === 'list' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                data-hit-active={view === 'list' ? 'true' : undefined}
+                className={`hit-target-box inline-flex h-8 w-8 items-center justify-center transition-colors duration-75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation [--hit-target-active-bg:var(--card)] [--hit-target-hover-bg:var(--card)] [--hit-target-radius:var(--radius-sm)] [--hit-target-active-shadow:0_1px_2px_0_color-mix(in_srgb,var(--foreground)_8%,transparent)] ${view === 'list' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
                 title={t.dirView.listView}
               >
                 <List size={14} />
@@ -519,7 +654,6 @@ export default function DirView({ dirPath, entries, spacePreview }: DirViewProps
       {/* Content */}
       <div className="flex-1 px-4 md:px-6 py-6">
         <div className="max-w-[860px] mx-auto">
-          {/* Space preview cards (always shown when there's a spacePreview) */}
           {spacePreview && (
             <SpacePreviewSection preview={spacePreview} dirPath={dirPath} />
           )}
@@ -527,58 +661,47 @@ export default function DirView({ dirPath, entries, spacePreview }: DirViewProps
           {visibleEntries.length === 0 ? (
             <p className="text-muted-foreground text-sm">{t.dirView.emptyFolder}</p>
           ) : view === 'grid' ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-3">
-              {visibleEntries.map(entry => (
-                <Link
-                  key={entry.path}
-                  href={`/view/${encodePath(entry.path)}`}
-                  onContextMenu={(e) => handleCtx(e, entry.path)}
-                  className={
-                    entry.type === 'directory'
-                      ? 'flex flex-col items-center gap-1.5 p-3 rounded-xl border border-border bg-card hover:bg-accent hover:border-border/80 transition-all duration-100 text-center'
-                      : 'flex flex-col items-center gap-2 p-4 rounded-xl border border-border bg-card hover:bg-accent hover:border-border/80 transition-all duration-100 text-center'
-                  }
-                >
-                  {entry.type === 'directory'
-                    ? <FolderOpen size={22} className="text-yellow-400" />
-                    : <FileIconLarge node={entry} />}
-                  <span className="text-xs text-foreground leading-snug line-clamp-2 w-full" title={entry.name} suppressHydrationWarning>
-                    {entry.name}
-                  </span>
-                  {entry.type === 'directory' && (
-                    <span className="text-2xs text-muted-foreground">{t.dirView.fileCount(fileCounts.get(entry.path) ?? 0)}</span>
-                  )}
-                  {entry.type === 'file' && entry.mtime && (
-                    <span className="text-2xs text-muted-foreground" suppressHydrationWarning>
-                      {formatTime(entry.mtime)}
-                    </span>
-                  )}
-                </Link>
-              ))}
-            </div>
+            shouldVirtualizeEntries ? (
+              <VirtuosoGrid
+                useWindowScroll
+                totalCount={visibleEntries.length}
+                components={VIRTUAL_GRID_COMPONENTS}
+                itemContent={(index) => renderGridEntry(visibleEntries[index])}
+              />
+            ) : (
+              <div data-dir-view-grid className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+                {visibleEntries.map(entry => (
+                  <DirGridEntryItem
+                    key={entry.path}
+                    entry={entry}
+                    fileCountText={entry.type === 'directory' ? t.dirView.fileCount(fileCounts.get(entry.path) ?? 0) : undefined}
+                    mtimeText={entry.type === 'file' && entry.mtime ? formatTime(entry.mtime) : undefined}
+                    onContextMenu={handleCtx}
+                  />
+                ))}
+              </div>
+            )
           ) : (
-            <div className="flex flex-col divide-y divide-border border border-border rounded-xl overflow-hidden">
-              {visibleEntries.map(entry => (
-                <Link
-                  key={entry.path}
-                  href={`/view/${encodePath(entry.path)}`}
-                  onContextMenu={(e) => handleCtx(e, entry.path)}
-                  className="flex items-center gap-3 px-4 py-3 bg-card hover:bg-accent transition-colors duration-100"
-                >
-                  <FileIcon node={entry} />
-                  <span className="flex-1 text-sm text-foreground truncate" title={entry.name} suppressHydrationWarning>
-                    {entry.name}
-                  </span>
-                  {entry.type === 'directory' ? (
-                    <span className="text-xs text-muted-foreground shrink-0">{t.dirView.fileCount(fileCounts.get(entry.path) ?? 0)}</span>
-                  ) : entry.mtime ? (
-                    <span className="text-xs text-muted-foreground shrink-0 tabular-nums" suppressHydrationWarning>
-                      {formatTime(entry.mtime)}
-                    </span>
-                  ) : null}
-                </Link>
-              ))}
-            </div>
+            shouldVirtualizeEntries ? (
+              <Virtuoso
+                useWindowScroll
+                totalCount={visibleEntries.length}
+                components={VIRTUAL_LIST_COMPONENTS}
+                itemContent={(index) => renderListEntry(visibleEntries[index])}
+              />
+            ) : (
+              <div className="flex flex-col divide-y divide-border border border-border rounded-xl overflow-hidden">
+                {visibleEntries.map(entry => (
+                  <DirListEntryItem
+                    key={entry.path}
+                    entry={entry}
+                    fileCountText={entry.type === 'directory' ? t.dirView.fileCount(fileCounts.get(entry.path) ?? 0) : undefined}
+                    mtimeText={entry.type === 'file' && entry.mtime ? formatTime(entry.mtime) : undefined}
+                    onContextMenu={handleCtx}
+                  />
+                ))}
+              </div>
+            )
           )}
         </div>
       </div>

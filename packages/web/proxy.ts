@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyJwt } from '@/lib/jwt';
-
-const COOKIE_NAME = 'mindos-session';
+import { buildLoginRedirectTarget, WEB_SESSION_COOKIE_NAME } from '@/lib/auth-session';
+import { readSetupPending } from '@/lib/setup-state';
+import { defaultEchoPath } from '@/lib/echo-segments';
+import { readRuntimeAuthConfig } from '@/lib/runtime-auth-config';
 
 /** CORS headers for /api/* routes (React Native mobile app + cross-origin agents). */
 function corsHeaders(): Record<string, string> {
@@ -22,8 +24,7 @@ function withCors(res: NextResponse): NextResponse {
 }
 
 export async function proxy(req: NextRequest) {
-  const authToken = process.env.AUTH_TOKEN;     // API bearer token (for Agents / MCP)
-  const webPassword = process.env.WEB_PASSWORD; // Web UI login password (for browser users)
+  const { authToken, webPassword, webSessionSecret } = readRuntimeAuthConfig();
   const pathname = req.nextUrl.pathname;
 
   function next(): NextResponse {
@@ -45,14 +46,17 @@ export async function proxy(req: NextRequest) {
 
     if (!authToken) return withCors(NextResponse.next());
 
-    // Exempt same-origin browser requests (the app's own frontend).
-    // Sec-Fetch-Site is set by browsers automatically and cannot be spoofed by JS.
-    if (req.headers.get('sec-fetch-site') === 'same-origin') return withCors(NextResponse.next());
-
     // Exempt authenticated web UI sessions (valid JWT cookie = logged-in browser user)
     if (webPassword) {
-      const token = req.cookies.get(COOKIE_NAME)?.value ?? '';
-      if (token && await verifyJwt(token, webPassword)) return withCors(NextResponse.next());
+      const token = req.cookies.get(WEB_SESSION_COOKIE_NAME)?.value ?? '';
+      if (token && await verifyJwt(token, webSessionSecret)) return withCors(NextResponse.next());
+    }
+
+    // Preserve the open-browser-UI contract only when the UI has no password.
+    // When a Web password exists, Sec-Fetch-Site alone is not an auth signal:
+    // non-browser HTTP clients can send the same header value.
+    if (!webPassword && req.headers.get('sec-fetch-site') === 'same-origin') {
+      return withCors(NextResponse.next());
     }
 
     // External / cross-origin requests must provide a bearer token
@@ -64,6 +68,21 @@ export async function proxy(req: NextRequest) {
     return withCors(NextResponse.next());
   }
 
+  // --- Entry redirects (/ and /echo) ---
+  // Redirecting /echo here yields a true 307 before rendering starts. `/`
+  // is the product Home page and only redirects while setup is pending.
+  // The proxy runs on the Node.js runtime in Next 16, so the fs read inside
+  // readSetupPending() is allowed.
+  if (pathname === '/' || pathname === '/echo') {
+    if (readSetupPending()) {
+      return NextResponse.redirect(new URL('/setup', req.url), 307);
+    }
+    if (pathname === '/echo') {
+      return NextResponse.redirect(new URL(defaultEchoPath(), req.url), 307);
+    }
+    // `/` falls through to render the home page (behind the login wall below).
+  }
+
   // --- Web UI protection (WEB_PASSWORD) ---
   if (!webPassword) return next();
 
@@ -71,12 +90,15 @@ export async function proxy(req: NextRequest) {
   if (pathname === '/login') return next();
 
   // Verify JWT session cookie
-  const token = req.cookies.get(COOKIE_NAME)?.value ?? '';
-  if (token && await verifyJwt(token, webPassword)) return next();
+  const token = req.cookies.get(WEB_SESSION_COOKIE_NAME)?.value ?? '';
+  const session = token ? await verifyJwt(token, webSessionSecret) : null;
+  if (session) return next();
 
   // Not authenticated: redirect to /login
   const loginUrl = new URL('/login', req.url);
-  if (pathname !== '/') loginUrl.searchParams.set('redirect', pathname);
+  const redirectTarget = buildLoginRedirectTarget(pathname, req.nextUrl.search);
+  if (redirectTarget) loginUrl.searchParams.set('redirect', redirectTarget);
+  if (token) loginUrl.searchParams.set('reason', 'expired');
   return NextResponse.redirect(loginUrl);
 }
 

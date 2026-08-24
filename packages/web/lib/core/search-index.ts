@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { collectAllFiles } from './tree';
+import { collectAllFiles, isIgnoredTreePath, readMindosIgnoreFile } from './tree';
 import { readFile } from './fs-ops';
 import { resolveExistingSafe } from './security';
 import { extractPdfText } from './pdf-text';
@@ -23,7 +23,7 @@ const zhSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
  *   Falls back to bigrams if Intl.Segmenter is unavailable.
  * Mixed text: both strategies applied, tokens merged.
  */
-function tokenize(text: string): Set<string> {
+export function tokenizeSearchText(text: string): Set<string> {
   const tokens = new Set<string>();
   const lower = text.toLowerCase();
 
@@ -81,6 +81,19 @@ function emitCjkBigrams(chars: string[], tokens: Set<string>): void {
   }
 }
 
+function buildFileSignature(mindRoot: string, filePaths: string[]): string | null {
+  const lines: string[] = [];
+  for (const filePath of [...filePaths].sort()) {
+    try {
+      const stat = fs.statSync(resolveExistingSafe(mindRoot, filePath));
+      lines.push(`${filePath}\0${stat.size}\0${stat.mtimeMs}`);
+    } catch {
+      return null;
+    }
+  }
+  return lines.join('\n');
+}
+
 /**
  * In-memory inverted index for core search acceleration.
  *
@@ -103,12 +116,17 @@ export class SearchIndex {
   private totalChars = 0;
   /** Reverse mapping: filePath → Set<token> for efficient removeFile. */
   private fileTokens = new Map<string, Set<string>>();
+  /** filePath → truncated content. Lets queries score/snippet without disk IO.
+   *  Not persisted — lazily refilled from disk after load()/worker restore. */
+  private contents = new Map<string, string>();
+  /** filePath → lowercased truncated content, derived lazily from `contents`. */
+  private lowerContents = new Map<string, string>();
 
   /**
    * Async rebuild using worker_threads (non-blocking).
    * Falls back to sync rebuild if worker fails.
    */
-  async rebuildAsync(mindRoot: string): Promise<void> {
+  async rebuildAsync(mindRoot: string, opts: { pdfTimeBudgetMs?: number } = {}): Promise<{ deferredPdfs: string[] }> {
     const stop = telemetry.startTimer('search.index.rebuild.async');
     try {
       const { Worker } = await import('worker_threads');
@@ -121,14 +139,19 @@ export class SearchIndex {
         workerPath = require.resolve('./search-rebuild-worker');
         if (!existsSync(workerPath)) throw new Error('Worker file not found');
       } catch {
-        this.rebuild(mindRoot);
-        stop({ fileCount: this.fileCount, tokenCount: this.invertedIndex?.size ?? 0, method: 'sync_no_worker' });
-        return;
+        const result = this.rebuild(mindRoot, opts);
+        stop({
+          fileCount: this.fileCount,
+          tokenCount: this.invertedIndex?.size ?? 0,
+          deferredPdfCount: result.deferredPdfs.length,
+          method: 'sync_no_worker',
+        });
+        return result;
       }
 
-      const result = await new Promise<PersistedIndex>((resolve, reject) => {
+      const result = await new Promise<PersistedIndex & { deferredPdfs?: string[] }>((resolve, reject) => {
         const worker = new Worker(workerPath, {
-          workerData: { mindRoot },
+          workerData: { mindRoot, pdfTimeBudgetMs: opts.pdfTimeBudgetMs },
           execArgv: process.execArgv.filter(a => a.startsWith('--require') || a.startsWith('--loader')),
         });
         const timeout = setTimeout(() => {
@@ -151,11 +174,24 @@ export class SearchIndex {
 
       // Restore from worker result (same as load() deserialization)
       this.restoreFromPersisted(result);
-      stop({ fileCount: this.fileCount, tokenCount: this.invertedIndex?.size ?? 0, method: 'worker' });
+      const deferredPdfs = result.deferredPdfs ?? [];
+      stop({
+        fileCount: this.fileCount,
+        tokenCount: this.invertedIndex?.size ?? 0,
+        deferredPdfCount: deferredPdfs.length,
+        method: 'worker',
+      });
+      return { deferredPdfs };
     } catch {
       // Worker failed — fall back to sync rebuild
-      this.rebuild(mindRoot);
-      stop({ fileCount: this.fileCount, tokenCount: this.invertedIndex?.size ?? 0, method: 'sync_fallback' });
+      const result = this.rebuild(mindRoot, opts);
+      stop({
+        fileCount: this.fileCount,
+        tokenCount: this.invertedIndex?.size ?? 0,
+        deferredPdfCount: result.deferredPdfs.length,
+        method: 'sync_fallback',
+      });
+      return result;
     }
   }
 
@@ -165,6 +201,8 @@ export class SearchIndex {
     this.fileCount = data.fileCount;
     this.totalChars = data.totalChars;
     this.docLengths = new Map(Object.entries(data.docLengths).map(([k, v]) => [k, v as number]));
+    this.contents = new Map();
+    this.lowerContents = new Map();
 
     const inverted = new Map<string, Set<string>>();
     const fileTokensMap = new Map<string, Set<string>>();
@@ -181,13 +219,24 @@ export class SearchIndex {
     this.fileTokens = fileTokensMap;
   }
 
-  /** Full rebuild: read all files and build inverted index. */
-  rebuild(mindRoot: string): void {
+  /**
+   * Full rebuild: read all files and build inverted index.
+   *
+   * @param opts.pdfTimeBudgetMs Optional time budget (from rebuild start) for
+   *   inline PDF extraction. PDFs encountered after the budget elapses are
+   *   indexed by path only (placeholder content) and returned in
+   *   `deferredPdfs` so the caller can finish them asynchronously via
+   *   `updateFile`. Omit for an unbounded build.
+   */
+  rebuild(mindRoot: string, opts: { pdfTimeBudgetMs?: number } = {}): { deferredPdfs: string[] } {
     const stop = telemetry.startTimer('search.index.rebuild');
+    const pdfDeadline = opts.pdfTimeBudgetMs === undefined ? null : Date.now() + opts.pdfTimeBudgetMs;
     const allFiles = collectAllFiles(mindRoot);
     const inverted = new Map<string, Set<string>>();
     const docLengths = new Map<string, number>();
     const fileTokensMap = new Map<string, Set<string>>();
+    const contents = new Map<string, string>();
+    const deferredPdfs: string[] = [];
     let totalChars = 0;
     let tokenCount = 0;
 
@@ -196,13 +245,19 @@ export class SearchIndex {
       const ext = path.extname(filePath).toLowerCase();
 
       if (ext === '.pdf') {
-        // PDF: extract text from binary via pdfjs-dist child process
-        try {
-          const resolved = resolveExistingSafe(mindRoot, filePath);
-          content = extractPdfText(resolved);
-          if (!content) continue;
-        } catch {
-          continue;
+        if (pdfDeadline !== null && Date.now() >= pdfDeadline) {
+          // Budget exhausted — index path tokens now, extract text later.
+          deferredPdfs.push(filePath);
+          content = '';
+        } else {
+          // PDF: extract text from binary via pdfjs-dist child process
+          try {
+            const resolved = resolveExistingSafe(mindRoot, filePath);
+            content = extractPdfText(resolved);
+            if (!content) continue;
+          } catch {
+            continue;
+          }
         }
       } else {
         try {
@@ -219,10 +274,11 @@ export class SearchIndex {
       if (content.length > MAX_CONTENT_LENGTH) {
         content = content.slice(0, MAX_CONTENT_LENGTH);
       }
+      contents.set(filePath, content);
 
       // Also index the file path itself
       const allText = filePath + '\n' + content;
-      const tokens = tokenize(allText);
+      const tokens = tokenizeSearchText(allText);
       tokenCount += tokens.size;
       fileTokensMap.set(filePath, tokens);
 
@@ -242,7 +298,10 @@ export class SearchIndex {
     this.docLengths = docLengths;
     this.totalChars = totalChars;
     this.fileTokens = fileTokensMap;
-    stop({ fileCount: allFiles.length, tokenCount });
+    this.contents = contents;
+    this.lowerContents = new Map();
+    stop({ fileCount: allFiles.length, tokenCount, deferredPdfCount: deferredPdfs.length });
+    return { deferredPdfs };
   }
 
   /** Clear the index. Next search will trigger a lazy rebuild. */
@@ -253,6 +312,8 @@ export class SearchIndex {
     this.docLengths.clear();
     this.totalChars = 0;
     this.fileTokens.clear();
+    this.contents.clear();
+    this.lowerContents.clear();
   }
 
   // ── Incremental updates ──────────────────────────────────────────────
@@ -264,8 +325,11 @@ export class SearchIndex {
   removeFile(filePath: string): void {
     if (!this.invertedIndex) return;
 
-    // Use reverse mapping for O(tokens-in-file) instead of O(all-tokens)
+    // Unknown path → no-op (must not corrupt fileCount / totalChars).
     const tokens = this.fileTokens.get(filePath);
+    if (tokens === undefined && !this.docLengths.has(filePath)) return;
+
+    // Use reverse mapping for O(tokens-in-file) instead of O(all-tokens)
     if (tokens) {
       for (const token of tokens) {
         this.invertedIndex.get(token)?.delete(filePath);
@@ -277,7 +341,28 @@ export class SearchIndex {
     const oldLen = this.docLengths.get(filePath) ?? 0;
     this.totalChars -= oldLen;
     this.docLengths.delete(filePath);
+    this.contents.delete(filePath);
+    this.lowerContents.delete(filePath);
     this.fileCount = Math.max(0, this.fileCount - 1);
+  }
+
+  /**
+   * Remove a file — or a whole directory subtree — from the index.
+   * Matches the exact path plus any path under `relPath + '/'` (no
+   * name-prefix false positives like `Projects-extra/` for `Projects`).
+   * Returns the removed file paths.
+   */
+  removePath(relPath: string): string[] {
+    if (!this.invertedIndex) return [];
+    const prefix = relPath.endsWith('/') ? relPath : relPath + '/';
+    const removed: string[] = [];
+    for (const filePath of [...this.docLengths.keys()]) {
+      if (filePath === relPath || filePath.startsWith(prefix)) {
+        this.removeFile(filePath);
+        removed.push(filePath);
+      }
+    }
+    return removed;
   }
 
   /**
@@ -286,6 +371,7 @@ export class SearchIndex {
    */
   addFile(mindRoot: string, filePath: string): void {
     if (!this.invertedIndex) return;
+    if (isIgnoredTreePath(filePath, undefined, readMindosIgnoreFile(mindRoot))) return;
 
     let content: string;
     const ext = path.extname(filePath).toLowerCase();
@@ -308,8 +394,10 @@ export class SearchIndex {
     if (content.length > MAX_CONTENT_LENGTH) {
       content = content.slice(0, MAX_CONTENT_LENGTH);
     }
+    this.contents.set(filePath, content);
+    this.lowerContents.delete(filePath);
     const allText = filePath + '\n' + content;
-    const tokens = tokenize(allText);
+    const tokens = tokenizeSearchText(allText);
     this.fileTokens.set(filePath, tokens);
 
     for (const token of tokens) {
@@ -328,6 +416,10 @@ export class SearchIndex {
    */
   updateFile(mindRoot: string, filePath: string): void {
     if (!this.invertedIndex) return;
+    if (isIgnoredTreePath(filePath, undefined, readMindosIgnoreFile(mindRoot))) {
+      this.removeFile(filePath);
+      return;
+    }
     this.removeFile(filePath);
     this.addFile(mindRoot, filePath);
   }
@@ -363,6 +455,48 @@ export class SearchIndex {
     return this.invertedIndex.get(token)?.size ?? 0;
   }
 
+  /** All indexed file paths (relative to the built root). */
+  getAllFiles(): string[] {
+    return [...this.docLengths.keys()];
+  }
+
+  /**
+   * Truncated content of an indexed file, served from memory.
+   * After `load()` (contents are not persisted) the content is lazily
+   * re-read from disk once and cached. Returns null for unknown files
+   * or unreadable content.
+   */
+  getContent(mindRoot: string, filePath: string): string | null {
+    if (!this.invertedIndex) return null;
+    const cached = this.contents.get(filePath);
+    if (cached !== undefined) return cached;
+    if (!this.docLengths.has(filePath)) return null;
+
+    let content: string;
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.pdf') {
+      try {
+        content = extractPdfText(resolveExistingSafe(mindRoot, filePath));
+      } catch { return null; }
+    } else {
+      try { content = readFile(mindRoot, filePath); } catch { return null; }
+    }
+    if (content.length > MAX_CONTENT_LENGTH) content = content.slice(0, MAX_CONTENT_LENGTH);
+    this.contents.set(filePath, content);
+    return content;
+  }
+
+  /** Lowercased counterpart of `getContent`, derived lazily and cached. */
+  getLowerContent(mindRoot: string, filePath: string): string | null {
+    const cached = this.lowerContents.get(filePath);
+    if (cached !== undefined) return cached;
+    const content = this.getContent(mindRoot, filePath);
+    if (content === null) return null;
+    const lower = content.toLowerCase();
+    this.lowerContents.set(filePath, lower);
+    return lower;
+  }
+
   /**
    * Get candidates via UNION of token sets (for BM25 multi-term scoring).
    * Unlike getCandidates (intersection), this returns any file matching any token.
@@ -377,7 +511,7 @@ export class SearchIndex {
     if (!query.trim()) return null;
     if (!this.invertedIndex) return null;
 
-    const tokens = tokenize(query.toLowerCase().trim());
+    const tokens = tokenizeSearchText(query.toLowerCase().trim());
     if (tokens.size === 0) return null;
 
     // Count how many query tokens each file matches
@@ -422,7 +556,7 @@ export class SearchIndex {
     if (!query.trim()) return null;
     if (!this.invertedIndex) return null;
 
-    const tokens = tokenize(query.toLowerCase().trim());
+    const tokens = tokenizeSearchText(query.toLowerCase().trim());
     // No tokens produced → query is a substring/single-char that the index
     // cannot resolve. Return null so the caller falls back to full scan,
     // preserving pre-index indexOf behavior for partial-word queries.
@@ -458,12 +592,15 @@ export class SearchIndex {
     if (!this.invertedIndex) return;
 
     const data: PersistedIndex = {
-      version: 1,
+      version: 2,
       builtForRoot: this.builtForRoot ?? '',
       fileCount: this.fileCount,
       totalChars: this.totalChars,
       docLengths: Object.fromEntries(this.docLengths),
       invertedIndex: {},
+      fileSignature: this.builtForRoot
+        ? buildFileSignature(this.builtForRoot, [...this.docLengths.keys()]) ?? ''
+        : '',
       timestamp: Date.now(),
     };
 
@@ -498,43 +635,18 @@ export class SearchIndex {
     let data: PersistedIndex;
     try { data = JSON.parse(raw); } catch { return false; }
 
-    if (data.version !== 1 || data.builtForRoot !== mindRoot) return false;
+    if (data.version !== 2 || data.builtForRoot !== mindRoot) return false;
 
-    // Check 1: file count on disk must match indexed count
-    // This catches new files created or files deleted while process was down
+    const currentIgnoredPaths = readMindosIgnoreFile(mindRoot);
     const currentFiles = collectAllFiles(mindRoot);
     if (currentFiles.length !== data.fileCount) return false;
-
-    // Check 2: mtime sampling — check every file if ≤50, otherwise sample 50
-    const docPaths = Object.keys(data.docLengths);
-    const sampleSize = Math.min(50, docPaths.length);
-    if (sampleSize === docPaths.length) {
-      // Small index: check all files
-      for (const dp of docPaths) {
-        try {
-          const stat = fs.statSync(resolveExistingSafe(mindRoot, dp));
-          if (stat.mtimeMs > data.timestamp) return false;
-        } catch {
-          return false; // file deleted
-        }
-      }
-    } else {
-      // Large index: sample evenly + always check the last few (most likely to be recent)
-      const step = Math.max(1, Math.floor(docPaths.length / 40));
-      const sampled = new Set<number>();
-      // Evenly spaced samples
-      for (let i = 0; i < docPaths.length; i += step) sampled.add(i);
-      // Always check the last 10 files (most recently added to the index)
-      for (let i = Math.max(0, docPaths.length - 10); i < docPaths.length; i++) sampled.add(i);
-
-      for (const idx of sampled) {
-        try {
-          const stat = fs.statSync(resolveExistingSafe(mindRoot, docPaths[idx]));
-          if (stat.mtimeMs > data.timestamp) return false;
-        } catch {
-          return false;
-        }
-      }
+    const currentSignature = buildFileSignature(mindRoot, currentFiles);
+    if (!currentSignature || currentSignature !== data.fileSignature) return false;
+    if (
+      Object.keys(data.docLengths).some((filePath) => isIgnoredTreePath(filePath, undefined, currentIgnoredPaths))
+      || Object.values(data.invertedIndex).some((files) => files.some((filePath) => isIgnoredTreePath(filePath, undefined, currentIgnoredPaths)))
+    ) {
+      return false;
     }
 
     // Restore state
@@ -552,5 +664,6 @@ interface PersistedIndex {
   totalChars: number;
   docLengths: Record<string, number>;
   invertedIndex: Record<string, string[]>;
+  fileSignature: string;
   timestamp: number;
 }

@@ -4,11 +4,11 @@
 
 | Command | Description |
 | :--- | :--- |
-| `mindos` | Show help or start using the mode saved in `~/.mindos/config.json` |
+| `mindos` | Open the MindOS AI Agent REPL |
 | `mindos onboard` / `mindos init` | Interactive setup (config, template, start mode) |
-| `mindos onboard --install-daemon` | Onboard + install and start background service |
+| `mindos onboard --install-daemon` | Onboard + install and start background service (macOS/Linux only) |
 | `mindos start` | Start Web + MCP services (foreground, production mode) |
-| `mindos start --daemon` | Install + start as a background OS service (survives terminal close, auto-restarts on crash) |
+| `mindos start --daemon` | Install + start as a background OS service on macOS/Linux (survives terminal close, auto-restarts on crash) |
 | `mindos dev` | Start Web + MCP services (dev mode, hot reload via webpack) |
 | `mindos open` | Open the Web UI in the default browser |
 | `mindos stop` | Stop running MindOS processes |
@@ -29,7 +29,8 @@
 | `mindos space create <name>` | Create a new space |
 | `mindos space info <name>` | Show space details |
 | `mindos search "<query>"` | Search knowledge base via API |
-| `mindos ask "<question>"` | Ask AI a question using your knowledge base |
+| `mindos "<task>"` / `mindos -p "<task>"` | Run the MindOS AI Agent with your knowledge base |
+| `mindos agent [-p "<task>"]` | Explicit stable agent command for scripts |
 | `mindos agent list` | List detected AI Agents |
 | `mindos agent info <name>` | Show Agent details and MCP config |
 | `mindos api <METHOD> <path>` | Raw API passthrough (GET/POST/PUT/DELETE) |
@@ -48,8 +49,9 @@
 | Command | Description |
 | :--- | :--- |
 | `mindos mcp` | Start MCP server only |
-| `mindos mcp install` | Auto-install MCP config into your Agent (interactive) |
-| `mindos mcp install -g -y` | One-shot global install with defaults |
+| `mindos mcp install` | Auto-install or repair MCP config and MindOS Skill for your Agent (interactive) |
+| `mindos mcp install -g -y` | One-shot global MCP + Skill install with defaults |
+| `mindos doctor agents [name]` | Verify agent-facing MCP, command, and Skill readiness |
 | `mindos token` | Show auth token and per-agent MCP config snippets |
 
 The MCP server source of truth is `packages/mindos/src/protocols/mcp-server`; packaged installs use the prebuilt `dist/protocols/mcp-server/index.cjs` bundle inside the MindOS runtime package.

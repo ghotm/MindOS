@@ -68,8 +68,8 @@ mindos/
 
 | 端点 | 功能 |
 |------|------|
-| `POST /api/ask` | AI 对话 — 流式输出，自动注入 bootstrap + skill |
-| `GET /api/ask-sessions` | 多轮对话历史 |
+| `POST /api/agent/sessions/:sessionId/turns` | Agent turn — SSE 流式输出，按 runtime/permission/context 组装本轮请求 |
+| `GET /api/agent/sessions` | 多轮对话历史 |
 | `POST /api/auth` | Token 认证 |
 | `GET /api/backlinks?path=` | 反向链接查询 |
 | `GET /api/bootstrap` | Agent 上下文引导加载 |
@@ -93,6 +93,7 @@ mindos/
 | `GET /api/update-check` | 检查更新 |
 | `GET /api/mcp/agents` | MCP Agent列表 |
 | `POST /api/mcp/install` | MCP安装 |
+| `POST /api/mcp/copy-server` | 将已配置的 MCP Server 复制/安装到另一个 Agent |
 | `POST /api/mcp/install-skill` | Skill安装 |
 | `GET /api/mcp/status` | MCP状态 |
 | `GET /api/setup` | 安装设置 |
@@ -117,6 +118,7 @@ mindos/
 | `GET /api/workflows` | 工作流定义 CRUD |
 | `POST /api/mcp/restart` | MCP Server 重启 |
 | `GET /api/settings/list-models` | 可用模型列表 |
+| `POST /api/settings/model-thinking` | 具体模型支持的 thinking effort |
 | `GET /api/update-status` | 更新进度 |
 | `POST /api/uninstall` | 卸载清理 |
 | `GET /api/inbox` | Inbox 收件箱 |
@@ -126,7 +128,7 @@ mindos/
 | `GET /api/file/raw` | 原始文件内容（无解析） |
 | `POST /api/mcp/direct-tools` | MCP 工具直接调用 |
 | `GET /api/mcp/tools` | MCP 工具列表 |
-| `POST /api/mcp/uninstall` | MCP Agent 卸载 |
+| `POST /api/mcp/uninstall` | MCP Agent 卸载；可指定 `serverName` 移除非 MindOS server |
 | `POST /api/agents/copy-skill` | 跨 Agent 复制 Skill |
 | `GET/POST /api/agents/custom` | 自定义 Agent CRUD |
 | `POST /api/agents/custom/detect` | 自定义 Agent 检测 |
@@ -148,7 +150,7 @@ mindos/
 | FileTree | 861 行 | 619 行 + FileTreeContextMenus.tsx, useDirectoryDragDrop hook | -28% |
 | SyncTab | 775 行 | 556 行 + SyncEmptyState.tsx | -28% |
 | AgentsSkillsSection | 869 行 | 655 行 + AgentsSkillsByAgent.tsx | -25% |
-| AskContent | 771 行 | 771 行 | 跳过 (编排型组件，拆分反增复杂度) |
+| ChatContent | 771 行 | 771 行 | 跳过 (编排型组件，拆分反增复杂度) |
 
 **插件渲染器 (14个)：**
 
@@ -315,6 +317,8 @@ Web 的 `packages/web/app/api/file/route.ts` 只保留 Next.js adapter：读取 
 
 **核心源码：** `packages/mindos/src/protocols/acp` 是 ACP source of truth，负责类型、Agent descriptor、注册表、安装探测、subprocess 生命周期和 session 管理，并通过 `@geminilight/mindos/protocols/acp` 暴露给 Web adapters。
 
+**自定义 ACP Agent：** `settings.acpAgents` 不只覆盖内置 descriptor，也可声明 custom ACP adapter（`name` / `description` / `command` / `args` / `env` / `detectCommands` / `presenceDirs` / `installCmd`）。检测层会把启用的 custom adapter 纳入 `/api/acp/detect` 与 `/api/agent-runtimes?scope=acp`，session 层会先从 settings 解析 custom registry entry，再回退 CDN / built-in registry；`enabled:false` 表示从检测和运行时列表跳过。
+
 **Web 适配：** `packages/web/lib/acp` 只保留 thin adapters、A2A bridge 和 `acp-tools`。用户配置通过 Web settings 注入为 `overrides`，核心包不读取 Web-only settings。
 
 **SDK 集成：** `packages/mindos/src/protocols/acp/subprocess.ts` 使用 SDK `ClientSideConnection` + `ndJsonStream` 建立连接，`packages/mindos/src/protocols/acp/session.ts` 通过 SDK 方法管理完整生命周期（initialize → authenticate → session/new → prompt → cancel → close）
@@ -323,7 +327,7 @@ Web 的 `packages/web/app/api/file/route.ts` 只保留 Next.js adapter：读取 
 
 ### 8. Agent 支持体系
 
-**MCP Agent：26 个**（`packages/web/lib/mcp-agents.ts` 为 Web/API 单一真实来源，`packages/mindos/bin/lib/mcp-agents.js` 为 CLI 同步入口）；**ACP 注册表：31+ 个**（独立计数）。
+**MCP Agent：27 个**（`packages/web/lib/mcp-agents.ts` 为 Web/API 单一真实来源，`packages/mindos/bin/lib/mcp-agents.js` 为 CLI 同步入口）；**ACP 注册表：30+ 个**（独立计数）。
 
 | # | Agent | 全局配置路径 | 格式 | 配置 Key | CLI |
 |---|-------|-------------|------|---------|-----|
@@ -336,31 +340,33 @@ Web 的 `packages/web/app/api/file/route.ts` 只保留 Next.js adapter：读取 
 | 7 | Gemini CLI | `~/.gemini/settings.json` | json | `mcpServers` | `gemini` |
 | 8 | OpenClaw | `~/.openclaw/mcp.json` | json | `mcpServers` | `openclaw` |
 | 9 | CodeBuddy | `~/.codebuddy/mcp.json` | json | `mcpServers` | `codebuddy` |
-| 10 | iFlow CLI | `~/.iflow/settings.json` | json | `mcpServers` | `iflow` |
-| 11 | Kimi Code | `~/.kimi/mcp.json` | json | `mcpServers` | `kimi` |
-| 12 | OpenCode | `~/.config/opencode/config.json` | json | `mcpServers` | `opencode` |
-| 13 | Pi | `~/.pi/agent/mcp.json` | json | `mcpServers` | `pi` |
-| 14 | Augment | `~/.augment/settings.json` | json | `mcpServers` | `auggie` |
-| 15 | Qwen Code | `~/.qwen/settings.json` | json | `mcpServers` | `qwen` |
-| 16 | Qoder | `~/.qoder.json` | json | `mcpServers` | `qoder` |
-| 17 | Trae CN | Application Support (平台相关) | json | `mcpServers` | `trae-cli` |
-| 18 | Roo Code | VS Code globalStorage | json | `mcpServers` | — |
-| 19 | GitHub Copilot | `Code/User/mcp.json` (平台相关) | json | **`servers`** | `code` |
-| 20 | Codex | `~/.codex/config.toml` | **toml** | **`mcp_servers`** | `codex` |
-| 21 | Antigravity | `~/.gemini/antigravity/mcp_config.json` | json | `mcpServers` | `agy` |
-| 22 | QClaw | `~/.qclaw/mcp.json` | json | `mcpServers` | `qclaw` |
-| 23 | WorkBuddy | `~/.workbuddy/mcp.json` | json | `mcpServers` | `workbuddy` |
-| 24 | Lingma | `~/.lingma/mcp.json` | json | `mcpServers` | — |
-| 25 | CoPaw | `~/.copaw/config.json` | json | **`mcp`** | `copaw` |
-| 26 | Hermes | `~/.hermes/config.yaml` | yaml | **`mcp_servers`** | `hermes` |
+| 10 | Kimi Code | `~/.kimi/mcp.json` | json | `mcpServers` | `kimi` |
+| 11 | OpenCode | `~/.config/opencode/config.json` | json | `mcpServers` | `opencode` |
+| 12 | Kilo Code | `~/.config/kilo/kilo.jsonc`（兼容读 `kilo.json`） | json/jsonc | **`mcp`** (`local` / `remote`) | `kilo` |
+| 13 | Warp | `~/.warp/.mcp.json` | json | `mcpServers` | — |
+| 14 | Pi | `~/.pi/agent/mcp.json` | json | `mcpServers` | `pi` |
+| 15 | Augment | `~/.augment/settings.json` | json | `mcpServers` | `auggie` |
+| 16 | Qwen Code | `~/.qwen/settings.json` | json | `mcpServers` | `qwen` |
+| 17 | Qoder | `~/.qoder.json` | json | `mcpServers` | `qoder` |
+| 18 | Trae CN | Application Support (平台相关) | json | `mcpServers` | `trae-cli` |
+| 19 | Roo Code | VS Code globalStorage | json | `mcpServers` | — |
+| 20 | GitHub Copilot | `Code/User/mcp.json` (平台相关) | json | **`servers`** | `code` |
+| 21 | Codex | `~/.codex/config.toml` | **toml** | **`mcp_servers`** | `codex` |
+| 22 | Antigravity | `~/.gemini/antigravity/mcp_config.json` | json | `mcpServers` | `agy` |
+| 23 | QClaw | `~/.qclaw/mcp.json` | json | `mcpServers` | `qclaw` |
+| 24 | WorkBuddy | `~/.workbuddy/mcp.json` | json | `mcpServers` | `workbuddy` |
+| 25 | Lingma | `~/.lingma/mcp.json` | json | `mcpServers` | — |
+| 26 | CoPaw | `~/.copaw/config.json` | json | **`mcp`** | `copaw` |
+| 27 | Hermes | `~/.hermes/config.yaml` | yaml | **`mcp_servers`** | `hermes` |
 
 **特殊格式 Agent：**
 - **GitHub Copilot**：配置 key 为 `servers`（非 `mcpServers`）
 - **Codex**：TOML 格式，key 为 `mcp_servers`
+- **Kilo Code**：JSON/JSONC 配置，key 为 `mcp`；stdio 写入 `{ type:'local', command:['mindos','mcp'], environment:{...}, enabled:true }`，HTTP 写入 `{ type:'remote', url, headers?, enabled:true }`
 - **CoPaw**：key 为 `mcp`，嵌套路径 `mcp.clients`
 - **Hermes**：YAML 格式，key 为 `mcp_servers`
 
-**所有 Agent 均使用 stdio 传输。** CLI 和 TS 注册表共享同一数据源（`packages/mindos/bin/lib/mcp-agents.js` 导入自 TS 编译产物）。
+**默认使用 stdio 传输；支持 HTTP 的路径按各 Agent 的配置格式写入。** Web / Product Server / CLI 三处注册表需保持同步。
 
 新增 Agent 支持时需改动的文件：
 
@@ -379,9 +385,10 @@ Web 的 `packages/web/app/api/file/route.ts` 只保留 Next.js adapter：读取 
 ### AI 对话流
 
 ```
-用户消息 → POST /api/ask
-    ├── 注入：Skill + Bootstrap (INSTRUCTION + README + CONFIG) + 当前文件 + 附件
-    └── pi-coding-agent session → Anthropic/OpenAI → 24 个 KB tools + 6 个 A2A tools + 2 个 ACP tools + 2 个 IM tools → 流式输出
+用户消息 → POST /api/agent/sessions/:sessionId/turns
+    ├── 注入：本轮 context（时间、session context、初始化材料、当前/附加文件、上传文件、active recall）
+    ├── MindOS Pi runtime：pi-coding-agent session + MindOS extension/tools
+    └── 外部 runtime：Codex / Claude Code / ACP adapter → SSE 流式输出
 ```
 
 ### 外部 Agent (MCP)

@@ -1,6 +1,9 @@
 import { toast } from '@/lib/toast';
 import type { useLocale } from '@/lib/stores/locale-store';
 import { isBinaryCaptureName } from '@/lib/capture-formats';
+import { saveInboxFiles, type InboxSaveInput, type InboxSaveResult } from '@/lib/inbox-client';
+import { notifyFilesChanged } from '@/lib/files-changed';
+import { openUrlWithBrowserBridge, requiresBrowserBridgeCapture } from '@/lib/browser-bridge';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB per file
 
@@ -97,16 +100,23 @@ function showQuickDropToast(
   }
 }
 
+export interface QuickDropInboxResult extends InboxSaveResult {
+  ok: boolean;
+  oversized: string[];
+  unreadable: string[];
+}
+
 export async function quickDropToInbox(
   files: File[],
   t: ReturnType<typeof useLocale>['t'],
-) {
-  const payload: Array<{ name: string; content: string; encoding?: string }> = [];
-  let oversizedCount = 0;
+): Promise<QuickDropInboxResult> {
+  const payload: InboxSaveInput[] = [];
+  const oversized: string[] = [];
+  const unreadable: string[] = [];
 
   for (const file of files) {
     if (file.size > MAX_FILE_SIZE) {
-      oversizedCount++;
+      oversized.push(file.name);
       continue;
     }
     try {
@@ -119,43 +129,39 @@ export async function quickDropToInbox(
         payload.push({ name: file.name, content: text });
       }
     } catch {
-      /* skip unreadable files */
+      unreadable.push(file.name);
     }
   }
 
   if (payload.length === 0) {
-    if (oversizedCount > 0) {
-      toast.error(t.inbox.tooLarge(oversizedCount), 4000);
+    if (oversized.length > 0) {
+      toast.error(t.inbox.tooLarge(oversized.length), 4000);
     } else if (files.length > 0) {
       toast.error(t.inbox.saveFailed, 4000);
     }
-    return;
+    return { ok: false, saved: [], skipped: [], oversized, unreadable };
   }
 
   try {
-    const res = await fetch('/api/inbox', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files: payload }),
-    });
+    const result = await saveInboxFiles(payload, t.inbox.saveFailed);
+    const saved = result.saved.length;
+    const formatSkipped = result.skipped.length;
 
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      console.error('[QuickDrop] Save failed:', data.error);
-      toast.error(t.inbox.saveFailed, 4000);
-      return;
+    showQuickDropToast(saved, formatSkipped, oversized.length, t);
+    if (saved > 0) {
+      notifyFilesChanged(result.saved.map(item => item.path));
+      window.dispatchEvent(new Event('mindos:inbox-updated'));
     }
-
-    const result = await res.json();
-    const saved = result.saved?.length ?? 0;
-    const formatSkipped = result.skipped?.length ?? 0;
-
-    showQuickDropToast(saved, formatSkipped, oversizedCount, t);
-    window.dispatchEvent(new Event('mindos:files-changed'));
-    window.dispatchEvent(new Event('mindos:inbox-updated'));
+    return {
+      ...result,
+      ok: saved > 0,
+      oversized,
+      unreadable,
+    };
   } catch (err) {
     console.error('[QuickDrop] Network error:', err);
     toast.error(t.inbox.saveFailed, 4000);
+    return { ok: false, saved: [], skipped: [], oversized, unreadable };
   }
 }
 
@@ -167,7 +173,18 @@ export async function quickDropToInbox(
 export async function clipUrlToInbox(
   url: string,
   t: ReturnType<typeof useLocale>['t'],
-): Promise<{ ok: boolean; title?: string }> {
+): Promise<{ ok: boolean; title?: string; browserBridgeOpened?: boolean }> {
+  if (requiresBrowserBridgeCapture(url)) {
+    try {
+      await openUrlWithBrowserBridge(url);
+      toast.success(t.inbox.browserBridgeOpened, 5000);
+      return { ok: false, browserBridgeOpened: true };
+    } catch {
+      toast.error(t.inbox.browserBridgeUnavailable, 6000);
+      return { ok: false };
+    }
+  }
+
   try {
     const res = await fetch('/api/inbox/clip', {
       method: 'POST',
@@ -175,16 +192,16 @@ export async function clipUrlToInbox(
       body: JSON.stringify({ url }),
     });
 
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
 
-    if (!res.ok) {
+    if (!res.ok || data.ok === false) {
       const msg = data.error || t.inbox.clipFailed;
       toast.error(msg, 4000);
       return { ok: false };
     }
 
     toast.success(t.inbox.clipSuccess(data.title || url), 3000);
-    window.dispatchEvent(new Event('mindos:files-changed'));
+    notifyFilesChanged(typeof data.fileName === 'string' ? [data.fileName] : undefined);
     window.dispatchEvent(new Event('mindos:inbox-updated'));
     return { ok: true, title: data.title };
   } catch (err) {
@@ -307,7 +324,10 @@ export async function quickDropToDirectory(
       return;
     }
 
-    const result = await res.json();
+    const result = await res.json() as {
+      created?: Array<{ path: string }>;
+      skipped?: unknown[];
+    };
     const saved = result.created?.length ?? 0;
     const skipped = result.skipped?.length ?? 0;
 
@@ -320,7 +340,7 @@ export async function quickDropToDirectory(
       if (skipped > 0) toast.error(t.inbox.savedWithSkipped(0, skipped), 4000);
     }
 
-    window.dispatchEvent(new Event('mindos:files-changed'));
+    notifyFilesChanged(result.created?.map(item => item.path));
   } catch (err) {
     console.error('[TreeDrop] Network error:', err);
     toast.error(t.inbox.saveFailed, 4000);

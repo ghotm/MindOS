@@ -1,36 +1,60 @@
 /**
- * Home tab — Spaces overview + recently active files.
+ * Home tab - Spaces overview, quick capture, and recently active files.
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
-  View,
-  Text,
   FlatList,
   Pressable,
   RefreshControl,
   StyleSheet,
+  Text,
+  View,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import QuickCaptureCard from '@/components/QuickCaptureCard';
+import RecentAgentActivityCard from '@/components/agent/RecentAgentActivityCard';
+import {
+  EmptyState,
+  InlineBanner,
+  ListRow,
+  MindScreen,
+  ScreenSection,
+} from '@/components/ui/MobileScaffold';
+import { useRecentAgentActivity } from '@/hooks/useRecentAgentActivity';
 import { mindosClient } from '@/lib/api-client';
 import { useConnectionStore } from '@/lib/connection-store';
-import QuickCaptureCard from '@/components/QuickCaptureCard';
 import { flattenFiles, formatRelativeTime } from '@/lib/file-tree';
+import { getHomeEmptyState } from '@/lib/home-state';
+import { getFileNodeIcon } from '@/lib/mobile-icons';
+import { filesTabHref, viewFileHref } from '@/lib/mobile-navigation';
+import { colors, radius, spacing, typography } from '@/lib/theme';
 import type { FileNode } from '@/lib/types';
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { serverVersion, hostname } = useConnectionStore();
+  const { serverVersion, hostname, status } = useConnectionStore();
   const [tree, setTree] = useState<FileNode[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const {
+    summary: recentAgentActivitySummary,
+    loading: recentAgentActivityLoading,
+    refreshing: recentAgentActivityRefreshing,
+    error: recentAgentActivityError,
+    lastCheckedAt: recentAgentActivityLastCheckedAt,
+    refresh: refreshRecentAgentActivity,
+  } = useRecentAgentActivity({
+    enabled: status === 'connected',
+    limit: 6,
+  });
 
   const loadData = useCallback(async () => {
     try {
       setError('');
-      const files = await mindosClient.getFileTree();
-      setTree(files);
+      const result = await mindosClient.getFileTreeWithStatus();
+      setTree(result.tree);
+      setError(result.stale ? (result.error ?? 'Showing cached Home data. Pull to retry.') : '');
     } catch (e) {
       setError((e as Error).message);
     }
@@ -42,17 +66,28 @@ export default function HomeScreen() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await loadData();
+    await Promise.all([
+      loadData(),
+      status === 'connected' ? refreshRecentAgentActivity() : Promise.resolve(),
+    ]);
     setRefreshing(false);
-  }, [loadData]);
+  }, [loadData, refreshRecentAgentActivity, status]);
 
   const spaces = tree.filter((n) => n.type === 'directory' && n.isSpace);
-  const recentFiles = flattenFiles(tree)
+  const allFiles = flattenFiles(tree);
+  const recentFiles = allFiles
+    .filter((file) => typeof file.mtime === 'number' && file.mtime > 0)
     .sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0))
     .slice(0, 10);
+  const emptyState = getHomeEmptyState({
+    fileCount: allFiles.length,
+    spaceCount: spaces.length,
+    recentCount: recentFiles.length,
+    hasError: Boolean(error),
+  });
 
   return (
-    <SafeAreaView style={styles.container} edges={['left', 'right']}>
+    <MindScreen>
       <FlatList
         data={recentFiles}
         keyExtractor={(item) => item.path}
@@ -60,189 +95,240 @@ export default function HomeScreen() {
           <RefreshControl
             refreshing={refreshing}
             onRefresh={onRefresh}
-            tintColor="#c8873a"
+            tintColor={colors.amber}
           />
         }
         ListHeaderComponent={
           <View>
-            <View style={styles.statusRow}>
-              <View style={styles.statusDot} />
-              <Text style={styles.statusText}>
-                {hostname || 'MindOS'} · v{serverVersion}
-              </Text>
+            <View style={styles.heroCard}>
+              <View style={styles.heroCopy}>
+                <Text style={styles.heroEyebrow}>Mobile workspace</Text>
+                <Text style={styles.heroTitle} numberOfLines={1}>
+                  {hostname || 'MindOS'}
+                </Text>
+                <Text style={styles.heroMeta} numberOfLines={1}>
+                  {status === 'connected'
+                    ? `Connected · v${serverVersion || 'unknown'}`
+                    : status === 'connecting'
+                      ? 'Checking connection'
+                      : 'Offline control surface'}
+                </Text>
+              </View>
+              <View style={[
+                styles.statusBadge,
+                status === 'connected'
+                  ? styles.statusBadgeConnected
+                  : status === 'connecting'
+                    ? styles.statusBadgeChecking
+                    : styles.statusBadgeError,
+              ]}>
+                <View style={[
+                  styles.statusDot,
+                  status === 'connected'
+                    ? styles.statusDotConnected
+                    : status === 'connecting'
+                      ? styles.statusDotChecking
+                      : styles.statusDotError,
+                ]} />
+                <Text style={styles.statusBadgeText}>
+                  {status === 'connected' ? 'Ready' : status === 'connecting' ? 'Checking' : 'Offline'}
+                </Text>
+              </View>
             </View>
 
             {error ? (
-              <View style={styles.inlineErrorBanner}>
-                <View style={styles.inlineErrorContent}>
-                  <Ionicons name="cloud-offline-outline" size={18} color="#fca5a5" />
-                  <View style={styles.inlineErrorCopy}>
-                    <Text style={styles.inlineErrorTitle}>Home data is temporarily unavailable</Text>
-                    <Text style={styles.inlineErrorText}>{error}</Text>
-                  </View>
-                </View>
-                <Pressable style={styles.inlineRetryButton} onPress={loadData}>
-                  <Text style={styles.inlineRetryText}>Retry</Text>
-                </Pressable>
+              <View style={styles.bannerPad}>
+                <InlineBanner
+                  tone="error"
+                  title="Home data is temporarily unavailable"
+                  message={error}
+                  actionLabel="Retry"
+                  onAction={loadData}
+                />
               </View>
             ) : null}
 
-            <QuickCaptureCard onSaved={loadData} />
+            <View style={styles.quickCapturePad}>
+              <QuickCaptureCard onSaved={loadData} />
+            </View>
 
-            {spaces.length > 0 && (
-              <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Spaces</Text>
+            {status === 'connected' ? (
+              <ScreenSection>
+                <RecentAgentActivityCard
+                  summary={recentAgentActivitySummary}
+                  loading={recentAgentActivityLoading}
+                  refreshing={recentAgentActivityRefreshing}
+                  error={recentAgentActivityError}
+                  lastCheckedAt={recentAgentActivityLastCheckedAt}
+                  onRefresh={refreshRecentAgentActivity}
+                  onOpenAll={() => router.push('/agent-runs')}
+                />
+              </ScreenSection>
+            ) : null}
+
+            {spaces.length > 0 ? (
+              <ScreenSection title="Spaces" subtitle="Jump into a Mind System area.">
                 <View style={styles.spacesGrid}>
                   {spaces.map((space) => (
                     <Pressable
                       key={space.path}
-                      style={styles.spaceCard}
-                      onPress={() => router.push(`/view/${space.path}` as any)}
+                      style={({ pressed }) => [styles.spaceCard, pressed && styles.pressed]}
+                      onPress={() => router.push(viewFileHref(space.path))}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${space.name}`}
                     >
-                      <Ionicons name="layers-outline" size={20} color="#c8873a" />
-                      <Text style={styles.spaceName} numberOfLines={1}>{space.name}</Text>
-                      <Text style={styles.spaceCount}>
-                        {space.children?.length ?? 0} items
-                      </Text>
+                      <View style={styles.spaceIcon}>
+                        <Ionicons name="layers-outline" size={18} color={colors.amber} />
+                      </View>
+                      <View style={styles.spaceCopy}>
+                        <Text style={styles.spaceName} numberOfLines={1}>{space.name}</Text>
+                        <Text style={styles.spaceCount}>
+                          {space.children?.length ?? 0} items
+                        </Text>
+                      </View>
                     </Pressable>
                   ))}
                 </View>
-              </View>
-            )}
+              </ScreenSection>
+            ) : null}
 
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Recently Active</Text>
-            </View>
+            <ScreenSection
+              title="Recently Active"
+              subtitle={recentFiles.length > 0 ? 'Files with the latest host activity.' : undefined}
+              style={recentFiles.length === 0 ? styles.emptySectionHeader : undefined}
+            />
           </View>
         }
         renderItem={({ item }) => (
-          <Pressable
-            style={styles.fileRow}
-            onPress={() => router.push(`/view/${item.path}` as any)}
-          >
-            <Ionicons
-              name={item.extension === '.csv' ? 'grid-outline' : 'document-text-outline'}
-              size={18}
-              color="#a8a29e"
-            />
-            <View style={styles.fileInfo}>
-              <Text style={styles.fileName} numberOfLines={1}>{item.name}</Text>
-              <Text style={styles.fileMeta}>
-                {item.mtime ? formatRelativeTime(item.mtime) : ''}
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={16} color="#44403c" />
-          </Pressable>
+          <ListRow
+            icon={getFileNodeIcon(item)}
+            title={item.name}
+            subtitle={item.mtime ? formatRelativeTime(item.mtime) : item.path}
+            onPress={() => router.push(viewFileHref(item.path))}
+          />
         )}
         ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Ionicons name="archive-outline" size={48} color="#44403c" />
-            <Text style={styles.emptyTitle}>Your mind is empty</Text>
-            <Text style={styles.emptyText}>
-              {error
-                ? 'Quick Capture is still available above. Retry Home data, or open Files directly.'
-                : 'Start with Quick Capture above, or create a full note in Files.'}
-            </Text>
-            <Pressable
-              style={styles.createBtn}
-              onPress={() => router.push('/(tabs)/files' as any)}
-            >
-              <Ionicons name="add-circle-outline" size={18} color="#fff" />
-              <Text style={styles.createBtnText}>Open Files</Text>
-            </Pressable>
-          </View>
+          <EmptyState
+            icon={emptyState?.icon ?? 'archive-outline'}
+            title={emptyState?.title ?? 'No recent activity yet'}
+            message={emptyState?.message ?? 'Open Files to browse your notes.'}
+            actionLabel={emptyState?.actionLabel ?? 'Open Files'}
+            onAction={() => router.push(filesTabHref)}
+          />
         }
       />
-    </SafeAreaView>
+    </MindScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#1a1917' },
-  statusRow: {
+  heroCard: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.lg,
+    marginBottom: spacing.sm,
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    padding: spacing.lg,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 8,
+    gap: spacing.md,
+  },
+  heroCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: spacing.xs,
+  },
+  heroEyebrow: {
+    color: colors.textSubtle,
+    fontSize: typography.caption,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  heroTitle: {
+    color: colors.text,
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  heroMeta: {
+    color: colors.textMuted,
+    fontSize: typography.body,
+  },
+  statusBadge: {
+    minHeight: 32,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    borderWidth: 1,
+  },
+  statusBadgeConnected: {
+    backgroundColor: colors.successSoft,
+    borderColor: colors.successBorder,
+  },
+  statusBadgeChecking: {
+    backgroundColor: colors.warningSoft,
+    borderColor: colors.warningBorder,
+  },
+  statusBadgeError: {
+    backgroundColor: colors.errorSoft,
+    borderColor: colors.errorBorder,
   },
   statusDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#22c55e',
   },
-  statusText: { fontSize: 13, color: '#a8a29e' },
-  section: { paddingHorizontal: 16, paddingTop: 20, paddingBottom: 8 },
-  sectionTitle: { fontSize: 18, fontWeight: '700', color: '#fafaf9' },
+  statusDotConnected: { backgroundColor: colors.success },
+  statusDotChecking: { backgroundColor: colors.warning },
+  statusDotError: { backgroundColor: colors.error },
+  statusBadgeText: {
+    color: colors.text,
+    fontSize: typography.caption,
+    fontWeight: '700',
+  },
+  bannerPad: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
+  },
+  quickCapturePad: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.lg,
+  },
   spacesGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-    marginTop: 12,
+    gap: spacing.sm,
   },
   spaceCard: {
-    backgroundColor: '#292524',
-    borderRadius: 12,
-    padding: 16,
-    minWidth: 140,
-    gap: 6,
+    minHeight: 58,
+    borderRadius: radius.lg,
     borderWidth: 1,
-    borderColor: '#44403c',
-  },
-  spaceName: { fontSize: 15, fontWeight: '600', color: '#fafaf9' },
-  spaceCount: { fontSize: 12, color: '#78716c' },
-  fileRow: {
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    padding: spacing.md,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    gap: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#292524',
+    gap: spacing.md,
   },
-  fileInfo: { flex: 1 },
-  fileName: { fontSize: 15, color: '#fafaf9' },
-  fileMeta: { fontSize: 12, color: '#78716c', marginTop: 2 },
-  emptyContainer: {
+  pressed: {
+    opacity: 0.78,
+  },
+  spaceIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: radius.md,
     alignItems: 'center',
-    paddingTop: 80,
-    gap: 12,
+    justifyContent: 'center',
+    backgroundColor: colors.amberSoft,
   },
-  emptyTitle: { fontSize: 18, fontWeight: '600', color: '#a8a29e' },
-  emptyText: { fontSize: 14, color: '#78716c', textAlign: 'center', paddingHorizontal: 40 },
-  createBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#c8873a',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 8,
-    marginTop: 12,
+  spaceCopy: {
+    flex: 1,
+    minWidth: 0,
   },
-  createBtnText: { color: '#fff', fontWeight: '600', fontSize: 14 },
-  inlineErrorBanner: {
-    marginHorizontal: 16,
-    marginTop: 12,
-    marginBottom: 4,
-    padding: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.25)',
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    gap: 10,
+  spaceName: { fontSize: typography.bodyLarge, fontWeight: '700', color: colors.text },
+  spaceCount: { fontSize: typography.caption, color: colors.textSubtle, marginTop: 2 },
+  emptySectionHeader: {
+    paddingBottom: 0,
   },
-  inlineErrorContent: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
-  inlineErrorCopy: { flex: 1 },
-  inlineErrorTitle: { fontSize: 13, fontWeight: '600', color: '#fecaca' },
-  inlineErrorText: { fontSize: 12, color: '#fca5a5', marginTop: 2 },
-  inlineRetryButton: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#c8873a',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-  },
-  inlineRetryText: { color: '#fff', fontWeight: '600', fontSize: 13 },
 });

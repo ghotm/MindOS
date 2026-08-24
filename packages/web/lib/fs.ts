@@ -1,7 +1,10 @@
 import fs from 'fs';
 import path from 'path';
-import Fuse, { FuseResultMatch } from 'fuse.js';
 import { MindOSError, ErrorCodes } from '@/lib/errors';
+import {
+  resolveExistingSafe,
+  resolveSafe,
+} from './core/security';
 import {
   readFile as coreReadFile,
   writeFile as coreWriteFile,
@@ -12,47 +15,67 @@ import {
   renameFile as coreRenameFile,
   renameSpaceDirectory as coreRenameSpaceDirectory,
   moveFile as coreMoveFile,
+} from './core/fs-ops';
+import {
   readLines as coreReadLines,
   insertLines as coreInsertLines,
   updateLines as coreUpdateLines,
   appendToFile as coreAppendToFile,
   insertAfterHeading as coreInsertAfterHeading,
   updateSection as coreUpdateSection,
+} from './core/lines';
+import {
   appendCsvRow as coreAppendCsvRow,
+} from './core/csv';
+import {
   findBacklinks as coreFindBacklinks,
+} from './core/backlinks';
+import {
   isGitRepo as coreIsGitRepo,
   gitLog as coreGitLog,
   gitShowFile as coreGitShowFile,
-  invalidateSearchIndex,
-  updateSearchIndexFile,
-  addSearchIndexFile,
-  removeSearchIndexFile,
+} from './core/git';
+import {
   LinkIndex,
+} from './core/link-index';
+import {
   summarizeTopLevelSpaces,
+} from './core/list-spaces';
+import {
   appendContentChange as coreAppendContentChange,
   listContentChanges as coreListContentChanges,
   markContentChangesSeen as coreMarkContentChangesSeen,
   getContentChangeSummary as coreGetContentChangeSummary,
-  resolveExistingSafe,
-  resolveSafe,
-} from './core';
-import type { MindSpaceSummary } from './core';
-import type { ContentChangeEvent, ContentChangeInput, ContentChangeSummary } from './core';
+} from './core/content-changes';
+import type { MindSpaceSummary } from './core/list-spaces';
+import type { ContentChangeEvent, ContentChangeInput, ContentChangeSummary } from './core/content-changes';
 import { FileNode, SpacePreview } from './core/types';
-import { SearchMatch } from './types';
 import type { SearchPrewarmResponse } from './types';
-import { effectiveSopRoot } from './settings';
+import { effectiveMindRoot } from './mind-root';
+import {
+  notifySearchIndexInvalidated,
+  notifySearchIndexFileChanged,
+  notifySearchIndexPathRemoved,
+} from './core/search-index-bridge';
+import {
+  DEFAULT_IGNORED_DIRS,
+  MINDOS_IGNORE_FILE,
+  createSearchIgnoreMatcher,
+  type SearchIgnoredPathMatcher,
+} from './core/tree';
 import { extractPdfText } from './core/pdf-text';
 import { telemetry } from './telemetry';
+import { ensureDefaultMindSystemUpgrade } from './mind-system-upgrade';
+import { isDefaultMindSystemScaffoldFile } from './mind-system-scaffold';
 
 // ─── Root helpers ─────────────────────────────────────────────────────────────
 
 /** Resolved MIND_ROOT — respects settings file override, then env var, then default */
 export function getMindRoot(): string {
-  return effectiveSopRoot();
+  return effectiveMindRoot();
 }
 
-const IGNORED_DIRS = new Set(['.git', 'node_modules', 'app', '.next', '.DS_Store', '.media', 'mcp']);
+const IGNORED_DIRS = DEFAULT_IGNORED_DIRS;
 const ALLOWED_EXTENSIONS = new Set([
   '.md', '.csv', '.json', '.pdf',
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
@@ -66,22 +89,57 @@ const SYSTEM_FILES = new Set(['INSTRUCTION.md', 'README.md', 'CONFIG.json', 'CHA
 interface FileTreeCache {
   tree: FileNode[];
   allFiles: string[];
+  recentFiles: Array<{ path: string; mtime: number }>;
+  shapeSignature: string;
+  fileSignature: string;
   timestamp: number;
 }
 
 let _cache: FileTreeCache | null = null;
+let _knownFilePaths: Set<string> | null = null;
 const CACHE_TTL_MS = 30_000; // 30 seconds (file watcher still invalidates immediately on changes)
+const WATCHER_BACKED_CACHE_TTL_MS = 5 * 60_000;
+const WATCHER_MISS_SWEEP_MS = 60_000;
 
 let _treeVersion = 0;
+let _contentVersion = 0;
+
+// Core-search invalidation goes through `core/search-index-bridge` — a
+// dependency-free module — so this file (imported by app/layout for the
+// file tree) never pulls the core search/embedding stack into ordinary
+// page renders. If `core/search` was never loaded, the hooks are absent
+// and the notifications are dropped (the lazy build reads fresh state).
+
+function invalidateSearchIndexLazy(): void {
+  notifySearchIndexInvalidated();
+}
+
+function updateSearchIndexFileLazy(mindRoot: string, filePath: string): void {
+  notifySearchIndexFileChanged(mindRoot, filePath);
+}
+
+function addSearchIndexFileLazy(mindRoot: string, filePath: string): void {
+  // The index's updateFile handles both add and modify.
+  notifySearchIndexFileChanged(mindRoot, filePath);
+}
+
+function removeSearchIndexFileLazy(filePath: string): void {
+  notifySearchIndexPathRemoved(filePath);
+}
 
 function buildCache(root: string): FileTreeCache {
   const stop = telemetry.startTimer('tree.cache.build');
+  ensureDefaultMindSystemUpgrade(root);
   const tree = buildFileTree(root);
   const allFiles: string[] = [];
+  const shapePaths: string[] = [];
   let directoryCount = 0;
   function collect(nodes: FileNode[]) {
     for (const n of nodes) {
-      if (n.type === 'file') allFiles.push(n.path);
+      shapePaths.push(`${n.type}:${n.path}`);
+      if (n.type === 'file') {
+        if (!isDefaultMindSystemScaffoldFile(root, n.path)) allFiles.push(n.path);
+      }
       else if (n.children) {
         directoryCount++;
         collect(n.children);
@@ -89,37 +147,132 @@ function buildCache(root: string): FileTreeCache {
     }
   }
   collect(tree);
+  const { fileSignature, recentFiles } = buildFileStats(root, allFiles);
   stop({ fileCount: allFiles.length, directoryCount });
-  return { tree, allFiles, timestamp: Date.now() };
+  return { tree, allFiles, recentFiles, shapeSignature: shapePaths.join('\n'), fileSignature, timestamp: Date.now() };
 }
 
-function sameFileList(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false;
-  const set = new Set(a);
-  return b.every(p => set.has(p));
+function buildFileStats(root: string, allFiles: string[]): {
+  fileSignature: string;
+  recentFiles: Array<{ path: string; mtime: number }>;
+} {
+  const recentFiles: Array<{ path: string; mtime: number }> = [];
+  const fileSignature = allFiles.map((filePath) => {
+    try {
+      const stat = fs.statSync(path.join(root, filePath));
+      recentFiles.push({ path: filePath, mtime: stat.mtimeMs });
+      return JSON.stringify([filePath, stat.size, stat.mtimeMs]);
+    } catch {
+      return JSON.stringify([filePath, 'missing']);
+    }
+  }).join('\n');
+  recentFiles.sort((a, b) => b.mtime - a.mtime);
+  return { fileSignature, recentFiles };
 }
 
-/** Monotonically increasing counter — bumped on every file mutation so the
- *  client can cheaply detect changes without rebuilding the full tree. */
+function refreshExpiredCache(): FileTreeCache {
+  const next = buildCache(getMindRoot());
+  if (_cache) {
+    const shapeChanged = _cache.shapeSignature !== next.shapeSignature;
+    const contentChanged = _cache.fileSignature !== next.fileSignature;
+    if (shapeChanged) _treeVersion++;
+    if (contentChanged) {
+      _contentVersion++;
+      _searchIndex = null;
+      invalidateSearchIndexLazy();
+      _linkIndex.invalidate();
+    }
+  }
+  _cache = next;
+  _knownFilePaths = new Set(next.allFiles);
+  return _cache;
+}
+
+function rebuildCacheForVersionCheck(): FileTreeCache {
+  _cache = buildCache(getMindRoot());
+  _knownFilePaths = new Set(_cache.allFiles);
+  if (!_watcher) startFileWatcher();
+  return _cache;
+}
+
+function clearTreeCache(): void {
+  _cache = null;
+}
+
+function markTreeAndContentChanged(): void {
+  _treeVersion++;
+  _contentVersion++;
+  _searchIndex = null;
+}
+
+function markContentChanged(): void {
+  _contentVersion++;
+  _searchIndex = null;
+}
+
+function rememberKnownFile(filePath: string): void {
+  _knownFilePaths?.add(filePath);
+}
+
+function forgetKnownFile(filePath: string): void {
+  _knownFilePaths?.delete(filePath);
+}
+
+function forgetKnownFiles(): void {
+  _knownFilePaths = null;
+}
+
+function invalidateDerivedIndexes(): void {
+  _searchIndex = null;
+  invalidateSearchIndexLazy();
+  _linkIndex.invalidate();
+}
+
+/** Monotonically increasing tree-shape counter for sidebar/shell refreshes. */
+export function peekTreeVersion(): number {
+  return _treeVersion;
+}
+
+/** Monotonically increasing content counter for link/search snapshots. */
+export function peekContentVersion(): number {
+  return _contentVersion;
+}
+
 export function getTreeVersion(): number {
   if (!_cache) {
-    // Cache was invalidated (by watcher or explicit invalidateCache) — rebuild.
-    // _treeVersion was already bumped by the invalidator, no need to bump again.
-    _cache = buildCache(getMindRoot());
-    _searchIndex = null;
-  } else if (!isCacheValid()) {
-    // Cache expired by TTL — rebuild and check if files actually changed
-    const next = buildCache(getMindRoot());
-    const changed = !sameFileList(_cache.allFiles, next.allFiles);
-    _cache = next;
-    _searchIndex = null;
-    if (changed) _treeVersion++;
+    // Cache was invalidated by an explicit operation — rebuild without bumping
+    // here because the invalidator already chose the correct version counter.
+    rebuildCacheForVersionCheck();
+  } else if (shouldRefreshCacheForVersionCheck()) {
+    // Periodic watcher-miss recovery: keep this on the lightweight version
+    // endpoint, not on every page render that merely needs the current tree.
+    refreshExpiredCache();
   }
   return _treeVersion;
 }
 
-function isCacheValid(): boolean {
-  return _cache !== null && (Date.now() - _cache.timestamp) < CACHE_TTL_MS;
+export function getContentVersion(): number {
+  if (!_cache) {
+    rebuildCacheForVersionCheck();
+  } else if (shouldRefreshCacheForVersionCheck()) {
+    refreshExpiredCache();
+  }
+  return _contentVersion;
+}
+
+function isCacheValid(ttlMs = CACHE_TTL_MS): boolean {
+  return _cache !== null && (Date.now() - _cache.timestamp) < ttlMs;
+}
+
+function isCacheValidForRead(): boolean {
+  const ttlMs = _watcher ? WATCHER_BACKED_CACHE_TTL_MS : CACHE_TTL_MS;
+  return isCacheValid(ttlMs);
+}
+
+function shouldRefreshCacheForVersionCheck(): boolean {
+  if (!_cache) return true;
+  const ttlMs = _watcher ? WATCHER_MISS_SWEEP_MS : CACHE_TTL_MS;
+  return !isCacheValid(ttlMs);
 }
 
 /** Module-level link index singleton. Lazily built on first graph/backlink access. */
@@ -136,11 +289,10 @@ export function getLinkIndex(): LinkIndex {
 
 /** Invalidate cache — call after any write/create/delete/rename operation */
 export function invalidateCache(): void {
-  _cache = null;
-  _searchIndex = null;
-  _treeVersion++;
-  invalidateSearchIndex();
-  _linkIndex.invalidate();
+  clearTreeCache();
+  forgetKnownFiles();
+  markTreeAndContentChanged();
+  invalidateDerivedIndexes();
 }
 
 /**
@@ -149,10 +301,9 @@ export function invalidateCache(): void {
  * incrementally for just this file — O(tokens) instead of O(all-files).
  */
 function invalidateCacheForFile(filePath: string): void {
-  _cache = null;
-  _searchIndex = null;
-  _treeVersion++;
-  updateSearchIndexFile(getMindRoot(), filePath);
+  clearTreeCache();
+  markContentChanged();
+  updateSearchIndexFileLazy(getMindRoot(), filePath);
   if (_linkIndex.isBuilt()) _linkIndex.updateFile(getMindRoot(), filePath);
 }
 
@@ -161,10 +312,10 @@ function invalidateCacheForFile(filePath: string): void {
  * Tree cache is cleared, search index gets incremental addFile.
  */
 function invalidateCacheForNewFile(filePath: string): void {
-  _cache = null;
-  _searchIndex = null;
-  _treeVersion++;
-  addSearchIndexFile(getMindRoot(), filePath);
+  clearTreeCache();
+  rememberKnownFile(filePath);
+  markTreeAndContentChanged();
+  addSearchIndexFileLazy(getMindRoot(), filePath);
   if (_linkIndex.isBuilt()) _linkIndex.updateFile(getMindRoot(), filePath);
 }
 
@@ -173,17 +324,21 @@ function invalidateCacheForNewFile(filePath: string): void {
  * Tree cache is cleared, search index gets incremental removeFile.
  */
 function invalidateCacheForDeletedFile(filePath: string): void {
-  _cache = null;
-  _searchIndex = null;
-  _treeVersion++;
-  removeSearchIndexFile(filePath);
+  clearTreeCache();
+  forgetKnownFile(filePath);
+  markTreeAndContentChanged();
+  removeSearchIndexFileLazy(filePath);
   if (_linkIndex.isBuilt()) _linkIndex.removeFile(filePath);
 }
 
 function ensureCache(): FileTreeCache {
-  if (isCacheValid()) return _cache!;
-  const root = getMindRoot();
-  _cache = buildCache(root);
+  if (isCacheValidForRead()) return _cache!;
+  if (_cache) {
+    refreshExpiredCache();
+  } else {
+    _cache = buildCache(getMindRoot());
+    _knownFilePaths = new Set(_cache.allFiles);
+  }
   // Lazily start the file watcher on first cache build
   if (!_watcher) startFileWatcher();
   return _cache;
@@ -191,10 +346,140 @@ function ensureCache(): FileTreeCache {
 
 // ─── File System Watcher ──────────────────────────────────────────────────────
 // Watches mindRoot for external changes (VSCode, Finder, git pull) and
-// invalidates cache immediately instead of waiting for the 5s TTL.
+// invalidates cache immediately instead of waiting for the TTL. Events are
+// batched (500ms debounce) and applied incrementally to the search index;
+// unknown paths or oversized batches fall back to full invalidation.
 
 let _watcher: fs.FSWatcher | null = null;
 let _watchDebounce: ReturnType<typeof setTimeout> | null = null;
+
+/** Above this many distinct paths per batch, a full invalidation is cheaper. */
+const WATCH_BATCH_LIMIT = 50;
+
+let _watchPending: Set<string> | null = null;
+let _watchPendingRoot: string | null = null;
+let _watchOverflow = false;
+
+function isIgnoredWatcherPath(relPath: string): boolean {
+  if (relPath === MINDOS_IGNORE_FILE) return false;
+  try {
+    return createSearchIgnoreMatcher(getMindRoot())(relPath);
+  } catch {
+    return relPath.split('/').some((segment) => IGNORED_DIRS.has(segment));
+  }
+}
+
+/**
+ * Record a single watcher event (relative path inside mindRoot).
+ * Pass `null`/`undefined` when the platform did not report a filename —
+ * this forces a full invalidation on the next flush (never silently drop).
+ * Exported for tests and for alternative watch backends.
+ */
+export function handleWatcherEvent(filename: string | Buffer | null | undefined): void {
+  if (filename == null) {
+    _watchOverflow = true;
+    scheduleWatcherFlush();
+    return;
+  }
+  const rel = String(filename).split(path.sep).join('/');
+  if (rel === MINDOS_IGNORE_FILE) {
+    _watchOverflow = true;
+    scheduleWatcherFlush();
+    return;
+  }
+  if (isIgnoredWatcherPath(rel)) return;
+
+  let root: string;
+  try { root = getMindRoot(); } catch { _watchOverflow = true; scheduleWatcherFlush(); return; }
+  // Root changed mid-batch (e.g. settings switch) → stale rel paths.
+  if (_watchPendingRoot !== null && _watchPendingRoot !== root) _watchOverflow = true;
+  _watchPendingRoot = root;
+
+  if (!_watchPending) _watchPending = new Set();
+  _watchPending.add(rel);
+  if (_watchPending.size > WATCH_BATCH_LIMIT) _watchOverflow = true;
+  scheduleWatcherFlush();
+}
+
+function scheduleWatcherFlush(): void {
+  if (_watchDebounce) clearTimeout(_watchDebounce);
+  _watchDebounce = setTimeout(flushWatcherChanges, 500);
+}
+
+/**
+ * Apply the batched watcher events: invalidate the tree cache and update
+ * the search/link indexes incrementally per path. Exported for tests;
+ * called automatically 500ms after the last event.
+ */
+export function flushWatcherChanges(): void {
+  if (_watchDebounce) { clearTimeout(_watchDebounce); _watchDebounce = null; }
+  const pending = _watchPending;
+  const pendingRoot = _watchPendingRoot;
+  const overflow = _watchOverflow;
+  _watchPending = null;
+  _watchPendingRoot = null;
+  _watchOverflow = false;
+
+  if (!pending && !overflow) return; // nothing relevant happened
+
+  let root: string;
+  try { root = getMindRoot(); } catch { return; }
+
+  if (overflow || !pending || pendingRoot !== root) {
+    invalidateCache();
+    return;
+  }
+
+  const knownFiles = _knownFilePaths;
+  if (!knownFiles) {
+    // Without a previous file set we cannot safely distinguish a content
+    // edit from a create/delete, so fall back to the conservative full signal.
+    invalidateCache();
+    return;
+  }
+
+  let treeChanged = false;
+  let contentChanged = false;
+
+  for (const rel of pending) {
+    let stat: fs.Stats | null = null;
+    try { stat = fs.statSync(path.join(root, rel)); } catch { stat = null; }
+
+    if (stat?.isDirectory()) {
+      // Directory event: contents unknown (rename/move of a subtree) —
+      // a full invalidation is the only safe answer.
+      invalidateCache();
+      return;
+    }
+    if (stat) {
+      if (!stat.isFile()) {
+        invalidateCache();
+        return;
+      }
+      if (knownFiles.has(rel)) {
+        contentChanged = true;
+        updateSearchIndexFileLazy(root, rel);
+      } else {
+        treeChanged = true;
+        knownFiles.add(rel);
+        addSearchIndexFileLazy(root, rel);
+      }
+      if (_linkIndex.isBuilt()) _linkIndex.updateFile(root, rel);
+    } else if (knownFiles.has(rel)) {
+      treeChanged = true;
+      knownFiles.delete(rel);
+      removeSearchIndexFileLazy(rel);
+      if (_linkIndex.isBuilt()) _linkIndex.removeFile(rel);
+    }
+  }
+
+  if (!treeChanged && !contentChanged) return;
+
+  clearTreeCache();
+  if (treeChanged) _treeVersion++;
+  _contentVersion++;
+  _searchIndex = null;
+}
 
 /**
  * Start watching mindRoot for file changes. Idempotent — safe to call multiple times.
@@ -209,16 +494,7 @@ export function startFileWatcher(): void {
 
   try {
     _watcher = fs.watch(root, { recursive: true }, (_event, filename) => {
-      if (!filename) return;
-      // Ignore .git internals, node_modules, .next
-      if (filename.startsWith('.git') || filename.includes('node_modules') || filename.includes('.next')) return;
-      // Debounce: batch rapid file changes into one cache invalidation
-      if (_watchDebounce) clearTimeout(_watchDebounce);
-      _watchDebounce = setTimeout(() => {
-        _cache = null; // Invalidate tree cache — next read will rebuild
-        _treeVersion++; // Bump version so polling clients detect the change
-        _watchDebounce = null;
-      }, 500);
+      handleWatcherEvent(filename ?? null);
     });
     _watcher.on('error', () => {
       // Watcher failed (e.g. too many open files) — degrade gracefully to TTL cache
@@ -233,6 +509,9 @@ export function startFileWatcher(): void {
 /** Stop the file watcher. Safe to call even if not watching. */
 export function stopFileWatcher(): void {
   if (_watchDebounce) { clearTimeout(_watchDebounce); _watchDebounce = null; }
+  _watchPending = null;
+  _watchPendingRoot = null;
+  _watchOverflow = false;
   if (_watcher) { _watcher.close(); _watcher = null; }
 }
 
@@ -240,18 +519,24 @@ export function stopFileWatcher(): void {
 
 const SPACE_PREVIEW_MAX_LINES = 3;
 
-function extractBodyLines(filePath: string, maxLines: number): string[] {
+function readPreviewSource(filePath: string): string | null {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const bodyLines: string[] = [];
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      bodyLines.push(trimmed);
-      if (bodyLines.length >= maxLines) break;
-    }
-    return bodyLines;
-  } catch { return []; }
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function extractBodyLines(content: string | null, maxLines: number): string[] {
+  if (content === null) return [];
+  const bodyLines: string[] = [];
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    bodyLines.push(trimmed);
+    if (bodyLines.length >= maxLines) break;
+  }
+  return bodyLines;
 }
 
 const TEMPLATE_MARKERS = [
@@ -261,37 +546,41 @@ const TEMPLATE_MARKERS = [
   '(Add usage guidelines for this space.)',
 ];
 
-function isTemplateContent(filePath: string): boolean {
-  try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    return TEMPLATE_MARKERS.some(m => content.includes(m));
-  } catch { return false; }
+function isTemplateContent(content: string | null): boolean {
+  if (content === null) return false;
+  return TEMPLATE_MARKERS.some(m => content.includes(m));
 }
 
 function buildSpacePreview(dirAbsPath: string) {
   const instructionPath = path.join(dirAbsPath, 'INSTRUCTION.md');
   const readmePath = path.join(dirAbsPath, 'README.md');
-  const readmeTemplate = isTemplateContent(readmePath);
+  const instructionContent = readPreviewSource(instructionPath);
+  const readmeContent = readPreviewSource(readmePath);
+  const readmeTemplate = isTemplateContent(readmeContent);
 
   // Parse lastCompiled from README footer comment
   let lastCompiled: string | undefined;
-  try {
-    const readmeContent = fs.readFileSync(readmePath, 'utf-8');
+  if (readmeContent) {
     const match = readmeContent.match(/<!-- mindos:compiled (\S+) files:\d+ -->/);
     if (match) lastCompiled = match[1];
-  } catch { /* no README */ }
+  }
 
   return {
-    instructionLines: extractBodyLines(instructionPath, SPACE_PREVIEW_MAX_LINES),
-    readmeLines: extractBodyLines(readmePath, SPACE_PREVIEW_MAX_LINES),
-    isTemplate: isTemplateContent(instructionPath) && readmeTemplate,
+    instructionLines: extractBodyLines(instructionContent, SPACE_PREVIEW_MAX_LINES),
+    readmeLines: extractBodyLines(readmeContent, SPACE_PREVIEW_MAX_LINES),
+    isTemplate: isTemplateContent(instructionContent) && readmeTemplate,
     readmeIsTemplate: readmeTemplate,
     lastCompiled,
   };
 }
 
-function buildFileTree(dirPath: string, rootOverride?: string): FileNode[] {
+function buildFileTree(
+  dirPath: string,
+  rootOverride?: string,
+  matcher?: SearchIgnoredPathMatcher,
+): FileNode[] {
   const root = rootOverride ?? getMindRoot();
+  const isIgnored = matcher ?? createSearchIgnoreMatcher(root);
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dirPath, { withFileTypes: true });
@@ -303,11 +592,11 @@ function buildFileTree(dirPath: string, rootOverride?: string): FileNode[] {
 
   for (const entry of entries) {
     const fullPath = path.join(dirPath, entry.name);
-    const relativePath = path.relative(root, fullPath);
+    const relativePath = path.relative(root, fullPath).split(path.sep).join('/');
 
     if (entry.isDirectory()) {
-      if (IGNORED_DIRS.has(entry.name)) continue;
-      const children = buildFileTree(fullPath, root);
+      if (isIgnored(relativePath, true)) continue;
+      const children = buildFileTree(fullPath, root, isIgnored);
       if (children.length > 0) {
         const hasInstruction = children.some(c => c.type === 'file' && c.name === 'INSTRUCTION.md');
         const node: FileNode = { name: entry.name, path: relativePath, type: 'directory', children };
@@ -319,7 +608,7 @@ function buildFileTree(dirPath: string, rootOverride?: string): FileNode[] {
       }
     } else if (entry.isFile()) {
       const ext = path.extname(entry.name).toLowerCase();
-      if (ALLOWED_EXTENSIONS.has(ext)) {
+      if (ALLOWED_EXTENSIONS.has(ext) && !isIgnored(relativePath, false)) {
         nodes.push({ name: entry.name, path: relativePath, type: 'file', extension: ext });
       }
     }
@@ -338,8 +627,9 @@ export function buildFileTreeForTest(rootPath: string): FileNode[] {
   return buildFileTree(rootPath, rootPath);
 }
 
-function buildAllFiles(dirPath: string): string[] {
+function buildAllFiles(dirPath: string, matcher?: SearchIgnoredPathMatcher): string[] {
   const root = getMindRoot();
+  const isIgnored = matcher ?? createSearchIgnoreMatcher(root);
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dirPath, { withFileTypes: true });
@@ -350,13 +640,14 @@ function buildAllFiles(dirPath: string): string[] {
   const files: string[] = [];
   for (const entry of entries) {
     const fullPath = path.join(dirPath, entry.name);
+    const relativePath = path.relative(root, fullPath).split(path.sep).join('/');
     if (entry.isDirectory()) {
-      if (IGNORED_DIRS.has(entry.name)) continue;
-      files.push(...buildAllFiles(fullPath));
+      if (isIgnored(relativePath, true)) continue;
+      files.push(...buildAllFiles(fullPath, isIgnored));
     } else if (entry.isFile()) {
       const ext = path.extname(entry.name).toLowerCase();
-      if (ALLOWED_EXTENSIONS.has(ext)) {
-        files.push(path.relative(root, fullPath));
+      if (ALLOWED_EXTENSIONS.has(ext) && !isIgnored(relativePath, false)) {
+        if (!isDefaultMindSystemScaffoldFile(root, relativePath)) files.push(relativePath);
       }
     }
   }
@@ -383,15 +674,19 @@ export function appendContentChange(input: ContentChangeInput): ContentChangeEve
 /**
  * Lists content change events with optional filtering.
  * @param options.path   Filter by file path (prefix match)
+ * @param options.space  Filter by top-level space
  * @param options.limit  Max events to return (default: unlimited)
  * @param options.source Filter by source: 'user' | 'agent' | 'system'
+ * @param options.agent  Filter by concrete agent name when available
  * @param options.op     Filter by operation type (e.g. 'create', 'update', 'delete')
  * @param options.q      Free-text search within change descriptions
  */
 export function listContentChanges(options: {
   path?: string;
+  space?: string;
   limit?: number;
   source?: 'user' | 'agent' | 'system';
+  agent?: string;
   op?: string;
   q?: string;
 } = {}): ContentChangeEvent[] {
@@ -456,18 +751,19 @@ export function getDirEntries(dirPath: string): FileNode[] {
   }
 
   const nodes: FileNode[] = [];
+  const isIgnored = createSearchIgnoreMatcher(rootResolved);
   for (const entry of entries) {
-    if (IGNORED_DIRS.has(entry.name)) continue;
     const fullPath = path.join(resolved, entry.name);
-    const relativePath = path.relative(rootResolved, fullPath);
+    const relativePath = path.relative(rootResolved, fullPath).split(path.sep).join('/');
     if (entry.isDirectory()) {
-      const children = buildFileTree(fullPath);
+      if (isIgnored(relativePath, true)) continue;
+      const children = buildFileTree(fullPath, rootResolved, isIgnored);
       if (children.length > 0) {
         nodes.push({ name: entry.name, path: relativePath, type: 'directory', children });
       }
     } else if (entry.isFile()) {
       const ext = path.extname(entry.name).toLowerCase();
-      if (ALLOWED_EXTENSIONS.has(ext)) {
+      if (ALLOWED_EXTENSIONS.has(ext) && !isIgnored(relativePath, false)) {
         let mtime: number | undefined;
         try { mtime = fs.statSync(fullPath).mtimeMs; } catch { /* ignore */ }
         nodes.push({ name: entry.name, path: relativePath, type: 'file', extension: ext, mtime });
@@ -488,20 +784,7 @@ export function getDirEntries(dirPath: string): FileNode[] {
  * @param limit Max files to return (default: 10)
  */
 export function getRecentlyModified(limit = 10): Array<{ path: string; mtime: number }> {
-  const root = getMindRoot();
-  const allFiles = collectAllFiles();
-  const withMtime = allFiles.map((filePath) => {
-    try {
-      const abs = resolveExistingSafe(root, filePath);
-      const stat = fs.statSync(abs);
-      return { path: filePath, mtime: stat.mtimeMs };
-    } catch {
-      return null;
-    }
-  }).filter(Boolean) as Array<{ path: string; mtime: number }>;
-
-  withMtime.sort((a, b) => b.mtime - a.mtime);
-  return withMtime.slice(0, limit);
+  return ensureCache().recentFiles.slice(0, limit);
 }
 
 // ─── Public API: File operations (delegated to @mindos/core) ─────────────────
@@ -645,179 +928,43 @@ export function updateSection(filePath: string, heading: string, newContent: str
   invalidateCacheForFile(filePath);
 }
 
-/** App-level search result (extends core SearchResult with Fuse.js match details) */
-export interface AppSearchResult {
-  path: string;
-  snippet: string;
-  score: number;
-  matches?: SearchMatch[];
-}
-
-// ─── Search (app-specific: Fuse.js fuzzy search with CJK support) ────────────
+// ─── Search prewarm (app-level) ───────────────────────────────────────────────
 //
-// This is the frontend search used by the ⌘K overlay in the browser.
-// It uses Fuse.js for fuzzy matching with CJK language support.
-//
-// NOTE: A separate literal search exists in `lib/core/search.ts`, used by
-// the MCP server via the REST API. The two coexist intentionally:
-// - App search (here): Fuse.js fuzzy match, best for interactive UI search
-// - Core search (lib/core/search.ts): exact literal match with filters, best for MCP tools
+// The browser ⌘K overlay queries `/api/search`, which uses the core BM25 /
+// hybrid search in `lib/core/`. The old in-process Fuse.js index here had no
+// query callers anymore (dead code) and was removed; what remains is the
+// prewarm bookkeeping used by `/api/search/prewarm` to keep the tree cache
+// warm and report a document count.
 
-const MAX_CONTENT_LENGTH = 10_000;
-
-/** Maximum content length for large knowledge bases (300+ files) to keep Fuse queries fast. */
-const MAX_CONTENT_LENGTH_LARGE_KB = 5_000;
-const LARGE_KB_THRESHOLD = 300;
-
-interface SearchIndex {
-  fuse: InstanceType<typeof Fuse<SearchDocument>>;
-  documents: SearchDocument[];
+interface UiSearchPrewarmState {
+  documentCount: number;
   timestamp: number;
+  treeVersion: number;
 }
 
-interface SearchDocument {
-  path: string;
-  fileName: string;
-  content: string;
+let _searchIndex: UiSearchPrewarmState | null = null;
+
+function getValidSearchIndex(): UiSearchPrewarmState | null {
+  ensureCache();
+  return _searchIndex !== null && _searchIndex.treeVersion === _treeVersion
+    ? _searchIndex
+    : null;
 }
 
-let _searchIndex: SearchIndex | null = null;
-
-function getSearchIndex(): SearchIndex {
-  if (_searchIndex && isCacheValid()) {
-    telemetry.track('search.ui.index.cache_hit', { documentCount: _searchIndex.documents.length });
-    return _searchIndex;
+/** Warm the file-tree cache and report the searchable document count. */
+export function prewarmSearchIndex(): SearchPrewarmResponse {
+  const cached = getValidSearchIndex();
+  if (cached) {
+    telemetry.track('search.ui.prewarm', { cacheState: 'hit', documentCount: cached.documentCount });
+    return { warmed: true, cacheState: 'hit', documentCount: cached.documentCount };
   }
 
   const stop = telemetry.startTimer('search.ui.index.build');
-  const allFiles = collectAllFiles();
-  const documents: SearchDocument[] = [];
-
-  const contentLimit = allFiles.length >= LARGE_KB_THRESHOLD
-    ? MAX_CONTENT_LENGTH_LARGE_KB
-    : MAX_CONTENT_LENGTH;
-
-  for (const filePath of allFiles) {
-    let content: string;
-    try {
-      content = getFileContent(filePath);
-    } catch {
-      continue;
-    }
-    if (content.length > contentLimit) {
-      content = content.slice(0, contentLimit);
-    }
-    documents.push({
-      path: filePath,
-      fileName: path.basename(filePath),
-      content,
-    });
-  }
-
-  const fuse = new Fuse(documents, {
-    keys: [
-      { name: 'fileName', weight: 0.3 },
-      { name: 'path', weight: 0.2 },
-      { name: 'content', weight: 0.5 },
-    ],
-    includeScore: true,
-    includeMatches: true,
-    threshold: 0.4,
-    ignoreLocation: true,
-    minMatchCharLength: 2,
-    useExtendedSearch: true,
-  });
-
-  _searchIndex = { fuse, documents, timestamp: Date.now() };
-  stop({ fileCount: allFiles.length, documentCount: documents.length });
-  return _searchIndex;
-}
-
-/** Full-text search across all files using Fuse.js fuzzy matching. */
-export function prewarmSearchIndex(): SearchPrewarmResponse {
-  if (_searchIndex && isCacheValid()) {
-    telemetry.track('search.ui.prewarm', { cacheState: 'hit', documentCount: _searchIndex.documents.length });
-    return { warmed: true, cacheState: 'hit', documentCount: _searchIndex.documents.length };
-  }
-
-  const index = getSearchIndex();
-  telemetry.track('search.ui.prewarm', { cacheState: 'built', documentCount: index.documents.length });
-  return { warmed: true, cacheState: 'built', documentCount: index.documents.length };
-}
-
-export function searchFiles(query: string): AppSearchResult[] {
-  if (!query.trim()) return [];
-
-  const stop = telemetry.startTimer('search.ui.query', { queryLen: query.length });
-  const { fuse, documents } = getSearchIndex();
-
-  // FIXED: Removed CJK-specific exact-match forcing.
-  // Now all queries use the same Fuse.js fuzzy matching for consistent UX.
-  const searchQuery = query;
-
-  const fuseResults = fuse.search(searchQuery, { limit: 20 });
-
-  const results = fuseResults.map((r) => {
-    const filePath = r.item.path;
-    const content = r.item.content;
-    const score = 1 - (r.score ?? 1);
-
-    const snippet = generateSnippet(content, r.matches);
-
-    const matches = r.matches?.map((m) => ({
-      indices: m.indices as [number, number][],
-      value: m.value ?? '',
-      key: m.key ?? '',
-    }));
-
-    return { path: filePath, snippet, score, matches };
-  });
-
-  stop({ resultCount: results.length, documentCount: documents.length });
-  return results;
-}
-
-/** Pick the best (longest) content match and build a context snippet around it. */
-function generateSnippet(
-  content: string,
-  matches?: readonly FuseResultMatch[],
-): string {
-  const contentMatch = matches?.find((m) => m.key === 'content');
-  if (!contentMatch || contentMatch.indices.length === 0) {
-    const s = content.slice(0, 120).replace(/\n/g, ' ').trim();
-    return content.length > 120 ? s + '...' : s;
-  }
-
-  let bestStart = 0, bestEnd = 0, bestLen = 0;
-  for (const [ms, me] of contentMatch.indices) {
-    const len = me - ms;
-    if (len > bestLen) {
-      bestStart = ms;
-      bestEnd = me;
-      bestLen = len;
-    }
-  }
-
-  const snippetStart = Math.max(0, bestStart - 120);
-  const snippetEnd = Math.min(content.length, bestEnd + 120);
-
-  let start = snippetStart;
-  if (start > 0) {
-    const spaceIdx = content.indexOf(' ', start);
-    if (spaceIdx !== -1 && spaceIdx < bestStart) start = spaceIdx + 1;
-  }
-  let end = snippetEnd;
-  if (end < content.length) {
-    const spaceIdx = content.lastIndexOf(' ', end);
-    if (spaceIdx > bestEnd) end = spaceIdx;
-  }
-
-  let snippet = content.slice(start, end).trim();
-  // Collapse multiple newlines into spaces but keep single newlines
-  snippet = snippet.replace(/\n{2,}/g, ' ↵ ');
-  if (start > 0) snippet = '...' + snippet;
-  if (end < content.length) snippet = snippet + '...';
-  return snippet;
+  const documentCount = collectAllFiles().length;
+  _searchIndex = { documentCount, timestamp: Date.now(), treeVersion: _treeVersion };
+  stop({ fileCount: documentCount, documentCount });
+  telemetry.track('search.ui.prewarm', { cacheState: 'built', documentCount });
+  return { warmed: true, cacheState: 'built', documentCount };
 }
 
 // ─── Public API: CSV (delegated to @mindos/core) ────────────────────────────

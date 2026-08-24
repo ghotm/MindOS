@@ -3,6 +3,14 @@
 import { useState, useCallback, useRef } from 'react';
 import type { LocalAttachment, Message } from '@/lib/types';
 import type { OrganizeSource } from '@/lib/organize-history';
+import { buildAssistantAgentTurnRequestBody } from '@/lib/assistant-runner';
+import { buildAgentTurnEndpoint, createTransientAgentSessionId } from '@/lib/agent-turn-endpoint';
+import {
+  AI_ATTACHMENT_MAX_CHARS,
+  describeOversizedAiAttachments,
+  getOversizedAiAttachments,
+  type OversizedAiAttachment,
+} from '@/lib/agent/attachment-limits';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,7 +52,7 @@ export interface AiOrganizeState {
 }
 
 // ---------------------------------------------------------------------------
-// SSE stream parser — extracts file operations from /api/ask stream
+// SSE stream parser — extracts file operations from agent turn streams
 // ---------------------------------------------------------------------------
 
 /**
@@ -58,7 +66,12 @@ export function stripThinkingTags(text: string): string {
   return cleaned.trim();
 }
 
-export const CLIENT_TRUNCATE_CHARS = 20_000;
+export const CLIENT_ATTACHMENT_MAX_CHARS = AI_ATTACHMENT_MAX_CHARS;
+export const CLIENT_TRUNCATE_CHARS = CLIENT_ATTACHMENT_MAX_CHARS;
+
+export type OversizedOrganizeAttachment = OversizedAiAttachment;
+export const getOversizedOrganizeAttachments = getOversizedAiAttachments;
+export const describeOversizedOrganizeAttachments = describeOversizedAiAttachments;
 
 const FILE_WRITE_TOOLS = new Set([
   'create_file', 'write_file', 'batch_create_files',
@@ -241,9 +254,11 @@ export async function consumeOrganizeStream(
 export interface AiOrganizeRunOptions {
   providerOverride?: string | null;
   modelOverride?: string | null;
+  assistantId?: string | null;
+  sessionId?: string | null;
 }
 
-function describeAskRequestError(status: number, message: string): string {
+function describeAgentTurnRequestError(status: number, message: string): string {
   const detail = message.trim() || `Request failed (${status})`;
   if (status === 401 || status === 403) {
     return `AI provider rejected the request (${status}). Check the selected API key/provider. ${detail}`;
@@ -286,6 +301,27 @@ export function useAiOrganize() {
     organizeSource: OrganizeSource = 'upload',
     options: AiOrganizeRunOptions = {},
   ) => {
+    const oversizedAttachments = getOversizedOrganizeAttachments(files);
+    if (oversizedAttachments.length > 0) {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      setPhase('error');
+      setChanges([]);
+      setCurrentTool(null);
+      setStageHint(null);
+      setSummary('');
+      setError(describeOversizedOrganizeAttachments(oversizedAttachments));
+      setToolCallCount(0);
+      setSourceFileNames(files.map(f => f.name));
+      setSource(organizeSource);
+      setDurationMs(0);
+      startTimeRef.current = 0;
+      snapshotsRef.current = new Map();
+      setSnapshotPaths(new Set());
+      lastEventRef.current = Date.now();
+      return;
+    }
+
     setPhase('organizing');
     setChanges([]);
     setCurrentTool(null);
@@ -306,24 +342,20 @@ export function useAiOrganize() {
 
     const messages: Message[] = [{ role: 'user', content: prompt }];
 
-    const truncatedFiles = files.map(f => ({
-      name: f.name,
-      content: f.content.length > CLIENT_TRUNCATE_CHARS
-        ? f.content.slice(0, CLIENT_TRUNCATE_CHARS) + '\n\n[...truncated to first ~20000 chars]'
-        : f.content,
-    }));
-
     try {
-      const requestBody: Record<string, unknown> = {
+      const requestBody = buildAssistantAgentTurnRequestBody({
         messages,
-        uploadedFiles: truncatedFiles,
-        maxSteps: 15,
-        mode: 'organize',
-      };
-      if (options.providerOverride) requestBody.providerOverride = options.providerOverride;
-      if (options.modelOverride) requestBody.modelOverride = options.modelOverride;
+        uploadedFiles: files,
+        providerOverride: options.providerOverride,
+        modelOverride: options.modelOverride,
+        assistantId: options.assistantId,
+      });
 
-      const res = await fetch('/api/ask', {
+      const transientSessionId = options.sessionId?.trim() || createTransientAgentSessionId('organize');
+      const endpoint = options.assistantId
+        ? '/api/assistant-runs'
+        : buildAgentTurnEndpoint(transientSessionId);
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody),
@@ -338,7 +370,7 @@ export function useAiOrganize() {
           else if (typeof errBody?.error === 'object' && errBody.error?.message) errorMsg = errBody.error.message;
           else if (errBody?.message) errorMsg = errBody.message as string;
         } catch {}
-        throw new Error(describeAskRequestError(res.status, errorMsg));
+        throw new Error(describeAgentTurnRequestError(res.status, errorMsg));
       }
 
       if (!res.body) throw new Error('No response body');
@@ -426,8 +458,8 @@ export function useAiOrganize() {
 
   const undoAll = useCallback(async (): Promise<number> => {
     const undoable = changes.filter(c => c.ok && !c.undone && (c.action === 'create' || (c.action === 'update' && snapshotsRef.current.has(c.path))));
-    let reverted = 0;
-    for (const file of undoable) {
+
+    const undoOne = async (file: typeof undoable[number]): Promise<number> => {
       try {
         if (file.action === 'create') {
           const res = await fetch('/api/file', {
@@ -435,8 +467,9 @@ export function useAiOrganize() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ op: 'delete_file', path: file.path }),
           });
-          if (res.ok) reverted++;
-        } else if (file.action === 'update') {
+          return res.ok ? 1 : 0;
+        }
+        if (file.action === 'update') {
           const snapshot = snapshotsRef.current.get(file.path);
           if (snapshot) {
             const res = await fetch('/api/file', {
@@ -444,11 +477,28 @@ export function useAiOrganize() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ op: 'write_file', path: file.path, content: snapshot }),
             });
-            if (res.ok) reverted++;
+            return res.ok ? 1 : 0;
           }
         }
       } catch {}
+      return 0;
+    };
+
+    // Undo distinct paths in parallel; operations targeting the same path stay
+    // sequential so a delete and a restore can never race each other.
+    const byPath = new Map<string, typeof undoable>();
+    for (const file of undoable) {
+      const group = byPath.get(file.path);
+      if (group) group.push(file);
+      else byPath.set(file.path, [file]);
     }
+    const counts = await Promise.all(Array.from(byPath.values()).map(async (group) => {
+      let n = 0;
+      for (const file of group) n += await undoOne(file);
+      return n;
+    }));
+    const reverted = counts.reduce((sum, n) => sum + n, 0);
+
     if (reverted > 0) {
       setChanges(prev => prev.map(c => {
         if (!c.ok || c.undone) return c;

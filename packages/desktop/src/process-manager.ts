@@ -11,6 +11,8 @@ import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, chmodSy
 import { desktopTelemetry } from './telemetry';
 import { resolveCliPath, resolveMcpBundlePath, resolveMcpDir, resolveWebAppDir } from './mindos-runtime-layout';
 import { verifyMindOsWebHealth } from './mindos-web-health';
+import { getDesktopConfigDir } from './desktop-home';
+import { resolveExecTarget } from './exec-target';
 
 const IS_WIN = process.platform === 'win32';
 const execFileAsync = promisify(execFile);
@@ -32,8 +34,16 @@ export function isMindosOwnedCommandLine(commandLine: string): boolean {
 
 function forceKillChildProcess(proc: ChildProcess): void {
   try {
-    if (IS_WIN) proc.kill();
-    else proc.kill('SIGKILL');
+    if (IS_WIN && proc.pid) {
+      execFile('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true }, () => {});
+      proc.kill();
+    } else if (proc.pid) {
+      try { process.kill(-proc.pid, 'SIGKILL'); } catch { /* process may not own a group */ }
+      proc.kill('SIGKILL');
+    } else {
+      if (IS_WIN) proc.kill();
+      else proc.kill('SIGKILL');
+    }
   } catch { /* already dead */ }
 }
 
@@ -57,6 +67,16 @@ function terminateChildProcess(proc: ChildProcess | null, timeoutMs = CHILD_PROC
     proc.once('exit', done);
 
     try {
+      if (IS_WIN && proc.pid) {
+        // proc.kill() on Windows only terminates the DIRECT child (cmd.exe for
+        // shell-wrapped spawns); its exit clears the force-kill timer, so the
+        // timeout taskkill never ran and grandchildren kept the port. Kill the
+        // whole tree up front instead.
+        execFile('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true }, () => {});
+      }
+      if (!IS_WIN && proc.pid) {
+        try { process.kill(-proc.pid, 'SIGTERM'); } catch { /* process may not own a group */ }
+      }
       proc.kill('SIGTERM');
     } catch {
       done();
@@ -74,8 +94,16 @@ function isPidAlive(pid: number): boolean {
 }
 
 async function terminatePid(pid: number, timeoutMs = PID_TERM_TIMEOUT_MS): Promise<void> {
+  if (!isPidAlive(pid)) return;
+
   try {
-    process.kill(pid, 'SIGTERM');
+    if (IS_WIN) {
+      // Tree-kill first — killing only the direct PID leaves grandchildren
+      // (node spawned via cmd.exe) holding the port. See terminateChildProcess.
+      execFile('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => {});
+    } else {
+      process.kill(pid, 'SIGTERM');
+    }
   } catch {
     return;
   }
@@ -87,7 +115,10 @@ async function terminatePid(pid: number, timeoutMs = PID_TERM_TIMEOUT_MS): Promi
   }
 
   try {
-    if (IS_WIN) process.kill(pid);
+    if (IS_WIN) {
+      execFile('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => {});
+      process.kill(pid);
+    }
     else process.kill(pid, 'SIGKILL');
   } catch { /* already dead */ }
 }
@@ -106,6 +137,10 @@ export interface ProcessManagerOptions {
   webPassword?: string;
   /** Real Desktop install directory/bundle, used to reject mindRoot overlap in setup */
   installDir?: string;
+  obsidianSecretStorageBroker?: {
+    url: string;
+    token: string;
+  };
   verbose?: boolean;
   /** Enriched env with correct PATH for spawned processes */
   env?: Record<string, string>;
@@ -129,6 +164,8 @@ export class ProcessManager extends EventEmitter {
   private mcpStderrLines: string[] = [];
   /** Set to true when web process exits during startup (before health check succeeds) */
   private webProcessDied = false;
+  /** Set on spawn 'error' (e.g. ENOENT) — no exit event fires, so crashCount never reaches 3 */
+  private webSpawnFailed = false;
 
   constructor(opts: ProcessManagerOptions) {
     super();
@@ -143,7 +180,7 @@ export class ProcessManager extends EventEmitter {
   startMcpOnPort(port: number): void {
     // Kill old MCP process to avoid orphan
     if (this.mcpProcess && !this.mcpProcess.killed) {
-      try { this.mcpProcess.kill('SIGTERM'); } catch { /* already dead */ }
+      void terminateChildProcess(this.mcpProcess);
       this.mcpProcess = null;
     }
     this.opts.mcpPort = port;
@@ -165,6 +202,7 @@ export class ProcessManager extends EventEmitter {
     console.info('[MindOS:ProcessManager] start() called');
     this.stopped = false;
     this.webProcessDied = false;
+    this.webSpawnFailed = false;
     this.webStderrLines = [];
     this.mcpStderrLines = [];
     this.externalMcp = false;
@@ -292,7 +330,7 @@ export class ProcessManager extends EventEmitter {
     let token = authToken;
     if (!token) {
       try {
-        const configPath = path.join(process.env.HOME || process.env.USERPROFILE || '', '.mindos', 'config.json');
+        const configPath = path.join(getDesktopConfigDir(), 'config.json');
         const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
         token = cfg.authToken;
       } catch { /* no config */ }
@@ -302,7 +340,10 @@ export class ProcessManager extends EventEmitter {
       ...(this.opts.env || process.env as Record<string, string>),
       MCP_TRANSPORT: 'http', // Desktop always uses HTTP transport (not stdio). MCP clients must use http://127.0.0.1:<port>/mcp
       MCP_PORT: String(mcpPort),
-      MCP_HOST: '0.0.0.0',
+      // Loopback by default: AUTH_TOKEN is optional, so binding all interfaces
+      // exposed an unauthenticated MCP API to the LAN. MINDOS_MCP_HOST is the
+      // explicit opt-in for non-loopback setups.
+      MCP_HOST: (this.opts.env || process.env as Record<string, string>).MINDOS_MCP_HOST || '127.0.0.1',
       MINDOS_URL: `http://127.0.0.1:${webPort}`,
       ...(token ? { AUTH_TOKEN: token } : {}),
       ...(verbose ? { MCP_VERBOSE: '1' } : {}),
@@ -312,6 +353,8 @@ export class ProcessManager extends EventEmitter {
       cwd: mcpDir,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: !IS_WIN,
+      windowsHide: true,
     });
     return proc;
   }
@@ -339,6 +382,10 @@ export class ProcessManager extends EventEmitter {
     if (authToken) env.AUTH_TOKEN = authToken;
     if (webPassword) env.WEB_PASSWORD = webPassword;
     if (this.opts.installDir) env.MINDOS_INSTALL_DIR = this.opts.installDir;
+    if (this.opts.obsidianSecretStorageBroker) {
+      env.MINDOS_OBSIDIAN_SECRET_BROKER_URL = this.opts.obsidianSecretStorageBroker.url;
+      env.MINDOS_OBSIDIAN_SECRET_BROKER_TOKEN = this.opts.obsidianSecretStorageBroker.token;
+    }
     /** Always bind to 127.0.0.1 for local mode (avoid OS hostname binding that breaks health checks).
      * @see wiki/80-known-pitfalls.md — "Next 生产进程绑定机器 hostname" */
     env.HOSTNAME = '127.0.0.1';
@@ -356,6 +403,8 @@ export class ProcessManager extends EventEmitter {
         cwd: appDir,
         env: { ...env, PORT: String(webPort) },
         stdio: ['pipe', 'pipe', 'pipe'],
+        detached: !IS_WIN,
+        windowsHide: true,
       });
     }
 
@@ -369,20 +418,26 @@ export class ProcessManager extends EventEmitter {
       return base ? `--require ${quoted} ${base}` : `--require ${quoted}`;
     };
     if (existsSync(localNext)) {
-      return spawn(localNext, ['start', '-p', String(webPort)], {
+      // resolveExecTarget wraps .cmd in cmd.exe with quoted argv — shell:true
+      // concatenates unquoted and breaks on install paths containing spaces.
+      const target = resolveExecTarget(localNext, ['start', '-p', String(webPort)]);
+      return spawn(target.command, target.args, {
         cwd: appDir,
         env: { ...env, NODE_OPTIONS: injectNodeOpts(env.NODE_OPTIONS || '') },
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: IS_WIN, // .cmd files require shell on Windows
+        detached: !IS_WIN,
+        windowsHide: true,
       });
     }
 
     // Last resort: npx next start
-    return spawn(this.opts.npxPath, ['next', 'start', '-p', String(webPort)], {
+    const npxTarget = resolveExecTarget(this.opts.npxPath, ['next', 'start', '-p', String(webPort)]);
+    return spawn(npxTarget.command, npxTarget.args, {
       cwd: appDir,
       env: { ...env, NODE_OPTIONS: injectNodeOpts(env.NODE_OPTIONS || '') },
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: IS_WIN, // npx.cmd requires shell on Windows
+      detached: !IS_WIN,
+      windowsHide: true,
     });
   }
 
@@ -395,9 +450,10 @@ export class ProcessManager extends EventEmitter {
     while (Date.now() - start <= timeoutMs) {
       if (this.stopped) return false;
 
-      // If web process has been marked dead AND crash handler exhausted retries (>=3),
-      // bail out immediately instead of polling until timeout.
-      if (this.webProcessDied && this.crashCount.web >= 3) return false;
+      // Bail early when the web process is unrecoverable: crash handler
+      // exhausted retries, or spawn itself failed (no exit event → crashCount
+      // never increments and we'd poll the full timeout for nothing).
+      if (this.webProcessDied && (this.crashCount.web >= 3 || this.webSpawnFailed)) return false;
 
       if (await verifyMindOsWebHealth(port, 2000)) return true;
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -413,6 +469,7 @@ export class ProcessManager extends EventEmitter {
       if (label === 'web') {
         this.webStderrLines.push(`spawn error: ${err.message}`);
         this.webProcessDied = true;
+        this.webSpawnFailed = true;
       }
     });
     // Prevent EPIPE crash when child exits while stdin pipe is still open
@@ -469,6 +526,8 @@ export class ProcessManager extends EventEmitter {
   /**
    * Wait up to 10s for a port to become free, then fall back to findFreePort.
    * Keeps ports stable across restarts (important for bookmarks, MCP client configs).
+   * Rejects when neither the port nor any fallback frees up — returning the
+   * occupied port would guarantee an EADDRINUSE crash loop downstream.
    */
   private async waitForPortOrFallback(port: number): Promise<number> {
     for (let i = 0; i < 20; i++) {
@@ -479,19 +538,24 @@ export class ProcessManager extends EventEmitter {
       await new Promise((r) => setTimeout(r, 500)); // wait 500ms, retry
     }
     // 10s elapsed, port still occupied — fall back to next available
-    return this.findFreePort(port + 1).catch(() => port);
+    return this.findFreePort(port + 1).catch(() => {
+      throw new Error(`Port ${port} is still occupied and no fallback port is free in ${port + 1}-${port + 11}`);
+    });
   }
 
   /** Persist crash info to ~/.mindos/crash.log for post-mortem diagnosis */
   private logCrash(which: string, code: number | null, signal: string | null, stderr: string[]): void {
     try {
-      const logDir = path.join(process.env.HOME || process.env.USERPROFILE || '/tmp', '.mindos');
+      const logDir = getDesktopConfigDir();
       if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
       const logPath = path.join(logDir, 'crash.log');
       const ts = new Date().toISOString();
       const entry = [
         `--- [${ts}] ${which} crash #${this.crashCount[which as keyof typeof this.crashCount]} ---`,
         `exit code=${code} signal=${signal}`,
+        `node=${this.opts.nodePath}`,
+        `projectRoot=${this.opts.projectRoot}`,
+        `webPort=${this.opts.webPort} mcpPort=${this.opts.mcpPort}`,
         ...stderr.map(l => `  ${l}`),
         '',
       ].join('\n');
@@ -658,7 +722,7 @@ export class ProcessManager extends EventEmitter {
    * MCP server has built-in monitoring so it doesn't need this file.
    */
   static ensureStdinWatchdog(): string | null {
-    const dir = path.join(process.env.HOME || process.env.USERPROFILE || '/tmp', '.mindos');
+    const dir = getDesktopConfigDir();
     const filePath = path.join(dir, 'stdin-watchdog.cjs');
     try {
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -671,10 +735,9 @@ export class ProcessManager extends EventEmitter {
 
   // ── Child PID tracking (secondary safety net for orphan cleanup) ──
 
-  private static readonly PID_FILE = path.join(
-    process.env.HOME || process.env.USERPROFILE || '/tmp',
-    '.mindos', 'desktop-children.pid',
-  );
+  private static childPidFile(): string {
+    return path.join(getDesktopConfigDir(), 'desktop-children.pid');
+  }
 
   /** Write current child PIDs to disk so next launch can clean up orphans */
   private writeChildPids(): void {
@@ -683,15 +746,17 @@ export class ProcessManager extends EventEmitter {
     if (this.mcpProcess?.pid) pids.push(this.mcpProcess.pid);
     if (pids.length === 0) return;
     try {
-      const dir = path.dirname(ProcessManager.PID_FILE);
+      const pidFile = ProcessManager.childPidFile();
+      const dir = path.dirname(pidFile);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      writeFileSync(ProcessManager.PID_FILE, pids.join('\n'), 'utf-8');
+      writeFileSync(pidFile, pids.join('\n'), 'utf-8');
     } catch { /* best effort */ }
   }
 
   /** Remove PID file on clean shutdown */
   private clearChildPids(): void {
-    try { if (existsSync(ProcessManager.PID_FILE)) unlinkSync(ProcessManager.PID_FILE); } catch { /* best effort */ }
+    const pidFile = ProcessManager.childPidFile();
+    try { if (existsSync(pidFile)) unlinkSync(pidFile); } catch { /* best effort */ }
   }
 
   /**
@@ -700,14 +765,15 @@ export class ProcessManager extends EventEmitter {
    */
   static async cleanupOrphanedChildren(): Promise<void> {
     try {
-      if (!existsSync(ProcessManager.PID_FILE)) return;
-      const raw = readFileSync(ProcessManager.PID_FILE, 'utf-8').trim();
+      const pidFile = ProcessManager.childPidFile();
+      if (!existsSync(pidFile)) return;
+      const raw = readFileSync(pidFile, 'utf-8').trim();
       if (!raw) return;
       const pids = raw.split('\n').map(Number).filter(p => p > 0 && !isNaN(p));
       for (const pid of pids) {
         await ProcessManager.killIfNodeProcess(pid, 'orphaned child');
       }
-      unlinkSync(ProcessManager.PID_FILE);
+      unlinkSync(pidFile);
     } catch { /* non-critical */ }
   }
 
@@ -716,8 +782,7 @@ export class ProcessManager extends EventEmitter {
    * Desktop and CLI use separate PID files — both must be cleaned up on reinstall.
    */
   static async cleanupCliPidFile(): Promise<void> {
-    const home = process.env.HOME || process.env.USERPROFILE || '/tmp';
-    const cliPidPath = path.join(home, '.mindos', 'mindos.pid');
+    const cliPidPath = path.join(getDesktopConfigDir(), 'mindos.pid');
     try {
       if (!existsSync(cliPidPath)) return;
       const raw = readFileSync(cliPidPath, 'utf-8').trim();
@@ -757,7 +822,7 @@ export class ProcessManager extends EventEmitter {
         const { stdout } = await execFileAsync('powershell.exe', [
           '-NoProfile', '-Command',
           `(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue).OwningProcess`,
-        ], { encoding: 'utf-8', timeout });
+        ], { encoding: 'utf-8', timeout, windowsHide: true });
         const pids = (stdout as string).trim().split(/\r?\n/).map(Number).filter((p: number) => p > 0 && !isNaN(p));
         stop({ port, method: 'powershell', pidCount: pids.length, success: true });
         return pids;
@@ -771,7 +836,7 @@ export class ProcessManager extends EventEmitter {
     {
       const stop = desktopTelemetry.startTimer('desktop.port.find_pids', { port, method: 'lsof' });
       try {
-        const { stdout } = await execFileAsync('lsof', [`-ti:${port}`], { encoding: 'utf-8', timeout });
+        const { stdout } = await execFileAsync('lsof', [`-ti:${port}`], { encoding: 'utf-8', timeout, windowsHide: true });
         if (stdout.trim()) {
           const pids = stdout.trim().split('\n').map(Number).filter((p: number) => p > 0 && !isNaN(p));
           stop({ port, method: 'lsof', pidCount: pids.length, success: true });
@@ -787,7 +852,7 @@ export class ProcessManager extends EventEmitter {
     if (process.platform === 'linux') {
       const stop = desktopTelemetry.startTimer('desktop.port.find_pids', { port, method: 'ss' });
       try {
-        const { stdout } = await execFileAsync('ss', ['-tlnp', 'sport', '=', `:${port}`], { encoding: 'utf-8', timeout });
+        const { stdout } = await execFileAsync('ss', ['-tlnp', 'sport', '=', `:${port}`], { encoding: 'utf-8', timeout, windowsHide: true });
         const pids: number[] = [];
         for (const match of (stdout as string).matchAll(/pid=(\d+)/g)) {
           const p = parseInt(match[1], 10);
@@ -809,7 +874,7 @@ export class ProcessManager extends EventEmitter {
       let output = '';
       let fuserSucceeded = true;
       try {
-        const { stdout, stderr } = await execFileAsync('fuser', [`${port}/tcp`], { encoding: 'utf-8', timeout });
+        const { stdout, stderr } = await execFileAsync('fuser', [`${port}/tcp`], { encoding: 'utf-8', timeout, windowsHide: true });
         output = `${stdout}${stderr}`;
       } catch (err) {
         fuserSucceeded = false;
@@ -846,14 +911,14 @@ export class ProcessManager extends EventEmitter {
           const { stdout } = await execFileAsync('powershell.exe', [
             '-NoProfile', '-Command',
             `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -ErrorAction SilentlyContinue).CommandLine`,
-          ], { encoding: 'utf-8', timeout });
+          ], { encoding: 'utf-8', timeout, windowsHide: true });
           if (!isMindosOwnedCommandLine((stdout as string).trim())) {
             stop({ pid, label, verifiedMindosProcess: false, success: true });
             return;
           }
         } catch {
           try {
-            const { stdout } = await execFileAsync('wmic', ['process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/format:value'], { encoding: 'utf-8', timeout });
+            const { stdout } = await execFileAsync('wmic', ['process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/format:value'], { encoding: 'utf-8', timeout, windowsHide: true });
             if (!isMindosOwnedCommandLine((stdout as string).trim())) {
               stop({ pid, label, verifiedMindosProcess: false, success: true });
               return;
@@ -865,7 +930,7 @@ export class ProcessManager extends EventEmitter {
         }
       } else {
         try {
-          const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf-8', timeout: 2000 });
+          const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf-8', timeout: 2000, windowsHide: true });
           if (!isMindosOwnedCommandLine((stdout as string).trim())) {
             stop({ pid, label, verifiedMindosProcess: false, success: true });
             return;

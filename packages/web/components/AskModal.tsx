@@ -1,8 +1,9 @@
 'use client';
 
 import { useLocale } from '@/lib/stores/locale-store';
-import AskContent from '@/components/ask/AskContent';
-import type { AcpAgentSelection } from '@/hooks/useAskModal';
+import ChatContent from '@/components/chat/ChatContent';
+import type { AcpAgentSelection, AskAgentRuntimeSelection } from '@/hooks/useAskModal';
+import type { AskContextRequest } from '@/lib/ask-context-events';
 
 interface AskModalProps {
   open: boolean;
@@ -10,37 +11,41 @@ interface AskModalProps {
   currentFile?: string;
   initialMessage?: string;
   initialAcpAgent?: AcpAgentSelection | null;
+  initialAgentRuntime?: AskAgentRuntimeSelection | null;
+  initialNewSession?: boolean;
+  openRequestId?: number;
+  contextRequest?: AskContextRequest | null;
   onFirstMessage?: () => void;
-  askMode?: 'panel' | 'popup';
-  onModeSwitch?: () => void;
 }
 
-export default function AskModal({ open, onClose, currentFile, initialMessage, initialAcpAgent, onFirstMessage, askMode, onModeSwitch }: AskModalProps) {
+export default function AskModal({ open, onClose, currentFile, initialMessage, initialAcpAgent, initialAgentRuntime, initialNewSession, openRequestId, contextRequest, onFirstMessage }: AskModalProps) {
   const { t } = useLocale();
 
   if (!open) return null;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end md:items-start justify-center md:pt-[10vh] modal-backdrop"
+      className="fixed inset-0 z-app-modal flex items-end md:items-start justify-center md:pt-[10vh] modal-backdrop"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label={t.ask.title}
-        className="w-full md:max-w-2xl md:mx-4 bg-card border-t md:border border-border/60 rounded-t-2xl md:rounded-2xl shadow-2xl flex flex-col h-[92vh] md:h-auto md:max-h-[75vh]"
+        className="w-full md:max-w-2xl md:mx-4 bg-card border-t md:border border-border/60 rounded-t-xl md:rounded-xl shadow-xl flex flex-col h-[92vh] md:h-auto md:max-h-[75vh]"
       >
-        <AskContent
+        <ChatContent
           visible={open}
           variant="modal"
           onClose={onClose}
           currentFile={currentFile}
           initialMessage={initialMessage}
           initialAcpAgent={initialAcpAgent}
+          initialAgentRuntime={initialAgentRuntime}
+          initialNewSession={initialNewSession}
+          openRequestId={openRequestId}
+          contextRequest={contextRequest}
           onFirstMessage={onFirstMessage}
-          askMode={askMode}
-          onModeSwitch={onModeSwitch}
         />
       </div>
     </div>

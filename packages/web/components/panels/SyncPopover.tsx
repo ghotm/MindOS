@@ -1,68 +1,78 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { RefreshCw, CheckCircle2, XCircle, X } from 'lucide-react';
-import { DOT_COLORS, getStatusLevel, getSyncLabel, useSyncAction } from '../SyncStatusBar';
+import { DOT_COLORS } from '../SyncStatusBar';
+import { formatSyncError, getStatusLevel, getSyncLabel } from '@/lib/sync-ui';
+import { useSyncAction } from '@/lib/sync-status-store';
+import { useLocale } from '@/lib/stores/locale-store';
 import type { SyncStatus } from '../settings/types';
 import { PrimaryButton } from '../settings/Primitives';
+import { FLOATING_SURFACE_CLASS, useDismissableFloatingLayer } from '@/components/shared/FloatingSurface';
 
 interface SyncPopoverProps {
+  id?: string;
   open: boolean;
   onClose: () => void;
   anchorRect: DOMRect | null;
   railWidth: number;
   onOpenSyncSettings: () => void;
   syncStatus: SyncStatus | null;
+  syncStale?: boolean;
+  syncLoadError?: string | null;
   onSyncStatusRefresh: () => Promise<void>;
 }
 
-export default function SyncPopover({ open, onClose, anchorRect, railWidth, onOpenSyncSettings, syncStatus, onSyncStatusRefresh }: SyncPopoverProps) {
+export default function SyncPopover({ id, open, onClose, anchorRect, railWidth, onOpenSyncSettings, syncStatus, syncStale, syncLoadError, onSyncStatusRefresh }: SyncPopoverProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const { syncing, syncResult, syncNow } = useSyncAction(onSyncStatusRefresh);
+  const { t } = useLocale();
+  const syncT = t.sidebar?.sync as Record<string, unknown> | undefined;
+  const { syncing, syncResult, syncError, syncNow } = useSyncAction(onSyncStatusRefresh, syncT);
 
-  // Close on ESC
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [onClose, open]);
-
-  // Close on click outside
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    const id = setTimeout(() => window.addEventListener('mousedown', handler), 0);
-    return () => { clearTimeout(id); window.removeEventListener('mousedown', handler); };
-  }, [onClose, open]);
+  useDismissableFloatingLayer({
+    enabled: open,
+    refs: [ref],
+    onClose,
+    delayMouseDown: true,
+  });
 
   if (!open || !anchorRect) return null;
 
-  const level = getStatusLevel(syncStatus, syncing);
-  const { label: statusText } = getSyncLabel(level, syncStatus);
+  const level = syncStale && syncStatus ? 'error' : getStatusLevel(syncStatus, syncing);
+  const { label: statusText, tooltip: statusDetail } = syncStale && syncStatus
+    ? {
+      label: (syncT?.syncStale as string) ?? 'Sync status stale',
+      tooltip: syncLoadError
+        ? formatSyncError(syncLoadError, syncT)
+        : ((syncT?.syncStaleHint as string) ?? 'MindOS could not refresh sync status. The displayed state may be outdated.'),
+    }
+    : getSyncLabel(level, syncStatus, syncT);
+  const showRetryStatus = !!(syncStale && syncStatus);
 
   // Position: anchor near the button, avoid going off-screen top
   const popoverTop = Math.max(8, anchorRect.bottom - 180);
+  const viewportWidth = typeof window === 'undefined' ? railWidth + 288 : window.innerWidth;
+  const maxLeft = Math.max(8, viewportWidth - 288);
+  const popoverLeft = Math.min(Math.max(8, railWidth), maxLeft);
 
   return (
     <div
+      id={id}
       ref={ref}
-      className="fixed z-40 w-[240px] border rounded-lg bg-card shadow-lg border-border animate-in fade-in slide-in-from-left-2 duration-150"
+      role="dialog"
+      aria-label={t.sidebar?.syncLabel ?? 'Sync'}
+      className={`${FLOATING_SURFACE_CLASS} w-[calc(100vw-16px)] max-w-[280px] animate-in fade-in slide-in-from-left-2 duration-150`}
       style={{
         top: popoverTop,
-        left: railWidth,
+        left: popoverLeft,
       }}
     >
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
-        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Sync</span>
+        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t.sidebar?.syncLabel ?? 'Sync'}</span>
         <button
           onClick={onClose}
-          className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors focus-visible:ring-2 focus-visible:ring-ring"
-          aria-label="Close"
+          className="hit-target-box inline-flex h-8 w-8 items-center justify-center text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-md)]"
+          aria-label={t.search?.close ?? 'Close'}
         >
           <X size={14} />
         </button>
@@ -73,28 +83,48 @@ export default function SyncPopover({ open, onClose, anchorRect, railWidth, onOp
           <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${DOT_COLORS[level]} ${
             level === 'syncing' || level === 'conflicts' || level === 'error' ? 'animate-pulse' : ''
           }`} />
-          <span className="text-sm text-foreground">{statusText}</span>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium text-foreground">{statusText}</p>
+            <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{statusDetail}</p>
+          </div>
           {syncResult === 'success' && <CheckCircle2 size={14} className="text-success shrink-0" />}
           {syncResult === 'error' && <XCircle size={14} className="text-error shrink-0" />}
         </div>
+        {syncError && (
+          <div className="rounded-md border border-destructive/25 bg-destructive/10 px-2.5 py-2 text-xs text-destructive" role="alert" aria-live="polite">
+            {syncError.split('\n').map((line, i) => (
+              <span key={i} className={`block ${i > 0 ? 'text-destructive/70' : ''}`}>{line}</span>
+            ))}
+          </div>
+        )}
 
         {/* Actions */}
         <div className="flex items-center gap-2">
-          {level !== 'off' && (
+          {showRetryStatus ? (
+            <PrimaryButton
+              onClick={() => { void onSyncStatusRefresh(); }}
+              className="flex min-h-9 items-center gap-1.5 px-3 text-xs"
+            >
+              <RefreshCw size={12} />
+              {(syncT?.retry as string) ?? 'Retry'}
+            </PrimaryButton>
+          ) : level !== 'off' && level !== 'conflicts' && (
             <PrimaryButton
               onClick={syncNow}
               disabled={syncing}
-              className="text-xs px-3 py-1.5 flex items-center gap-1.5"
+              className="flex min-h-9 items-center gap-1.5 px-3 text-xs"
             >
               <RefreshCw size={12} className={syncing ? 'animate-spin' : ''} />
-              Sync Now
+              {(syncT?.syncNow as string) ?? 'Sync now'}
             </PrimaryButton>
           )}
           <button
             onClick={() => { onOpenSyncSettings(); onClose(); }}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors rounded px-1 py-0.5 focus-visible:ring-2 focus-visible:ring-ring"
+            className="hit-target-box inline-flex min-h-9 items-center px-2 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [--hit-target-hover-bg:var(--muted)] [--hit-target-radius:var(--radius-md)]"
           >
-            Settings →
+            {level === 'conflicts'
+              ? ((syncT?.resolveConflicts as string)?.replace('{n}', String(syncStatus?.conflicts?.length ?? 0)) ?? 'Resolve conflicts')
+              : (t.search?.openSettings ?? 'Open settings')}
           </button>
         </div>
       </div>

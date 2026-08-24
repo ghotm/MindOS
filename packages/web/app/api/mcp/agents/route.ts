@@ -1,4 +1,6 @@
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
 import os from 'os';
 import path from 'path';
 import {
@@ -6,7 +8,6 @@ import {
   type MindosCustomMcpAgentDef,
   type MindosMcpAgentRegistryDef,
 } from '@geminilight/mindos/server';
-import { loadSkills } from '@mariozechner/pi-coding-agent';
 import {
   MCP_AGENTS,
   detectAgentConfiguredMcpServers,
@@ -25,6 +26,7 @@ import { toNextResponse } from '../../_mindos-adapter';
 export async function GET() {
   const projectRoot = getProjectRoot();
   const mindRoot = getMindRoot();
+  const { loadSkills } = await import('@earendil-works/pi-coding-agent');
 
   return toNextResponse(await handleMcpAgentsGet({
     agents: getAllAgents() as Record<string, MindosMcpAgentRegistryDef>,
@@ -45,6 +47,7 @@ export async function GET() {
     loadMindosSkills: () => {
       const { skills } = loadSkills({
         cwd: projectRoot,
+        agentDir: path.join(os.homedir(), '.pi'),
         skillPaths: [
           path.join(projectRoot, 'packages', 'web', 'data', 'skills'),
           path.join(projectRoot, 'skills'),

@@ -3,7 +3,16 @@
  * Replaces the previously separate AGENT_BINARY_MAP, AGENT_OVERRIDES, and INSTALL_COMMANDS maps.
  */
 
-import type { AcpRegistryEntry, AcpTransportType } from './types.js';
+import type {
+  AcpAdapterConnectionType,
+  AcpMcpCapabilities,
+  AcpAdapterOutputCapabilities,
+  AcpAdapterOutputKind,
+  AcpPromptCapabilities,
+  AcpRegistryEntry,
+  AcpSessionCapabilities,
+  AcpTransportType,
+} from './types.js';
 
 /* ── Types ─────────────────────────────────────────────────────────────── */
 
@@ -21,20 +30,66 @@ export interface AcpAgentDescriptor {
   args: string[];
   /** Install command shown in UI / used by auto-install */
   installCmd?: string;
+  /** Non-sensitive adapter contract metadata surfaced in runtime diagnostics. */
+  adapterMetadata?: AcpAgentAdapterMetadata;
   /** Curated display name (overrides registry name) */
   displayName?: string;
   /** Curated description (overrides registry description) */
   description?: string;
 }
 
+export interface AcpAgentAdapterCommandDeclaration {
+  name: string;
+  description?: string;
+}
+
+export interface AcpAgentAdapterModelDeclaration {
+  id: string;
+  label?: string;
+  description?: string;
+}
+
+export interface AcpAgentAdapterSessionCapabilities extends AcpSessionCapabilities {
+  loadSession?: boolean;
+}
+
+export interface AcpAgentAdapterMetadata {
+  connectionType?: AcpAdapterConnectionType;
+  authRequired?: boolean;
+  supportsStreaming?: boolean;
+  models?: AcpAgentAdapterModelDeclaration[];
+  promptCapabilities?: AcpPromptCapabilities;
+  mcpCapabilities?: AcpMcpCapabilities;
+  sessionCapabilities?: AcpAgentAdapterSessionCapabilities;
+  output?: AcpAdapterOutputCapabilities;
+  healthCheck?: {
+    command?: string;
+    timeoutMs?: number;
+    summary?: string;
+  };
+  commands?: AcpAgentAdapterCommandDeclaration[];
+}
+
 /** User override for a specific agent, persisted in settings. */
 export interface AcpAgentOverride {
+  /** Optional display name for custom ACP agents. Built-in descriptors still own curated names. */
+  name?: string;
+  /** Optional description for custom ACP agents. */
+  description?: string;
   /** Override command path (e.g., "/usr/local/bin/gemini") */
   command?: string;
   /** Override CLI args (e.g., ["--acp", "--verbose"]) */
   args?: string[];
   /** Extra environment variables */
   env?: Record<string, string>;
+  /** Additional command names to probe on PATH for custom ACP agents */
+  detectCommands?: string[];
+  /** Presence directories/config paths used as a fallback signal when PATH probing fails */
+  presenceDirs?: string[];
+  /** Install command shown in UI when a custom ACP agent is not detected */
+  installCmd?: string;
+  /** Non-sensitive adapter contract metadata surfaced in runtime diagnostics. */
+  adapterMetadata?: AcpAgentAdapterMetadata;
   /** false = skip this agent entirely (default: true) */
   enabled?: boolean;
 }
@@ -66,7 +121,6 @@ export const AGENT_ALIASES: Record<string, string> = {
   'claude-acp':  'claude',
   'codebuddy':   'codebuddy-code',
   'codex':       'codex-acp',
-  'pi-acp':      'pi',
 };
 
 /** Resolve an agent ID to its canonical form (idempotent for canonical IDs). */
@@ -81,7 +135,7 @@ export function resolveAlias(agentId: string): string {
  * Only canonical entries — aliases are handled by AGENT_ALIASES above.
  */
 export const AGENT_DESCRIPTORS: Record<string, AcpAgentDescriptor> = {
-  'gemini':          { binary: 'gemini',          detectCommands: ['gemini'],      presenceDirs: ['~/.gemini/'], cmd: 'gemini',    args: ['--experimental-acp'], installCmd: 'npm install -g @google/gemini-cli',
+  'gemini':          { binary: 'gemini',          detectCommands: ['gemini'],      presenceDirs: ['~/.gemini/'], cmd: 'gemini',    args: ['--acp'], installCmd: 'npm install -g @google/gemini-cli',
     displayName: 'Gemini CLI',
     description: 'Google Gemini 驱动的编程智能体。支持多文件编辑、代码审查、调试和项目级重构，原生集成 Google 搜索实时查询技术文档。' },
   'claude':          { binary: 'claude',          detectCommands: ['claude'],      presenceDirs: ['~/.claude/'], cmd: 'npx',       args: ['--yes', '@agentclientprotocol/claude-agent-acp'], installCmd: 'npm install -g @anthropic-ai/claude-code',
@@ -90,7 +144,7 @@ export const AGENT_DESCRIPTORS: Record<string, AcpAgentDescriptor> = {
   'codebuddy-code':  { binary: 'codebuddy',       detectCommands: ['codebuddy'],   presenceDirs: ['~/.codebuddy/'], cmd: 'codebuddy', args: ['--acp'], installCmd: 'npm install -g @tencent-ai/codebuddy-code',
     displayName: 'CodeBuddy Code',
     description: '腾讯云智能编程助手。基于混元大模型，支持代码补全、生成、审查和多文件重构，深度理解中文语境，适配国内开发生态。' },
-  'codex-acp':       { binary: 'codex',           detectCommands: ['codex'],       presenceDirs: ['~/.codex/'], cmd: 'codex',     args: [],        installCmd: 'npm install -g @openai/codex',
+  'codex-acp':       { binary: 'codex',           detectCommands: ['codex'],       presenceDirs: ['~/.codex/'], cmd: 'npx',       args: ['--yes', '@agentclientprotocol/codex-acp'], installCmd: 'npm install -g @openai/codex',
     displayName: 'Codex',
     description: 'OpenAI Codex 编程智能体。基于 GPT 系列模型，擅长代码生成、自动化任务和多语言编程支持。' },
   'cursor':          { binary: 'cursor',          detectCommands: ['cursor'],      presenceDirs: ['~/.cursor/extensions/'], cmd: 'cursor',    args: [],
@@ -105,7 +159,7 @@ export const AGENT_DESCRIPTORS: Record<string, AcpAgentDescriptor> = {
   'goose':           { binary: 'goose',           cmd: 'goose',     args: [],        installCmd: 'pip install goose-ai',
     displayName: 'Goose',
     description: 'Block 开源自主编程智能体。支持多模型后端，可扩展插件架构，擅长复杂任务自动化。' },
-  'opencode':        { binary: 'opencode',        cmd: 'opencode',  args: [],        installCmd: 'go install github.com/opencode-ai/opencode@latest',
+  'opencode':        { binary: 'opencode',        cmd: 'opencode',  args: ['acp'],   installCmd: 'go install github.com/opencode-ai/opencode@latest',
     displayName: 'OpenCode',
     description: '开源终端编程智能体。Go 实现，轻量快速，支持多模型后端和丰富的代码编辑工具。' },
   'kilo':            { binary: 'kilo',            cmd: 'kilo',      args: [],        installCmd: 'npm install -g @kilocode/cli',
@@ -114,19 +168,13 @@ export const AGENT_DESCRIPTORS: Record<string, AcpAgentDescriptor> = {
   'openclaw':        { binary: 'openclaw',        detectCommands: ['openclaw'],    presenceDirs: ['~/.openclaw/'], cmd: 'openclaw',  args: [],
     displayName: 'OpenClaw',
     description: 'OpenClaw 编程智能体。开源 Claude Code 替代方案，支持多模型后端和完整的 agentic 工作流。' },
-  'pi':              { binary: 'pi',              detectCommands: ['pi'],          presenceDirs: ['~/.pi/'], cmd: 'pi',        args: [],
-    displayName: 'Pi Agent',
-    description: 'Pi Agent 编程智能体。轻量级终端编程助手。' },
   'auggie':          { binary: 'auggie',          detectCommands: ['auggie'],      presenceDirs: ['~/.augment/'], cmd: 'auggie',    args: [],
     displayName: 'Auggie',
     description: 'Augment Code 编程智能体。支持代码理解、生成和全仓库上下文感知。' },
-  'iflow':           { binary: 'iflow',           detectCommands: ['iflow'],       presenceDirs: ['~/.iflow/'], cmd: 'iflow',     args: [],
-    displayName: 'iFlow',
-    description: 'iFlow 编程智能体。AI 驱动的工作流自动化工具。' },
-  'kimi':            { binary: 'kimi',            detectCommands: ['kimi'],        presenceDirs: ['~/.kimi/'], cmd: 'kimi',      args: [],
+  'kimi':            { binary: 'kimi',            detectCommands: ['kimi'],        presenceDirs: ['~/.kimi/'], cmd: 'kimi',      args: ['acp'],
     displayName: 'Kimi',
     description: 'Moonshot AI Kimi 编程智能体。擅长超长上下文理解，支持中文语境下的代码生成与分析。' },
-  'qwen-code':       { binary: 'qwen-code',       detectCommands: ['qwen-code', 'qwen'], presenceDirs: ['~/.qwen/'], cmd: 'qwen-code', args: [], installCmd: 'npm install -g @qwen-code/qwen-code',
+  'qwen-code':       { binary: 'qwen',            detectCommands: ['qwen', 'qwen-code'], presenceDirs: ['~/.qwen/'], cmd: 'qwen',      args: ['--acp'], installCmd: 'npm install -g @qwen-code/qwen-code',
     displayName: 'Qwen Code',
     description: '阿里通义千问 Qwen 编程智能体。基于 Qwen 大模型，支持代码生成、审查和多语言编程，深度适配中文开发场景。' },
   'lingma':          { binary: 'lingma',           detectCommands: ['lingma'],      presenceDirs: ['~/.lingma/'], cmd: 'lingma',    args: [],
@@ -250,22 +298,29 @@ export interface DetectableAgent {
   presenceDirs?: string[];
   installCmd?: string;
   description?: string;
+  adapterMetadata?: AcpAgentAdapterMetadata;
+  source: 'descriptor' | 'user-config';
 }
 
 /**
  * Return the canonical list of agents for local detection.
  * Pure local data — no CDN fetch, no async, no network dependency.
  */
-export function getDetectableAgents(): DetectableAgent[] {
-  return Object.entries(AGENT_DESCRIPTORS).map(([id, desc]) => ({
-    id,
-    name: desc.displayName ?? id,
-    binary: desc.binary,
-    detectCommands: desc.detectCommands,
-    presenceDirs: desc.presenceDirs,
-    installCmd: desc.installCmd,
-    description: desc.description,
-  }));
+export function getDetectableAgents(overrides?: Record<string, AcpAgentOverride>): DetectableAgent[] {
+  return [
+    ...Object.entries(AGENT_DESCRIPTORS).map(([id, desc]) => ({
+      id,
+      name: desc.displayName ?? id,
+      binary: desc.binary,
+      detectCommands: desc.detectCommands,
+      presenceDirs: desc.presenceDirs,
+      installCmd: desc.installCmd,
+      description: desc.description,
+      adapterMetadata: desc.adapterMetadata,
+      source: 'descriptor' as const,
+    })),
+    ...getConfiguredDetectableAgents(overrides),
+  ];
 }
 
 /**
@@ -288,32 +343,49 @@ export function findUserOverride(
 
 /** Parse and validate acpAgents config from raw settings JSON. */
 export function parseAcpAgentOverrides(raw: unknown): Record<string, AcpAgentOverride> | undefined {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-  const obj = raw as Record<string, unknown>;
+  const entries = normalizeAcpAgentOverrideEntries(raw);
+  if (!entries) return undefined;
   const result: Record<string, AcpAgentOverride> = {};
   let hasEntries = false;
 
-  for (const [key, val] of Object.entries(obj)) {
-    if (!val || typeof val !== 'object' || Array.isArray(val)) continue;
-    const entry = val as Record<string, unknown>;
+  for (const [key, entry] of entries) {
+    if (!isSafeAgentId(key)) continue;
     const override: AcpAgentOverride = {};
 
-    if (typeof entry.command === 'string' && entry.command.trim()) {
-      override.command = entry.command.trim();
+    const name = sanitizeOptionalString(entry.name, 80);
+    if (name) override.name = name;
+    const description = sanitizeOptionalString(entry.description, 500);
+    if (description) override.description = description;
+    const command = sanitizeOptionalString(entry.command ?? entry.cliCommand ?? entry.defaultCliPath, 500);
+    if (command) {
+      override.command = command;
     }
-    if (Array.isArray(entry.args)) {
-      override.args = entry.args.filter((a): a is string => typeof a === 'string');
+    if (Array.isArray(entry.args) || Array.isArray(entry.acpArgs)) {
+      const args = sanitizeStringArray(entry.args ?? entry.acpArgs, 100, 500);
+      if (args) override.args = args;
     }
     if (entry.env && typeof entry.env === 'object' && !Array.isArray(entry.env)) {
       const env: Record<string, string> = {};
       for (const [ek, ev] of Object.entries(entry.env as Record<string, unknown>)) {
-        if (typeof ev === 'string') env[ek] = ev;
+        if (isSafeEnvKey(ek) && typeof ev === 'string') env[ek] = ev;
       }
       if (Object.keys(env).length > 0) override.env = env;
     }
     if (typeof entry.enabled === 'boolean') {
       override.enabled = entry.enabled;
     }
+    const detectCommands = sanitizeStringArray(
+      entry.detectCommands ?? (entry.cliCommand ? [entry.cliCommand] : undefined),
+      16,
+      160,
+    );
+    if (detectCommands) override.detectCommands = detectCommands;
+    const presenceDirs = sanitizeStringArray(entry.presenceDirs, 16, 500);
+    if (presenceDirs) override.presenceDirs = presenceDirs;
+    const installCmd = sanitizeOptionalString(entry.installCmd, 500);
+    if (installCmd) override.installCmd = installCmd;
+    const adapterMetadata = sanitizeAdapterMetadata(mergeAdapterMetadataInput(entry));
+    if (adapterMetadata) override.adapterMetadata = adapterMetadata;
 
     if (Object.keys(override).length > 0) {
       result[key] = override;
@@ -322,4 +394,337 @@ export function parseAcpAgentOverrides(raw: unknown): Record<string, AcpAgentOve
   }
 
   return hasEntries ? result : undefined;
+}
+
+/** Return user-configured ACP agents that are not built into MindOS. */
+export function getConfiguredDetectableAgents(
+  overrides?: Record<string, AcpAgentOverride>,
+): DetectableAgent[] {
+  if (!overrides) return [];
+  const agents: DetectableAgent[] = [];
+  for (const [agentId, override] of Object.entries(overrides)) {
+    const agent = overrideToDetectableAgent(agentId, override);
+    if (agent) agents.push(agent);
+  }
+  return agents;
+}
+
+/** Convert a user-configured custom ACP agent into a registry entry for runtime launch. */
+export function resolveConfiguredAcpAgentEntry(
+  agentId: string,
+  overrides?: Record<string, AcpAgentOverride>,
+): AcpRegistryEntry | null {
+  if (!isSafeAgentId(agentId)) return null;
+  const override = findUserOverride(agentId, overrides);
+  if (!isCustomAcpAgentOverride(agentId, override)) return null;
+  return {
+    id: agentId,
+    name: override.name ?? agentId,
+    description: override.description ?? '',
+    transport: 'stdio',
+    command: override.command,
+    args: override.args ?? [],
+    env: override.env,
+  };
+}
+
+function isSafeEnvKey(key: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+    && key !== '__proto__'
+    && key !== 'constructor'
+    && key !== 'prototype';
+}
+
+function isSafeAgentId(agentId: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(agentId)
+    && agentId !== '__proto__'
+    && agentId !== 'constructor'
+    && agentId !== 'prototype';
+}
+
+function sanitizeOptionalString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, maxLength) : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeAcpAgentOverrideEntries(raw: unknown): Array<[string, Record<string, unknown>]> | undefined {
+  const contributedAdapters = extractContributedAcpAdapters(raw);
+  if (contributedAdapters) {
+    const entries = contributedAdapters
+      .map((adapter): [string, Record<string, unknown>] | null => {
+        const id = sanitizeOptionalString(adapter.id, 120);
+        return id ? [id, adapter] : null;
+      })
+      .filter((entry): entry is [string, Record<string, unknown>] => entry !== null);
+    return entries.length > 0 ? entries : undefined;
+  }
+
+  if (!isRecord(raw)) return undefined;
+  return Object.entries(raw)
+    .filter((entry): entry is [string, Record<string, unknown>] => isRecord(entry[1]));
+}
+
+function extractContributedAcpAdapters(raw: unknown): Record<string, unknown>[] | undefined {
+  if (Array.isArray(raw)) {
+    const entries = raw.filter(isRecord);
+    return entries.length > 0 ? entries : undefined;
+  }
+  if (!isRecord(raw)) return undefined;
+  const contributes = isRecord(raw.contributes) ? raw.contributes : undefined;
+  const candidates = Array.isArray(raw.acpAdapters)
+    ? raw.acpAdapters
+    : Array.isArray(contributes?.acpAdapters)
+      ? contributes.acpAdapters
+      : undefined;
+  if (!candidates) return undefined;
+  const entries = candidates.filter(isRecord);
+  return entries.length > 0 ? entries : undefined;
+}
+
+function mergeAdapterMetadataInput(entry: Record<string, unknown>): unknown {
+  const nested = isRecord(entry.adapterMetadata) ? entry.adapterMetadata : {};
+  return {
+    ...nested,
+    connectionType: nested.connectionType ?? entry.connectionType,
+    authRequired: nested.authRequired ?? entry.authRequired,
+    supportsStreaming: nested.supportsStreaming ?? entry.supportsStreaming,
+    models: nested.models ?? entry.models,
+    promptCapabilities: nested.promptCapabilities ?? entry.promptCapabilities,
+    mcpCapabilities: nested.mcpCapabilities ?? entry.mcpCapabilities,
+    sessionCapabilities: nested.sessionCapabilities ?? entry.sessionCapabilities,
+    output: nested.output ?? nested.outputCapabilities ?? entry.output ?? entry.outputCapabilities,
+    outputKinds: nested.outputKinds ?? entry.outputKinds,
+    reviewableOutputKinds: nested.reviewableOutputKinds ?? entry.reviewableOutputKinds,
+    fileChanges: nested.fileChanges ?? entry.fileChanges,
+    artifacts: nested.artifacts ?? entry.artifacts,
+    checkpoints: nested.checkpoints ?? entry.checkpoints,
+    branches: nested.branches ?? entry.branches,
+    pullRequests: nested.pullRequests ?? entry.pullRequests,
+    healthCheck: nested.healthCheck ?? entry.healthCheck,
+    commands: nested.commands ?? entry.commands,
+  };
+}
+
+function sanitizeStringArray(value: unknown, maxItems: number, maxLength: number): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const result = Array.from(new Set(value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => entry.slice(0, maxLength))))
+    .slice(0, maxItems);
+  return result.length > 0 ? result : undefined;
+}
+
+function sanitizeBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function sanitizeConnectionType(value: unknown): AcpAdapterConnectionType | undefined {
+  return value === 'stdio' || value === 'cli' || value === 'http' || value === 'sse' ? value : undefined;
+}
+
+function sanitizeOutputKind(value: unknown): AcpAdapterOutputKind | undefined {
+  return value === 'text'
+    || value === 'diff'
+    || value === 'checkpoint'
+    || value === 'artifact'
+    || value === 'branch'
+    || value === 'pr'
+    ? value
+    : undefined;
+}
+
+function sanitizeOutputKinds(value: unknown): AcpAdapterOutputKind[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const result = Array.from(new Set(value
+    .map(sanitizeOutputKind)
+    .filter((kind): kind is AcpAdapterOutputKind => !!kind)))
+    .slice(0, 20);
+  return result.length > 0 ? result : undefined;
+}
+
+function sanitizeCapabilityFlags<T>(
+  value: unknown,
+  keys: Array<keyof T & string>,
+): T | undefined {
+  if (!isRecord(value)) return undefined;
+  const result: Record<string, boolean> = {};
+  for (const key of keys) {
+    if (typeof value[key] === 'boolean') result[key] = value[key] as boolean;
+  }
+  return Object.keys(result).length > 0 ? result as T : undefined;
+}
+
+function sanitizeModels(value: unknown): AcpAgentAdapterModelDeclaration[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const result = value
+    .map((model) => {
+      if (typeof model === 'string') {
+        const id = sanitizeOptionalString(model, 120);
+        return id ? { id, label: id } : null;
+      }
+      if (!isRecord(model)) return null;
+      const id = sanitizeOptionalString(model.id ?? model.value, 120);
+      if (!id) return null;
+      const label = sanitizeOptionalString(model.label ?? model.name, 120);
+      const description = sanitizeOptionalString(model.description, 300);
+      return {
+        id,
+        ...(label ? { label } : {}),
+        ...(description ? { description } : {}),
+      };
+    })
+    .filter((model): model is AcpAgentAdapterModelDeclaration => model !== null)
+    .slice(0, 100);
+  return result.length > 0 ? result : undefined;
+}
+
+function sanitizeOutputCapabilities(value: unknown): AcpAdapterOutputCapabilities | undefined {
+  const entry = isRecord(value) ? value : { kinds: value };
+  const kinds = new Set<AcpAdapterOutputKind>();
+  for (const kind of sanitizeOutputKinds(entry.kinds) ?? []) kinds.add(kind);
+  for (const kind of sanitizeOutputKinds(entry.outputKinds) ?? []) kinds.add(kind);
+  for (const kind of sanitizeOutputKinds(entry.reviewableOutputKinds) ?? []) kinds.add(kind);
+
+  const fileChanges = sanitizeBoolean(entry.fileChanges);
+  const artifacts = sanitizeBoolean(entry.artifacts);
+  const checkpoints = sanitizeBoolean(entry.checkpoints);
+  const branches = sanitizeBoolean(entry.branches);
+  const pullRequests = sanitizeBoolean(entry.pullRequests);
+
+  if (fileChanges) kinds.add('diff');
+  if (artifacts) kinds.add('artifact');
+  if (checkpoints) kinds.add('checkpoint');
+  if (branches) kinds.add('branch');
+  if (pullRequests) kinds.add('pr');
+  if (kinds.size === 0) return undefined;
+  kinds.add('text');
+
+  return {
+    kinds: Array.from(kinds).sort(),
+    ...(fileChanges !== undefined ? { fileChanges } : {}),
+    ...(artifacts !== undefined ? { artifacts } : {}),
+    ...(checkpoints !== undefined ? { checkpoints } : {}),
+    ...(branches !== undefined ? { branches } : {}),
+    ...(pullRequests !== undefined ? { pullRequests } : {}),
+  };
+}
+
+function isCustomAcpAgentOverride(
+  agentId: string,
+  override: AcpAgentOverride | undefined,
+): override is AcpAgentOverride & { command: string } {
+  if (!override || override.enabled === false || !override.command) return false;
+  return !AGENT_DESCRIPTORS[resolveAlias(agentId)];
+}
+
+function overrideToDetectableAgent(
+  agentId: string,
+  override: AcpAgentOverride,
+): DetectableAgent | null {
+  if (!isSafeAgentId(agentId)) return null;
+  if (!isCustomAcpAgentOverride(agentId, override)) return null;
+  const command = override.command.trim();
+  const detectCommands = override.detectCommands ?? [command];
+  return {
+    id: agentId,
+    name: override.name ?? agentId,
+    binary: detectCommands[0] ?? command,
+    detectCommands,
+    presenceDirs: override.presenceDirs,
+    installCmd: override.installCmd,
+    description: override.description,
+    adapterMetadata: override.adapterMetadata,
+    source: 'user-config',
+  };
+}
+
+function sanitizePositiveInteger(value: unknown, max: number): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const normalized = Math.floor(value);
+  if (normalized <= 0) return undefined;
+  return Math.min(normalized, max);
+}
+
+function sanitizeAdapterMetadata(value: unknown): AcpAgentAdapterMetadata | undefined {
+  if (!isRecord(value)) return undefined;
+  const entry = value;
+  const metadata: AcpAgentAdapterMetadata = {};
+  const connectionType = sanitizeConnectionType(entry.connectionType);
+  if (connectionType) metadata.connectionType = connectionType;
+  const authRequired = sanitizeBoolean(entry.authRequired);
+  if (authRequired !== undefined) metadata.authRequired = authRequired;
+  const supportsStreaming = sanitizeBoolean(entry.supportsStreaming);
+  if (supportsStreaming !== undefined) metadata.supportsStreaming = supportsStreaming;
+  const models = sanitizeModels(entry.models);
+  if (models) metadata.models = models;
+  const promptCapabilities = sanitizeCapabilityFlags<AcpPromptCapabilities>(
+    entry.promptCapabilities,
+    ['image', 'audio', 'embeddedContext'],
+  );
+  if (promptCapabilities) metadata.promptCapabilities = promptCapabilities;
+  const mcpCapabilities = sanitizeCapabilityFlags<AcpMcpCapabilities>(
+    entry.mcpCapabilities,
+    ['stdio', 'http', 'sse', 'acp'],
+  );
+  if (mcpCapabilities) metadata.mcpCapabilities = mcpCapabilities;
+  const sessionCapabilities = sanitizeCapabilityFlags<AcpAgentAdapterSessionCapabilities>(
+    entry.sessionCapabilities,
+    ['loadSession', 'list', 'delete', 'resume', 'fork', 'close'],
+  );
+  if (sessionCapabilities) metadata.sessionCapabilities = sessionCapabilities;
+  const outputObject: Record<string, unknown> = {
+    ...(isRecord(entry.output) ? entry.output : {}),
+    ...(isRecord(entry.outputCapabilities) ? entry.outputCapabilities : {}),
+  };
+  const output = sanitizeOutputCapabilities({
+    ...outputObject,
+    kinds: outputObject.kinds ?? (isRecord(entry.output) || isRecord(entry.outputCapabilities)
+      ? entry.outputKinds
+      : entry.output ?? entry.outputCapabilities ?? entry.outputKinds),
+    outputKinds: outputObject.outputKinds ?? entry.outputKinds,
+    reviewableOutputKinds: outputObject.reviewableOutputKinds ?? entry.reviewableOutputKinds,
+    fileChanges: outputObject.fileChanges ?? entry.fileChanges,
+    artifacts: outputObject.artifacts ?? entry.artifacts,
+    checkpoints: outputObject.checkpoints ?? entry.checkpoints,
+    branches: outputObject.branches ?? entry.branches,
+    pullRequests: outputObject.pullRequests ?? entry.pullRequests,
+  });
+  if (output) metadata.output = output;
+  if (entry.healthCheck && typeof entry.healthCheck === 'object' && !Array.isArray(entry.healthCheck)) {
+    const health = entry.healthCheck as Record<string, unknown>;
+    const command = sanitizeOptionalString(health.command ?? health.versionCommand, 240);
+    const summary = sanitizeOptionalString(health.summary, 300);
+    const timeoutMs = sanitizePositiveInteger(health.timeoutMs ?? health.timeout, 60_000);
+    if (command || summary || timeoutMs !== undefined) {
+      metadata.healthCheck = {
+        ...(command ? { command } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(summary ? { summary } : {}),
+      };
+    }
+  }
+  if (Array.isArray(entry.commands)) {
+    const commands = entry.commands
+      .filter((command): command is Record<string, unknown> => !!command && typeof command === 'object' && !Array.isArray(command))
+      .map((command) => {
+        const name = sanitizeOptionalString(command.name, 80);
+        if (!name) return null;
+        const description = sanitizeOptionalString(command.description, 240);
+        return {
+          name,
+          ...(description ? { description } : {}),
+        };
+      })
+      .filter((command): command is AcpAgentAdapterCommandDeclaration => command !== null)
+      .slice(0, 50);
+    if (commands.length > 0) metadata.commands = commands;
+  }
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
 }

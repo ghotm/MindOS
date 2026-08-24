@@ -2,9 +2,11 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import Link from 'next/link';
-import { CheckCircle2, AlertCircle, ChevronDown, Activity, ArrowRight } from 'lucide-react';
+import { CheckCircle2, AlertCircle, ChevronDown, Activity, ArrowRight, History } from 'lucide-react';
 import { encodePath } from '@/lib/utils';
 import { useLocale } from '@/lib/stores/locale-store';
+import { agentReviewHref } from '@/lib/agent-review-links';
+import { AgentSectionHeading } from './AgentsPrimitives';
 import {
   type AgentOp,
   opKind, KindBadge, relativeTs, getFilePath,
@@ -17,6 +19,7 @@ export default function RecentActivityFeed() {
   const [ops, setOps] = useState<AgentOp[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
+  const copy = t.agentsContent?.overview;
 
   useEffect(() => {
     let cancelled = false;
@@ -46,29 +49,33 @@ export default function RecentActivityFeed() {
   const hiddenCount = meaningful.length - VISIBLE_OPS;
 
   if (loading) return (
-    <section className="animate-pulse" aria-label="Recent Activity">
-      <div className="h-4 w-36 bg-muted rounded mb-3" />
-      <div className="space-y-2">
-        <div className="h-10 bg-muted/50 rounded-lg" />
-        <div className="h-10 bg-muted/50 rounded-lg" />
+    <section aria-label="Recent Activity" aria-busy="true">
+      <AgentSectionHeading
+        icon={<Activity size={13} />}
+        title={copy?.recentActivity ?? 'Recent Activity'}
+        className="mb-3"
+      />
+      <div className="rounded-xl border border-border bg-card p-3">
+        <div className="space-y-2 animate-pulse">
+          <div className="h-8 rounded-lg bg-muted/45" />
+          <div className="h-8 rounded-lg bg-muted/35" />
+        </div>
       </div>
     </section>
   );
 
   if (ops.length === 0) return null;
 
-  const copy = t.agentsContent?.overview;
-
   return (
     <section aria-label="Recent Activity">
-      <div className="flex items-center gap-2.5 mb-5">
-        <div className="flex items-center justify-center w-6 h-6 rounded-md bg-[var(--amber-subtle)] text-[var(--amber)]"><Activity size={13} /></div>
-        <h2 className="text-[13px] font-semibold text-foreground tracking-wide">
-          {copy?.recentActivity ?? 'Recent Activity'}
-        </h2>
+      <div className="mb-5 flex items-start gap-3">
+        <AgentSectionHeading
+          icon={<Activity size={13} />}
+          title={copy?.recentActivity ?? 'Recent Activity'}
+        />
         <div className="ml-auto">
           <Link
-            href="/agents?tab=activity"
+            href="/agents?tab=runs"
             className="flex items-center gap-1.5 text-xs font-medium text-[var(--amber)] hover:opacity-80 transition-colors"
           >
             <ArrowRight size={12} />
@@ -81,6 +88,7 @@ export default function RecentActivityFeed() {
         {visible.map((op, i) => {
           const kind = opKind(op.tool);
           const filePath = getFilePath(op.params);
+          const canReviewChanges = !!filePath && (kind === 'write' || kind === 'create' || kind === 'delete');
 
           return (
             <div
@@ -101,6 +109,17 @@ export default function RecentActivityFeed() {
                 </Link>
               ) : (
                 <span className="flex-1" />
+              )}
+
+              {canReviewChanges && (
+                <Link
+                  href={agentReviewHref(filePath ?? undefined)}
+                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-[var(--amber)]/20 bg-[var(--amber-subtle)] px-1.5 text-[0.65rem] font-medium text-[var(--amber-text)] transition-colors hover:bg-[var(--amber)]/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  title={copy?.reviewChanges ?? 'Review changes'}
+                >
+                  <History size={10} />
+                  <span className="hidden xl:inline">{copy?.reviewChanges ?? 'Review'}</span>
+                </Link>
               )}
 
               {/* agent name badge */}

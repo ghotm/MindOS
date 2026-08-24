@@ -2,19 +2,20 @@
 
 import { useCallback, useRef, useState } from 'react';
 import { AlertCircle } from 'lucide-react';
-import AskContent from '@/components/ask/AskContent';
+import ChatContent from '@/components/chat/ChatContent';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { useResizeDrag } from '@/hooks/useResizeDrag';
 import { RIGHT_ASK_PANEL } from '@/lib/config/panel-sizes';
+import type { RightAskLayoutMode } from '@/lib/right-ask-layout';
 
 const DEFAULT_WIDTH = RIGHT_ASK_PANEL.DEFAULT;
 const MIN_WIDTH = RIGHT_ASK_PANEL.MIN;
 const MAX_WIDTH_ABS = RIGHT_ASK_PANEL.MAX_ABS;
-const ENTER_SNAP_THRESHOLD = 80;
+const ENTER_SNAP_THRESHOLD = RIGHT_ASK_PANEL.FOCUS_SNAP_LEFT_GAP;
 const EXIT_SNAP_THRESHOLD = 16;
-const MIN_CONTENT_WIDTH = RIGHT_ASK_PANEL.MIN_CONTENT;
 
-import type { AcpAgentSelection } from '@/hooks/useAskModal';
+import type { AcpAgentSelection, AskAgentRuntimeSelection } from '@/hooks/useAskModal';
+import type { AskContextRequest } from '@/lib/ask-context-events';
 
 interface RightAskPanelProps {
   open: boolean;
@@ -22,29 +23,33 @@ interface RightAskPanelProps {
   currentFile?: string;
   initialMessage?: string;
   initialAcpAgent?: AcpAgentSelection | null;
+  initialAgentRuntime?: AskAgentRuntimeSelection | null;
+  initialNewSession?: boolean;
+  openRequestId?: number;
+  contextRequest?: AskContextRequest | null;
   onFirstMessage?: () => void;
   width: number;
   onWidthChange: (w: number) => void;
   onWidthCommit: (w: number) => void;
-  askMode?: 'panel' | 'popup';
-  onModeSwitch?: () => void;
   maximized?: boolean;
-  onMaximize?: () => void;
+  onMaximize?: (restoreWidth?: number) => void;
   /** Left offset (px) to avoid covering Rail + Sidebar when maximized */
   sidebarOffset?: number;
+  layoutMode?: RightAskLayoutMode;
 }
 
 export default function RightAskPanel({
-  open, onClose, currentFile, initialMessage, initialAcpAgent, onFirstMessage,
-  width, onWidthChange, onWidthCommit, askMode, onModeSwitch,
+  open, onClose, currentFile, initialMessage, initialAcpAgent, initialAgentRuntime, initialNewSession, openRequestId, contextRequest, onFirstMessage,
+  width, onWidthChange, onWidthCommit,
   maximized = false, onMaximize, sidebarOffset = 0,
+  layoutMode = maximized ? 'focus' : 'docked',
 }: RightAskPanelProps) {
   const snapFiredRef = useRef(false);
-  const justExitedMaxRef = useRef(false);
+  const dragStartWidthRef = useRef(width);
 
-  const maxAvailable = typeof window !== 'undefined'
+  const maxAvailable = Math.max(MIN_WIDTH, typeof window !== 'undefined'
     ? window.innerWidth - sidebarOffset
-    : 1200;
+    : 1200);
 
   const [isDragging, setIsDragging] = useState(false);
 
@@ -52,41 +57,29 @@ export default function RightAskPanel({
     if (snapFiredRef.current) return;
     const clamped = Math.min(w, maxAvailable);
 
-    // Exit maximized: user drags right even a little (16px) → exit immediately
+    // Exit Focus when the user intentionally drags the edge back to the right.
     if (maximized && clamped < maxAvailable - EXIT_SNAP_THRESHOLD && onMaximize) {
-      justExitedMaxRef.current = true;
       onMaximize();
-      const maxPanelForContent = typeof window !== 'undefined'
-        ? window.innerWidth - sidebarOffset - MIN_CONTENT_WIDTH
-        : clamped;
-      onWidthChange(Math.min(clamped, maxPanelForContent));
+      onWidthChange(clamped);
       return;
     }
 
-    // Snap to fullscreen: panel near max edge OR content squeezed below minimum.
-    // Suppress content-based snap while justExitedMaxRef is true (user recently
-    // exited fullscreen and panel is still wide); only re-enable once the panel
-    // has been shrunk enough that content is comfortable (reset in handleMouseDown).
-    const contentRemaining = typeof window !== 'undefined'
-      ? window.innerWidth - sidebarOffset - clamped
-      : Infinity;
-    const shouldSnap = clamped >= maxAvailable - ENTER_SNAP_THRESHOLD
-      || (!justExitedMaxRef.current && contentRemaining < MIN_CONTENT_WIDTH);
-    if (!maximized && shouldSnap && onMaximize) {
-      snapFiredRef.current = true;
-      onMaximize();
-      return;
-    }
     if (!maximized) {
       onWidthChange(clamped);
     }
-  }, [maxAvailable, sidebarOffset, onMaximize, maximized, onWidthChange]);
+  }, [maxAvailable, onMaximize, maximized, onWidthChange]);
 
   const handleResizeEnd = useCallback((w: number) => {
     setIsDragging(false);
     if (snapFiredRef.current) return;
-    onWidthCommit(w);
-  }, [onWidthCommit]);
+    const clamped = Math.min(w, maxAvailable);
+    if (!maximized && clamped >= maxAvailable - ENTER_SNAP_THRESHOLD && onMaximize) {
+      snapFiredRef.current = true;
+      onMaximize(dragStartWidthRef.current);
+      return;
+    }
+    onWidthCommit(clamped);
+  }, [maxAvailable, maximized, onMaximize, onWidthCommit]);
 
   const rawMouseDown = useResizeDrag({
     width: maximized ? maxAvailable : width,
@@ -100,30 +93,26 @@ export default function RightAskPanel({
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     snapFiredRef.current = false;
+    dragStartWidthRef.current = width;
     setIsDragging(true);
-    // Only re-enable content-based snap once the panel has been shrunk enough
-    // that content is comfortably above minimum. This prevents the bounce:
-    // exit fullscreen → new drag → immediately re-snap because panel still wide.
-    if (justExitedMaxRef.current) {
-      const currentContent = typeof window !== 'undefined'
-        ? window.innerWidth - sidebarOffset - width
-        : Infinity;
-      if (currentContent >= MIN_CONTENT_WIDTH) {
-        justExitedMaxRef.current = false;
-      }
-    }
     rawMouseDown(e);
-  }, [rawMouseDown, sidebarOffset, width]);
+  }, [rawMouseDown, width]);
 
   const effectiveWidth = maximized
     ? `calc(100vw - ${sidebarOffset}px)`
-    : `${width}px`;
+    : `${Math.min(width, maxAvailable)}px`;
+
+  const depthClass = layoutMode === 'focus'
+    ? 'border-border shadow-2xl'
+    : layoutMode === 'protected'
+      ? 'border-border/70 shadow-xl'
+      : 'border-border/40 shadow-sm';
 
   return (
     <aside
       className={`
-        hidden md:flex fixed top-0 right-0 h-screen z-40
-        flex-col bg-background border-l border-border/40 shadow-[-4px_0_16px_rgba(0,0,0,0.04)]
+        hidden md:flex fixed top-[var(--app-titlebar-h)] right-0 h-[calc(100vh-var(--app-titlebar-h))] z-40
+        flex-col bg-background border-l ${depthClass}
         ${isDragging ? '' : 'transition-[width,transform] duration-200 ease-out'}
         ${open ? 'translate-x-0' : 'translate-x-full pointer-events-none'}
       `}
@@ -144,16 +133,18 @@ export default function RightAskPanel({
         </div>
       }>
         <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
-          <AskContent
+          <ChatContent
             visible={open}
             variant="panel"
             currentFile={open ? currentFile : undefined}
             initialMessage={initialMessage}
             initialAcpAgent={initialAcpAgent}
+            initialAgentRuntime={initialAgentRuntime}
+            initialNewSession={initialNewSession}
+            openRequestId={openRequestId}
+            contextRequest={contextRequest}
             onFirstMessage={onFirstMessage}
             onClose={onClose}
-            askMode={askMode}
-            onModeSwitch={onModeSwitch}
             maximized={maximized}
             onMaximize={onMaximize}
           />

@@ -4,6 +4,7 @@ import { resolveExistingSafe } from '../../foundation/security/index.js';
 import type { IFileSystem } from '../storage/index.js';
 import { existsSync } from 'node:fs';
 import * as path from 'path';
+import { redactSensitiveObject, redactSensitiveText } from '../../agent/turn/redaction.js';
 
 // Helper functions for Result type
 function ok<T>(value: T): Result<T> {
@@ -27,6 +28,7 @@ export interface ContentChangeEvent {
   path: string;
   source: ContentChangeSource;
   summary: string;
+  agentName?: string;
   before?: string;
   after?: string;
   beforePath?: string;
@@ -39,6 +41,7 @@ export interface ContentChangeInput {
   path: string;
   source: ContentChangeSource;
   summary: string;
+  agentName?: string;
   before?: string;
   after?: string;
   beforePath?: string;
@@ -57,8 +60,10 @@ interface ChangeLogState {
 
 interface ListOptions {
   path?: string;
+  space?: string;
   limit?: number;
   source?: ContentChangeSource;
+  agent?: string;
   op?: string;
   q?: string;
 }
@@ -74,6 +79,8 @@ const LOG_DIR_NAME = '.mindos';
 const CHANGE_LOG_FILE_NAME = 'change-log.json';
 const MAX_EVENTS = 500;
 const MAX_TEXT_CHARS = 12_000;
+const ROOT_SPACE_VALUE = '__root__';
+const UNKNOWN_AGENT_VALUE = '__agent_unknown__';
 
 function nowIso() {
   return new Date().toISOString();
@@ -109,6 +116,33 @@ function normalizeText(value: string | undefined): { value: string | undefined; 
     value: value.slice(0, MAX_TEXT_CHARS),
     truncated: true,
   };
+}
+
+function normalizeEventPath(value: string | undefined): string {
+  return typeof value === 'string' ? value.split('\\').join('/').replace(/^\/+/, '').replace(/\/+$/, '') : '';
+}
+
+function pathSpaceValue(value: string | undefined, op?: string): string {
+  const normalized = normalizeEventPath(value);
+  if (!normalized) return ROOT_SPACE_VALUE;
+  const [first, ...rest] = normalized.split('/');
+  if (rest.length > 0) return first || ROOT_SPACE_VALUE;
+  if (op === 'create_space' || op === 'rename_space') return first || ROOT_SPACE_VALUE;
+  return ROOT_SPACE_VALUE;
+}
+
+function eventSpaceValue(event: ContentChangeEvent): string {
+  const candidates = [event.afterPath, event.path, event.beforePath];
+  for (const candidate of candidates) {
+    const value = pathSpaceValue(candidate, event.op);
+    if (value !== ROOT_SPACE_VALUE) return value;
+  }
+  return ROOT_SPACE_VALUE;
+}
+
+function eventAgentValue(event: ContentChangeEvent): string | null {
+  if (event.source !== 'agent') return null;
+  return event.agentName?.trim() || UNKNOWN_AGENT_VALUE;
 }
 
 async function readChangeLogState(fs: IFileSystem, mindRoot: string): Promise<ChangeLogState> {
@@ -299,6 +333,7 @@ export async function appendContentChange(
     path: input.path,
     source: input.source,
     summary: input.summary,
+    agentName: input.source === 'agent' && input.agentName?.trim() ? input.agentName.trim() : undefined,
     before: before.value,
     after: after.value,
     beforePath: input.beforePath,
@@ -324,17 +359,21 @@ export async function listContentChanges(
   const state = await loadChangeLogState(fs, mindRoot);
   const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
   const pathFilter = options.path?.trim();
+  const spaceFilter = options.space?.trim();
   const sourceFilter = options.source;
+  const agentFilter = options.agent?.trim();
   const opFilter = options.op?.trim();
   const q = options.q?.trim().toLowerCase();
   const events = state.events.filter((event) => {
     if (pathFilter && event.path !== pathFilter && event.beforePath !== pathFilter && event.afterPath !== pathFilter) {
       return false;
     }
+    if (spaceFilter && eventSpaceValue(event) !== spaceFilter) return false;
     if (sourceFilter && event.source !== sourceFilter) return false;
+    if (agentFilter && eventAgentValue(event) !== agentFilter) return false;
     if (opFilter && event.op !== opFilter) return false;
     if (q) {
-      const haystack = `${event.path} ${event.beforePath ?? ''} ${event.afterPath ?? ''} ${event.summary} ${event.op} ${event.source}`.toLowerCase();
+      const haystack = `${event.path} ${event.beforePath ?? ''} ${event.afterPath ?? ''} ${event.summary} ${event.op} ${event.source} ${event.agentName ?? ''}`.toLowerCase();
       if (!haystack.includes(q)) return false;
     }
     return true;
@@ -376,10 +415,12 @@ export interface AgentAuditEvent {
   tool: string;
   params: Record<string, unknown>;
   result: 'ok' | 'error';
+  actionSummary?: string;
   message?: string;
   durationMs?: number;
   agentName?: string;
-  op?: 'append' | 'legacy_agent_audit_md_import' | 'legacy_agent_log_jsonl_import';
+  rawDebug?: Record<string, unknown>;
+  op?: 'append' | 'legacy_agent_audit_md_import';
 }
 
 export interface AgentAuditInput {
@@ -387,9 +428,11 @@ export interface AgentAuditInput {
   tool: string;
   params: Record<string, unknown>;
   result: 'ok' | 'error';
+  actionSummary?: string;
   message?: string;
   durationMs?: number;
   agentName?: string;
+  debugCapture?: 'none' | 'redacted_raw';
 }
 
 interface AgentAuditState {
@@ -397,14 +440,12 @@ interface AgentAuditState {
   events: AgentAuditEvent[];
   legacy?: {
     mdImportedCount?: number;
-    jsonlImportedCount?: number;
     lastImportedAt?: string | null;
   };
 }
 
 const AUDIT_LOG_FILE_NAME = 'agent-audit-log.json';
 const LEGACY_MD_FILE = 'Agent-Audit.md';
-const LEGACY_JSONL_FILE = '.agent-log.json';
 const MAX_AUDIT_EVENTS = 1000;
 const MAX_MESSAGE_CHARS = 2000;
 
@@ -416,8 +457,9 @@ function validIso(ts: string | undefined): string {
 
 function normalizeMessage(message: string | undefined): string | undefined {
   if (typeof message !== 'string') return undefined;
-  if (message.length <= MAX_MESSAGE_CHARS) return message;
-  return message.slice(0, MAX_MESSAGE_CHARS);
+  const redacted = redactSensitiveText(message);
+  if (redacted.length <= MAX_MESSAGE_CHARS) return redacted;
+  return redacted.slice(0, MAX_MESSAGE_CHARS);
 }
 
 function defaultAuditState(): AgentAuditState {
@@ -426,7 +468,6 @@ function defaultAuditState(): AgentAuditState {
     events: [],
     legacy: {
       mdImportedCount: 0,
-      jsonlImportedCount: 0,
       lastImportedAt: null,
     },
   };
@@ -458,10 +499,9 @@ async function readAuditState(fs: IFileSystem, mindRoot: string): Promise<AgentA
     if (!Array.isArray(parsed.events)) return defaultAuditState();
     return {
       version: 1,
-      events: parsed.events,
+      events: parsed.events.map(normalizePersistedAuditEvent).filter((event): event is AgentAuditEvent => Boolean(event)),
       legacy: {
         mdImportedCount: typeof parsed.legacy?.mdImportedCount === 'number' ? parsed.legacy.mdImportedCount : 0,
-        jsonlImportedCount: typeof parsed.legacy?.jsonlImportedCount === 'number' ? parsed.legacy.jsonlImportedCount : 0,
         lastImportedAt: typeof parsed.legacy?.lastImportedAt === 'string' ? parsed.legacy.lastImportedAt : null,
       },
     };
@@ -515,30 +555,17 @@ function parseLegacyMdBlocks(raw: string): LegacyAgentOp[] {
   return blocks;
 }
 
-function parseJsonLines(raw: string): LegacyAgentOp[] {
-  const entries: LegacyAgentOp[] = [];
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//')) continue;
-    try {
-      entries.push(JSON.parse(trimmed) as LegacyAgentOp);
-    } catch {
-      // Ignore malformed lines
-    }
-  }
-  return entries;
-}
-
 function toAuditEvent(entry: LegacyAgentOp, op: AgentAuditEvent['op'], idx: number): AgentAuditEvent {
   const tool = typeof entry.tool === 'string' && entry.tool.trim() ? entry.tool.trim() : 'unknown-tool';
   const result = entry.result === 'error' ? 'error' : 'ok';
-  const params = entry.params && typeof entry.params === 'object' ? entry.params : {};
+  const params = summarizeAuditParams(entry.params && typeof entry.params === 'object' ? entry.params : {});
   return {
     id: `legacy-${Date.now().toString(36)}-${idx.toString(36)}`,
     ts: validIso(entry.ts),
     tool,
     params,
     result,
+    actionSummary: buildAuditActionSummary(tool, params, result, entry.message),
     message: normalizeMessage(entry.message),
     durationMs: typeof entry.durationMs === 'number' ? entry.durationMs : undefined,
     op,
@@ -584,54 +611,6 @@ async function importLegacyMdIfNeeded(
     events: merged,
     legacy: {
       mdImportedCount: blocks.length,
-      jsonlImportedCount: state.legacy?.jsonlImportedCount ?? 0,
-      lastImportedAt: nowIso(),
-    },
-  };
-  await fs.remove(legacyPath);
-  return next;
-}
-
-async function importLegacyJsonlIfNeeded(
-  fs: IFileSystem,
-  mindRoot: string,
-  state: AgentAuditState
-): Promise<AgentAuditState> {
-  let legacyPath: string;
-  try {
-    legacyPath = resolveKnowledgePath(mindRoot, LEGACY_JSONL_FILE);
-  } catch {
-    return state;
-  }
-  const existsResult = await fs.exists(legacyPath);
-  if (!existsResult.ok || !existsResult.value) {
-    return state;
-  }
-
-  const readResult = await fs.readFile(legacyPath);
-  if (!readResult.ok) {
-    return state;
-  }
-
-  const lines = parseJsonLines(readResult.value);
-  const importedCount = state.legacy?.jsonlImportedCount ?? 0;
-  if (lines.length <= importedCount) {
-    if (lines.length > 0) await fs.remove(legacyPath);
-    return state;
-  }
-
-  const incoming = lines.slice(importedCount);
-  const imported = incoming.map((entry, idx) => toAuditEvent(entry, 'legacy_agent_log_jsonl_import', idx));
-  const merged = [...state.events, ...imported]
-    .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
-    .slice(0, MAX_AUDIT_EVENTS);
-
-  const next = {
-    ...state,
-    events: merged,
-    legacy: {
-      mdImportedCount: state.legacy?.mdImportedCount ?? 0,
-      jsonlImportedCount: lines.length,
       lastImportedAt: nowIso(),
     },
   };
@@ -641,12 +620,10 @@ async function importLegacyJsonlIfNeeded(
 
 async function loadAuditState(fs: IFileSystem, mindRoot: string): Promise<AgentAuditState> {
   const base = await readAuditState(fs, mindRoot);
-  const mdMigrated = await importLegacyMdIfNeeded(fs, mindRoot, base);
-  const migrated = await importLegacyJsonlIfNeeded(fs, mindRoot, mdMigrated);
+  const migrated = await importLegacyMdIfNeeded(fs, mindRoot, base);
   const changed =
     base.events.length !== migrated.events.length ||
-    (base.legacy?.mdImportedCount ?? 0) !== (migrated.legacy?.mdImportedCount ?? 0) ||
-    (base.legacy?.jsonlImportedCount ?? 0) !== (migrated.legacy?.jsonlImportedCount ?? 0);
+    (base.legacy?.mdImportedCount ?? 0) !== (migrated.legacy?.mdImportedCount ?? 0);
   if (changed) await writeAuditState(fs, mindRoot, migrated);
   return migrated;
 }
@@ -657,15 +634,26 @@ export async function appendAgentAuditEvent(
   input: AgentAuditInput
 ): Promise<Result<AgentAuditEvent>> {
   const state = await loadAuditState(fs, mindRoot);
+  const result = input.result === 'error' ? 'error' : 'ok';
+  const params = summarizeAuditParams(input.params && typeof input.params === 'object' ? input.params : {});
   const event: AgentAuditEvent = {
     id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     ts: validIso(input.ts),
     tool: input.tool,
-    params: input.params && typeof input.params === 'object' ? input.params : {},
-    result: input.result === 'error' ? 'error' : 'ok',
+    params,
+    result,
+    actionSummary: normalizeMessage(input.actionSummary) ?? buildAuditActionSummary(input.tool, params, result, input.message),
     message: normalizeMessage(input.message),
     durationMs: typeof input.durationMs === 'number' ? input.durationMs : undefined,
     agentName: typeof input.agentName === 'string' && input.agentName.trim() ? input.agentName.trim() : undefined,
+    ...(input.debugCapture === 'redacted_raw'
+      ? {
+          rawDebug: redactSensitiveObject({
+            params: input.params && typeof input.params === 'object' ? input.params : {},
+            ...(typeof input.message === 'string' ? { message: input.message } : {}),
+          }) as Record<string, unknown>,
+        }
+      : {}),
     op: 'append',
   };
   state.events.unshift(event);
@@ -687,14 +675,78 @@ export async function listAgentAuditEvents(
   return ok(state.events.slice(0, safeLimit));
 }
 
-export function parseAgentAuditJsonLines(raw: string): AgentAuditInput[] {
-  return parseJsonLines(raw).map((entry) => ({
-    ts: validIso(entry.ts),
-    tool: typeof entry.tool === 'string' && entry.tool.trim() ? entry.tool.trim() : 'unknown-tool',
-    params: entry.params && typeof entry.params === 'object' ? entry.params : {},
-    result: entry.result === 'error' ? 'error' : 'ok',
-    message: normalizeMessage(entry.message),
-    durationMs: typeof entry.durationMs === 'number' ? entry.durationMs : undefined,
-    agentName: typeof entry.agentName === 'string' ? entry.agentName : undefined,
-  }));
+function normalizePersistedAuditEvent(value: unknown): AgentAuditEvent | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Partial<AgentAuditEvent>;
+  const tool = typeof source.tool === 'string' && source.tool.trim() ? source.tool.trim() : 'unknown-tool';
+  const result = source.result === 'error' ? 'error' : 'ok';
+  const params = summarizeAuditParams(source.params && typeof source.params === 'object' ? source.params : {});
+  return {
+    id: typeof source.id === 'string' && source.id ? source.id : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    ts: validIso(source.ts),
+    tool,
+    params,
+    result,
+    actionSummary: normalizeMessage(source.actionSummary) ?? buildAuditActionSummary(tool, params, result, source.message),
+    message: normalizeMessage(source.message),
+    durationMs: typeof source.durationMs === 'number' ? source.durationMs : undefined,
+    agentName: typeof source.agentName === 'string' && source.agentName.trim() ? source.agentName.trim() : undefined,
+    ...(source.rawDebug && typeof source.rawDebug === 'object'
+      ? { rawDebug: redactSensitiveObject(source.rawDebug) as Record<string, unknown> }
+      : {}),
+    op: source.op,
+  };
+}
+
+function summarizeAuditParams(params: Record<string, unknown>): Record<string, unknown> {
+  const redacted = redactSensitiveObject(params) as Record<string, unknown>;
+  return summarizeAuditValue(redacted, 0) as Record<string, unknown>;
+}
+
+function summarizeAuditValue(value: unknown, depth: number): unknown {
+  if (typeof value === 'string') return summarizeAuditString(value);
+  if (value === null || value === undefined) return value;
+  if (typeof value !== 'object') return value;
+  if (depth >= 5) return '[max-depth]';
+  if (Array.isArray(value)) {
+    if (value.length > 20) return `[${value.length} items]`;
+    return value.map((item) => summarizeAuditValue(item, depth + 1));
+  }
+
+  const output: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    output[key] = shouldSummarizeAuditField(key, nested)
+      ? `[${String(nested ?? '').length} chars]`
+      : summarizeAuditValue(nested, depth + 1);
+  }
+  return output;
+}
+
+function shouldSummarizeAuditField(key: string, value: unknown): boolean {
+  return typeof value === 'string' && /^(content|text|message|prompt|body|raw|input|output|response|diff)$/i.test(key);
+}
+
+function summarizeAuditString(value: string): string {
+  const redacted = redactSensitiveText(value);
+  return redacted.length > MAX_MESSAGE_CHARS ? `[${redacted.length} chars]` : redacted;
+}
+
+function buildAuditActionSummary(
+  tool: string,
+  params: Record<string, unknown>,
+  result: 'ok' | 'error',
+  message?: string,
+): string {
+  const target = firstAuditString(params.path, params.filePath, params.filename, params.url, params.agent_id, params.agentId);
+  const query = firstAuditString(params.q, params.query);
+  const suffix = target ? ` target=${target}` : query ? ` query=${query}` : '';
+  const note = message ? ` ${normalizeMessage(message) ?? ''}` : '';
+  return `${tool} ${result}${suffix}${note}`.trim();
+}
+
+function firstAuditString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return summarizeAuditString(value.trim());
+  }
+  return undefined;
 }

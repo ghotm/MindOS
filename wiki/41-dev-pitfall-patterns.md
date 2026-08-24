@@ -74,6 +74,18 @@ rg 'text-red-|bg-red-|border-red-|text-green-|bg-green-|border-blue-' packages/w
 
 发现新泄漏就当场修，别攒着。
 
+### 规则 5b：新增同类 UI 前先选 primitive，不先复制页面 class
+
+如果要新增按钮、Select、popover、modal、toast、页面壳、settings card、panel row、renderer badge/table，先查 `wiki/21-design-principle.md` 的「Primitive 决策表」和「Surface taxonomy」。
+
+默认流程：
+
+1. 现有 primitive 能覆盖，就复用 primitive。
+2. primitive 只差一个常见变体，就给 primitive 加 variant，再迁移当前使用点。
+3. 只有一次性、强业务绑定且不会复用的样式，才允许留在组件里；PR 里说明原因。
+
+不要把旧组件里的一整串 `bg-[var(--amber)] ... focus-visible:ring-*`、`fixed z-50`、`rounded-2xl shadow-2xl`、`--hit-target-*` 复制到新位置。复制 class 会把历史债务扩散成新的设计系统。
+
 ## 本次治理的教训
 
 | 教训 | 行动 |
@@ -120,6 +132,38 @@ rg 'setStep' packages/web/components/SetupWizard.tsx
 ```
 
 逐一确认每个入口都有守卫。遗漏一个就是一个可被绕过的通道。
+
+### 规则 9：派生状态不能在异步过渡期间切换"数据来源"
+
+> 复盘 2026-06-12 rail 点击闪烁 bug：点击 Activity Bar 切换模块时，面板宽度/高亮闪烁数次。
+
+App Router 的 `pathname` 在 Link 点击后**异步**提交（RSC fetch 期间仍是旧值）。如果一个渲染值的"来源"由「本地 state 和路由派生 state 是否一致」决定（如 `routeControlled ? PANEL_WIDTH[x] : userWidth`），那么导航过渡期间两者必然短暂不一致，来源会翻转 2-4 次——每次翻转都是一帧动画（`transition-[width]` 放大成肉眼可见的闪烁）。同时，"纠正 stale state" 的 effect 若不感知过渡期，会把用户刚点的目标改回去，形成 tug-of-war。
+
+预防方法：
+
+1. **一个渲染值只允许一个来源**。宽度这类全局值，用户设置永远赢，per-panel 默认只在未设置时生效（见 `getLeftPanelWidth`），不允许"谁控制面板谁决定宽度"。
+2. **导航中的点击用显式 pending state 表达**（`PendingRouteNav { target, fromPathname }`），派生时 pending 优先；任何 pathname 变化使其在同一渲染内失效，不依赖 effect 时序。
+3. **纠正类 effect 必须让位于在途导航**：`if (pendingRoutePanel) return;`——否则它纠正的就是用户的点击本身。
+
+检查方法：**找出所有形如 `cond ? sourceA : sourceB` 的渲染值，问"cond 在异步过渡期间会不会短暂为意外值"**；以及所有自动 `setState` 的 effect，问"它会不会在用户操作还没生效时就把操作撤销"。
+
+### 规则 10：桌面端有 fixed titlebar 行，主滚动必须发生在 titlebar 下方的 `#main-content`
+
+> 复盘 2026-06-12 三连击 bug：chat focus-mode header、/view 面包屑、Edit/Source/View 工具条先后被报"按钮点不动，只有下边缘能点"。三者同根因。
+
+桌面端（≥768px 或 mac 壳）窗口第一行是 `fixed top-0 z-30` 的 titlebar tab 行（46px）。`#main-content` 是唯一主滚动容器，必须 `fixed` 在 `top: var(--app-titlebar-h)` 到 `bottom: 0` 之间，并用 `scrollbar-gutter: stable` 在内容区右侧稳定预留滚动槽。titlebar/tab header 不参与这个 gutter。
+
+由此产生三条**几何不变量**：
+
+1. **主页面不要回到 document scroll**。不要给 `body/html` 当业务滚动 owner，也不要给 page shell 再套新的满屏 `overflow-y-auto`。需要保留阅读位置、TOC 跳转、找页内内容时，统一走 `packages/web/lib/main-scroll-container.ts`。
+2. **普通页面仍然禁止裸视口高度**。`min-h-screen` / `h-screen` / `h-[100dvh]` / `min-h-[100dvh]` 等会比 bounded scrollport 高，制造无意义滚动余量。默认写 `min-h-[calc(100vh-var(--app-titlebar-h))]` / `h-[calc(100dvh-var(--app-titlebar-h))]`，或让容器填充 `#main-content` 的 `min-h-full`。
+3. **主滚动区内 sticky 用局部坐标**。`#main-content` 已经从 titlebar 下方开始，所以页面 header 在桌面端应是 `md:top-0`，FindInPage 这类二级 sticky 应是 `md:top-[var(--workspace-header-h)]`。只有 fixed overlay / panel 继续用 viewport 坐标里的 `var(--app-titlebar-h)`。
+
+例外只有两类（都要进白名单并写理由）：fixed 覆盖层本来就该盖住行（rail、移动抽屉、全屏 Modal）；内部组件自己的局部滚动容器（modal body、message list、panel list）拥有独立坐标系。
+
+**机器拦截**：`packages/web/__tests__/components/titlebar-geometry.test.ts` 和 `packages/web/__tests__/components/main-scrollbar-gutter.test.ts` 会检查 `#main-content` 是 bounded scrollport、滚动槽只在内容区预留、页面 sticky 没有重复加 titlebar offset。新增合法例外时改测试白名单并写理由，不要绕过。
+
+检查方法：**改完布局后量一下 `document.documentElement.scrollHeight` 是否不再承载业务滚动，`#main-content.getBoundingClientRect().top` 是否等于 `var(--app-titlebar-h)`，滚动条是否从 tab header 下方开始，以及页面 header 的 `getBoundingClientRect().top` 是否贴住内容 scrollport 顶部。**
 
 ### 本次治理的教训
 
@@ -175,5 +219,107 @@ done
 | `cp` 和 `cp -P` 行为不同 | 同步 workflow 里 symlink 必须用 `cp -P` |
 | 文件名是约定不是标准 | AGENTS.md 是通用名，各 Agent 通过各自的 symlink/config 指向它 |
 
+## dev server 运行期间不要重建 workspace 包的 dist
+
+### 问题
+
+`packages/web` 通过 exports map 消费 `@geminilight/mindos` 的 `dist/`。在 `next dev`（webpack watch）运行期间执行 `pnpm --filter @geminilight/mindos build` 重建 dist，webpack 会在「目录被清空/半写入」的瞬间解析模块，把 `Attempted import error: 'X' is not exported from ...` 烙进编译缓存——此后即使 dist 已完整，页面渲染依旧崩（layout 链上 import 为 undefined）、客户端导航全部 `Failed to fetch`、且反复全量重编译导致整站卡顿。事后用 `node -e "import('@geminilight/mindos/foundation')"` 验证 dist 明明是好的，极具迷惑性。
+
+### 规则 10：重建被 dev server 消费的包之前，先停 dev server
+
+```bash
+# ✅ 正确顺序
+tmux send-keys -t <dev-session> C-c
+pnpm --filter @geminilight/mindos build
+rm -rf packages/web/.next        # 若 dev server 曾撞上半成品 dist，必须清缓存
+<重新启动 dev server>
+```
+
+### 教训
+
+| 教训 | 行动 |
+|------|------|
+| webpack 缓存会保留「半成品 dist」时刻的解析结果 | 撞上后仅重启不够，要 `rm -rf .next` |
+| 报错指向 re-export 文件（如 `lib/core/security.ts`）而非真凶 | 看到 `is not exported from` 先查上游包 dist 的构建时间线 |
+| fresh worktree 没有 dist | 起 dev 前先 `pnpm --filter @geminilight/mindos build` |
+
+## tmux kill-session 不保证进程死透：重启后必须核对进程启动时间
+
+### 问题
+
+`tmux kill-session` 杀掉的是 tmux 会话，不保证会话里 spawn 的整棵进程树都退出——脱离了会话的子进程（如 MCP server）会残留并继续占着端口。随后「重启」起的新进程绑定端口时 `EADDRINUSE`，但若启动脚本不把这个错误抛到显眼处，新进程就**暗死**（或只有部分服务起来），旧进程顶着旧代码继续服务。表象是「明明重启了但改动不生效」，极易误判为代码或缓存问题。本次真实发生：17:00 启动的旧 MCP 进程一直占着 8577 端口，直到 18:03 才被发现——期间所有 MCP 请求都打在旧代码上。
+
+### 规则 11：重启服务后，核对每个进程的启动时间晚于构建时间
+
+```bash
+# 1. 找出所有相关端口的监听进程（一个都不能漏）
+lsof -nP -iTCP:3456 -iTCP:8577 -sTCP:LISTEN
+
+# 2. 查每个 pid 的启动时间
+ps -o pid,lstart,command -p <pid>
+
+# 3. 与构建产物的修改时间比对（macOS 用 stat -f；Linux 用 stat -c %y）
+stat -f %Sm packages/mindos/dist/index.js
+
+# 任何一个进程的 lstart 早于构建时间 = 旧进程，kill 掉再重启
+```
+
+### 教训
+
+| 教训 | 行动 |
+|------|------|
+| `tmux kill-session` ≠ 进程树死透 | 杀完会话后用 `lsof` 确认端口无残留监听 |
+| `EADDRINUSE` 可能暗死不报错 | 重启后必须验证新进程真的在监听，而不是只看启动日志滚过 |
+| 旧进程可以顶着旧代码服务一小时不被发现（17:00 的 MCP 进程占 8577 到 18:03） | 把「`ps -o lstart` 晚于 `stat -f %Sm`」纳入重启后的固定检查 |
+| 只查主进程不够，旁挂服务（MCP 等）各有自己的进程 | **每个**监听进程逐一核对启动时间，别抽查 |
+
+## 宽范围分支合并不能覆盖既有 UI 契约
+
+> 复盘 2026-06-14 v1.1.16 → v1.1.17 集成回退：一个 runtime / shell navigation 分支同时覆盖了 Titlebar tab、Echo 页面、Channel sidebar、View 保存事件等 UI 文件，导致 Home 入口、Echo 统一页面壳和多处既有 polish 被回退。
+
+### 问题根因
+
+宽分支的 commit message 往往只描述主目标（如 runtime / plugin / shell），但实际 diff 可能包含大量相邻 UI 文件。合并时如果只看冲突是否解决、测试是否绿，容易把旧实现当作“合理新实现”接受，尤其是以下几类细节：
+
+1. **页面壳 / 宽度契约** — `ContentPageShell` 被手写 `article` 宽度替代，视觉仍能显示，但与全局 workbench 宽度不一致。
+2. **入口按钮 / tab 模型契约** — Home 入口只在某些路由打开过 tab 后出现，刷新到 place route 时入口消失。
+3. **轻量 UI polish** — Channel sidebar、Echo hero、tab separator、preview tab 等不一定有业务断言，容易被大 diff 静默覆盖。
+4. **事件契约** — 保存文件后只发裸事件，不带路径信息，导致 sidebar / tab 状态不能精准刷新。
+
+### 规则 12：合并宽分支前先列高风险 UI 文件，再对照 good tag
+
+```bash
+git diff --name-status <good-tag>..HEAD -- packages/web/components packages/web/app packages/web/hooks packages/web/lib packages/web/__tests__
+```
+
+如果 diff 里出现 shell、sidebar、titlebar、page shell、route sync、保存事件、auth、channel 等共享文件，不能只看最终页面能不能打开。必须抽样对照上一个确认正常的 tag / commit，确认这些契约没有被旧实现覆盖。
+
+### 规则 13：对“看起来只是样式”的契约写 source contract 测试
+
+交互测试不一定能发现页面壳、header 形态、Home launcher 这种视觉契约。对容易被覆盖的结构用小型 source contract 测试锁住，例如：
+
+- `EchoSegmentPageClient` 必须使用 `ContentPageShell as="article"`，不能回退成手写 `mx-auto max-w-3xl`。
+- `EchoHero` 必须是 plain workbench header，不能回退成嵌套卡片 hero。
+- `TitlebarTabStrip` 必须在 place route 也显示 Home launcher，且 launcher 不参与 tab model。
+- `files-changed` 事件必须通过 `notifyFilesChanged(paths)` 发射，不能回到裸 `new Event('mindos:files-changed')`。
+
+### 规则 14：修覆盖回退时保留新功能，但恢复旧契约
+
+不要把宽分支整段 revert。正确做法是把 diff 拆成三类：
+
+| 类型 | 处理方式 |
+|------|----------|
+| 新功能本身 | 保留，例如插件、runtime、Obsidan 兼容新增能力 |
+| 被覆盖的旧契约 | 精准恢复，例如 Home tab、Echo page shell、Channel compact sidebar |
+| 互相矛盾的测试 | 以当前产品目标为准修测试，不用旧断言掩盖真实目标，也不要为了过测试删功能 |
+
+### 教训
+
+| 教训 | 行动 |
+|------|------|
+| commit message 的范围可能小于实际 diff | merge 前必须看 `--name-status`，尤其是共享 UI 文件 |
+| UI 回退常常“能显示但不一致” | 用 source contract 锁页面壳、入口按钮、事件 helper |
+| 宽分支不能靠大 revert 修 | 分离新功能、旧契约、冲突测试，做选择性恢复 |
+| 截图能抓视觉，但抓不到所有契约 | 截图 + DOM 断言 + source contract 三者配合 |
 
 避免硬编码

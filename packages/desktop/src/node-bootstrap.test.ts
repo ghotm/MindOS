@@ -4,7 +4,12 @@ import { EventEmitter } from 'events';
 import os from 'os';
 import { gzipSync } from 'zlib';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { _downloadFile_forTest, _extractTarGzSafe_forTest, removeMacQuarantineAttribute } from './node-bootstrap';
+import {
+  _downloadFile_forTest,
+  _extractTarGzSafe_forTest,
+  _verifyNodeArchiveSha256_forTest,
+  removeMacQuarantineAttribute,
+} from './node-bootstrap';
 
 const httpsGetMock = vi.hoisted(() => vi.fn());
 
@@ -90,7 +95,9 @@ describe('node-bootstrap', () => {
     const source = readFileSync(path.join(__dirname, 'node-bootstrap.ts'), 'utf-8');
 
     expect(source).not.toContain("spawnAsync('tar', ['xzf', tmpFile");
-    expect(source).toContain('extractTarGzSafe(tmpFile, NODE_DIR, 1)');
+    expect(source).toContain('import { getDesktopConfigDir } from \'./desktop-home\'');
+    expect(source).toContain('const nodeDir = getNodeDir();');
+    expect(source).toContain('extractTarGzSafe(tmpFile, nodeDir, 1)');
     expect(source).toContain('function resolveTarEntryPath(destDir: string, entryName: string)');
     expect(source).toContain('function resolveTarSymlinkTarget(destDir: string, entryPath: string, linkName: string)');
     expect(source).toContain('symlinkSync(safeLinkName, entryPath)');
@@ -134,7 +141,7 @@ describe('node-bootstrap', () => {
   it('destroys the active download request when the overall timeout fires', async () => {
     vi.useFakeTimers();
     try {
-      const request = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+      const request = Object.assign(new EventEmitter(), { destroy: vi.fn(), setTimeout: vi.fn() });
       httpsGetMock.mockImplementation(() => request);
 
       const download = _downloadFile_forTest('https://node.example/node.tar.gz', '/tmp/node.tar.gz', undefined, 1000);
@@ -156,7 +163,7 @@ describe('node-bootstrap', () => {
 
     httpsGetMock.mockImplementation((reqUrl, callback) => {
       calls.push(String(reqUrl));
-      const request = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+      const request = Object.assign(new EventEmitter(), { destroy: vi.fn(), setTimeout: vi.fn() });
       process.nextTick(() => {
         if (calls.length === 1) {
           callback({
@@ -184,6 +191,88 @@ describe('node-bootstrap', () => {
         'https://node.example/dist/node.tar.gz',
         'https://node.example/mirrors/node.tar.gz',
       ]);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('destroys a silently stalled download request via socket inactivity timeout', async () => {
+    const request = Object.assign(new EventEmitter(), {
+      destroy: vi.fn(),
+      destroyed: false,
+      setTimeout: vi.fn(),
+    });
+    httpsGetMock.mockImplementation(() => request);
+
+    // No overall timeout — the stall guard must work on its own
+    const download = _downloadFile_forTest('https://node.example/node.tar.gz', '/tmp/node-stall.tar.gz');
+    const rejected = expect(download).rejects.toThrow('Download stalled (no data for 60s)');
+
+    expect(request.setTimeout).toHaveBeenCalledWith(60_000, expect.any(Function));
+    const onStall = request.setTimeout.mock.calls[0][1] as () => void;
+    onStall();
+
+    await rejected;
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the socket inactivity timeout to every request in the redirect chain', async () => {
+    const requests: Array<{ setTimeout: ReturnType<typeof vi.fn> }> = [];
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'mindos-node-stall-chain-'));
+    const dest = path.join(tmpDir, 'node.tar.gz');
+
+    httpsGetMock.mockImplementation((_reqUrl, callback) => {
+      const request = Object.assign(new EventEmitter(), { destroy: vi.fn(), setTimeout: vi.fn() });
+      requests.push(request);
+      process.nextTick(() => {
+        if (requests.length === 1) {
+          callback({
+            statusCode: 302,
+            headers: { location: '/mirrors/node.tar.gz' },
+            resume: vi.fn(),
+          });
+          return;
+        }
+        callback({
+          statusCode: 200,
+          headers: { 'content-length': '2' },
+          pipe: (stream: NodeJS.WritableStream) => {
+            stream.end('ok');
+            return stream;
+          },
+        });
+      });
+      return request;
+    });
+
+    try {
+      await _downloadFile_forTest('https://node.example/dist/node.tar.gz', dest);
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        expect(request.setTimeout).toHaveBeenCalledWith(60_000, expect.any(Function));
+      }
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds the npmmirror fallback download with a finite overall timeout', () => {
+    const source = readFileSync(path.join(__dirname, 'node-bootstrap.ts'), 'utf-8');
+
+    // Official URL stays fail-fast; the mirror fallback must not hang forever
+    expect(source).toMatch(/downloadFile\(url,[\s\S]{0,200}30000\)/);
+    expect(source).toMatch(/downloadFile\(mirrorUrl,[\s\S]{0,200}600_000\)/);
+  });
+
+  it('rejects downloaded Node.js archives whose SHA-256 does not match the pinned official checksum', () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'mindos-node-checksum-'));
+    const archive = path.join(tmpDir, 'node.tar.gz');
+
+    try {
+      writeFileSync(archive, 'not the official Node.js archive', 'utf-8');
+      expect(() => {
+        _verifyNodeArchiveSha256_forTest(archive, 'node-v22.16.0-linux-x64.tar.gz');
+      }).toThrow('Node.js archive checksum mismatch');
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

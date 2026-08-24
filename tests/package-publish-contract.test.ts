@@ -13,6 +13,25 @@ function readText(relativePath: string): string {
 }
 
 describe('product npm publish contract', () => {
+  it('keeps every direct Pi runtime dependency on the same upgraded release', () => {
+    const product = readJson<{
+      devDependencies?: Record<string, string>;
+    }>('packages/mindos/package.json');
+    const web = readJson<{
+      dependencies?: Record<string, string>;
+    }>('packages/web/package.json');
+
+    for (const name of [
+      '@earendil-works/pi-agent-core',
+      '@earendil-works/pi-ai',
+      '@earendil-works/pi-coding-agent',
+    ]) {
+      expect(product.devDependencies?.[name], name).toBe('0.81.1');
+      expect(web.dependencies?.[name], name).toBe('0.81.1');
+    }
+    expect(web.dependencies?.['@earendil-works/pi-ai']).toBe('0.81.1');
+  });
+
   it('keeps the repository root as a private monorepo package', () => {
     const rootPkg = readJson<{
       private?: boolean;
@@ -35,6 +54,8 @@ describe('product npm publish contract', () => {
       bin?: Record<string, string>;
       files?: string[];
       scripts?: Record<string, string>;
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     }>('packages/mindos/package.json');
 
     expect(pkg.name).toBe('@geminilight/mindos');
@@ -94,9 +115,131 @@ describe('product npm publish contract', () => {
     expect(pkg.scripts?.prepack).not.toContain('packages/mindos/node_modules');
     expect(pkg.scripts?.prepack).not.toContain('packages/protocols/mcp-server/node_modules');
     expect(pkg.scripts?.prepack).not.toContain('packages/web/node_modules');
-    expect(pkg.scripts?.build).toBe('tsc && pnpm run build:protocols');
+    expect(pkg.scripts?.build).toBe('tsc && node ../../scripts/copy-mindos-agent-assets.mjs && pnpm run build:protocols');
     expect(pkg.scripts?.['build:protocols']).toBe('node ../../scripts/build-product-protocols.mjs');
     expect(pkg.scripts?.['type-check']).toBe('tsc --noEmit');
+    expect(pkg.dependencies).not.toHaveProperty('@anthropic-ai/claude-agent-sdk');
+    expect(pkg.devDependencies).toHaveProperty('@anthropic-ai/claude-agent-sdk');
+  });
+
+  it('ships the sunk agent core modules inside the publish closure', () => {
+    const pkg = readJson<{
+      files?: string[];
+      dependencies?: Record<string, string>;
+      exports?: Record<string, { types?: string; import?: string }>;
+    }>('packages/mindos/package.json');
+
+    // dist/ is whitelisted wholesale, so the compiled agent modules ship as
+    // long as the exports map routes the subpaths into dist.
+    expect(pkg.files).toContain('dist/');
+    expect(pkg.exports?.['./agent']).toEqual({
+      types: './dist/agent.d.ts',
+      import: './dist/agent.js',
+    });
+    expect(pkg.exports?.['./agent/*']).toEqual({
+      types: './dist/agent/*.d.ts',
+      import: './dist/agent/*.js',
+    });
+    expect(pkg.exports?.['./agent/prompt']).toEqual({
+      types: './dist/agent/prompt/index.d.ts',
+      import: './dist/agent/prompt/index.js',
+    });
+    expect(pkg.exports?.['./agent/prompt/*']).toEqual({
+      types: './dist/agent/prompt/*.d.ts',
+      import: './dist/agent/prompt/*.js',
+    });
+    expect(pkg.exports?.['./agent/mindos-pi']).toEqual({
+      types: './dist/agent/mindos-pi/index.d.ts',
+      import: './dist/agent/mindos-pi/index.js',
+    });
+    expect(pkg.exports?.['./agent/mindos-pi/extension']).toEqual({
+      types: './dist/agent/mindos-pi/extension/index.d.ts',
+      import: './dist/agent/mindos-pi/extension/index.js',
+    });
+    expect(pkg.exports?.['./agent/mindos-pi/extension/*']).toEqual({
+      types: './dist/agent/mindos-pi/extension/*.d.ts',
+      import: './dist/agent/mindos-pi/extension/*.js',
+    });
+    expect(pkg.exports?.['./agent/tool']).toEqual({
+      types: './dist/agent/tool/index.d.ts',
+      import: './dist/agent/tool/index.js',
+    });
+    expect(pkg.exports?.['./agent/tool/*']).toEqual({
+      types: './dist/agent/tool/*.d.ts',
+      import: './dist/agent/tool/*.js',
+    });
+
+    // Modules sunk from packages/web/lib/agent (spec-agent-core-consolidation).
+    // A missing source file here means the web shim re-exports a dangling
+    // subpath and npx runs die with MODULE_NOT_FOUND.
+    for (const module of [
+      'run-ledger-types',
+      'agent-run-context',
+      'result-reducer',
+      'global-state',
+      'redaction',
+      'run-ledger',
+      'run-timeline-events',
+      'run-cancellation',
+      'runtime-permission-bridge',
+      'user-question-bridge',
+      'subagent-orchestrator',
+      'subagent-ledger-extension',
+      'stream-consumer',
+      'stream-message-types',
+    ]) {
+      expect(existsSync(resolve(root, `packages/mindos/src/agent/${module}.ts`))).toBe(true);
+    }
+    for (const module of [
+      'base-prompt',
+      'index',
+      'system-prompt',
+    ]) {
+      expect(existsSync(resolve(root, `packages/mindos/src/agent/prompt/${module}.ts`))).toBe(true);
+    }
+    expect(existsSync(resolve(root, 'packages/mindos/src/agent/prompt/agent-prompt.txt'))).toBe(true);
+    for (const module of [
+      'capability-registry',
+      'file-write-lock',
+      'index',
+      'kb-tools',
+      'line-diff',
+      'paragraph-extract',
+    ]) {
+      expect(existsSync(resolve(root, `packages/mindos/src/agent/tool/${module}.ts`))).toBe(true);
+    }
+    for (const module of [
+      'index',
+      'types',
+    ]) {
+      expect(existsSync(resolve(root, `packages/mindos/src/agent/permission/${module}.ts`))).toBe(true);
+    }
+    expect(readText('packages/mindos/src/agent/tool/index.ts')).not.toContain('kb-extension');
+    expect(readText('packages/mindos/src/agent/tool/kb-extension.ts')).toContain("from '../mindos-pi/extension/kb-extension.js'");
+    for (const module of [
+      'index',
+      'resource-types',
+      'runtime',
+    ]) {
+      expect(existsSync(resolve(root, `packages/mindos/src/agent/mindos-pi/${module}.ts`))).toBe(true);
+    }
+    for (const module of [
+      'extension-tools',
+      'index',
+      'kb-extension',
+    ]) {
+      expect(existsSync(resolve(root, `packages/mindos/src/agent/mindos-pi/extension/${module}.ts`))).toBe(true);
+    }
+    for (const module of [
+      'index',
+      'policy',
+    ]) {
+      expect(existsSync(resolve(root, `packages/mindos/src/agent/mindos-pi/permission/${module}.ts`))).toBe(true);
+    }
+
+    // kb-tools value-imports TypeBox schemas at runtime — it must be a real
+    // dependency, not a devDependency, or npx installs crash on import.
+    expect(pkg.dependencies).toHaveProperty('@sinclair/typebox');
   });
 
   it('keeps product staging cleanup explicit and source-safe', () => {
@@ -129,11 +272,16 @@ describe('product npm publish contract', () => {
   it('keeps generated dependency directories out of source package entries', () => {
     const appNpmignore = readText('packages/web/.npmignore');
     const stageScript = readText('scripts/stage-product-package.mjs');
+    const setupScript = readText('scripts/setup.js');
 
     expect(appNpmignore).toMatch(/^node_modules\/$/m);
     expect(appNpmignore).toMatch(/^\.next\/$/m);
     expect(appNpmignore).toMatch(/^__tests__\/$/m);
     expect(appNpmignore).toMatch(/^vitest\.config\.ts$/m);
+    expect(stageScript).toContain("copyIfExists('skills', 'skills')");
+    expect(stageScript).toContain(".replaceAll('../packages/mindos/bin/', '../bin/')");
+    expect(setupScript).toContain("../packages/mindos/bin/lib/skill-install.js");
+    expect(setupScript).not.toContain('npx skills add');
     expect(appNpmignore).toMatch(/^eslint\.config\.mjs$/m);
     expect(appNpmignore).toMatch(/^tsconfig\.tsbuildinfo$/m);
     expect(stageScript).not.toContain("copyTree('packages/web', 'packages/web')");
@@ -148,6 +296,8 @@ describe('product npm publish contract', () => {
     const prepareStandalone = readText('scripts/prepare-standalone.mjs');
     const buildLib = readText('packages/mindos/bin/lib/build.js');
     const startCommand = readText('packages/mindos/bin/commands/start.js');
+    const nextConfig = readText('packages/web/next.config.ts');
+    const runtimeHealthContract = readText('packages/desktop/runtime-health-contract.json');
 
     expect(prepareStandalone).toContain('dereference: true');
     expect(prepareStandalone).toContain('__node_modules');
@@ -156,16 +306,46 @@ describe('product npm publish contract', () => {
     expect(prepareStandalone).toContain('prunePackageLocks');
     expect(prepareStandalone).toContain('pruneStandalonePayload');
     expect(prepareStandalone).toContain('pruneRuntimeNodeModules');
+    expect(prepareStandalone).toContain('pruneClaudeAgentSdkNativePackages');
+    expect(prepareStandalone).toContain('pruneRuntimePackageAssets(standaloneAppDir)');
     expect(prepareStandalone).toContain('copyRuntimeDependencyClosure');
-    expect(prepareStandalone).toContain("'@mariozechner/pi-coding-agent'");
+    expect(prepareStandalone).toContain('extract-pdf.cjs');
+    expect(prepareStandalone).toContain('extract-docx.cjs');
+    expect(prepareStandalone).toContain("'pdfjs-dist'");
+    expect(prepareStandalone).toContain("'mammoth'");
+    expect(prepareStandalone).toContain("'word-extractor'");
+    expect(prepareStandalone).toContain("'@earendil-works/pi-coding-agent'");
+    expect(prepareStandalone).toContain("'@earendil-works/pi-ai'");
     expect(prepareStandalone).toContain("'@sinclair/typebox'");
+    expect(prepareStandalone).toContain('BUILTIN_AGENT_EXTENSION_RUNTIME_DEPENDENCY_SEEDS');
+    expect(prepareStandalone).toContain('IM_RUNTIME_DEPENDENCY_SEEDS');
+    expect(prepareStandalone).toContain('materializeStandaloneAssets(appDir, { runtimeDependencySeeds })');
     expect(prepareStandalone).toContain("'partial-json'");
     expect(prepareStandalone).toContain("'openai'");
+    expect(prepareStandalone).toContain('...IM_RUNTIME_DEPENDENCY_SEEDS');
     expect(prepareStandalone).toContain('package-lock.json');
     expect(prepareStandalone).toContain('tsconfig.tsbuildinfo');
     expect(prepareStandalone).toContain("'.map'");
     expect(prepareStandalone).toContain("'@types'");
+    expect(prepareStandalone).not.toContain("    'scripts',\n    'styles',");
+    expect(prepareStandalone).not.toContain("    'lib',");
     expect(buildLib).toContain('__next');
+    expect(buildLib).toContain('pdfjs-dist');
+    expect(buildLib).toContain('word-extractor');
+    expect(nextConfig).toContain('./node_modules/mammoth/**');
+    expect(nextConfig).toContain('./node_modules/word-extractor/**');
+    expect(runtimeHealthContract).toContain('"docx-runtime"');
+    expect(runtimeHealthContract).toContain('"builtin-agent-extensions"');
+    expect(runtimeHealthContract).toContain('"mindos-extension-sources"');
+    expect(runtimeHealthContract).toContain('pi-web-access/index.ts');
+    expect(runtimeHealthContract).toContain('pi-subagents/src/extension/index.ts');
+    expect(runtimeHealthContract).toContain('pi-schedule-prompt/src/tool.ts');
+    expect(runtimeHealthContract).toContain('@juicesharp/rpiv-ask-user-question/index.ts');
+    expect(runtimeHealthContract).toContain('lib/agent/kb-extension.ts');
+    expect(runtimeHealthContract).toContain('lib/agent/subagent-ledger-extension.ts');
+    expect(runtimeHealthContract).toContain('lib/schedule-prompt/index.ts');
+    expect(runtimeHealthContract).toContain('lib/im/index.ts');
+    expect(startCommand).toContain('MINDOS_PROJECT_ROOT: PACKAGE_ROOT');
     expect(startCommand).toContain('__next');
     expect(prepareStandalone).not.toContain('rm -rf _standalone/node_modules');
     expect(existsSync(resolve(root, 'packages/web/.npmignore'))).toBe(true);
@@ -174,7 +354,21 @@ describe('product npm publish contract', () => {
   it('standalone verification exercises server-rendered Web pages, not only health', () => {
     const verifyStandalone = readText('scripts/verify-standalone.mjs');
 
-    expect(verifyStandalone).toContain("waitHttpOk('/', 30_000");
+    expect(verifyStandalone).toContain('createTcpServer');
+    expect(verifyStandalone).toContain("server.listen(0, '127.0.0.1'");
+    expect(verifyStandalone).not.toContain('31000 + Math.floor(Math.random() * 5000)');
+    expect(verifyStandalone).toMatch(/waitHttpOk\(\s*'\/',\s*30_000/);
+    expect(verifyStandalone).toContain('options.maxRedirects ?? 0');
+    expect(verifyStandalone).toContain('redirectStatusCodes');
+    expect(verifyStandalone).toContain('resolveLocalRedirect');
+    expect(verifyStandalone).toContain('redirectUrl.origin !== localOrigin');
+    expect(verifyStandalone).toContain('mkdtempSync');
+    expect(verifyStandalone).toContain('AUTH_TOKEN:');
+    expect(verifyStandalone).toContain('HOME: isolatedHome');
+    expect(verifyStandalone).toContain('MIND_ROOT: isolatedMindRoot');
+    expect(verifyStandalone).toContain('WEB_PASSWORD:');
+    expect(verifyStandalone).toContain('rmSync(isolatedRoot');
+    expect(verifyStandalone).toContain('{ maxRedirects: 5 }');
     expect(verifyStandalone).toContain('/api/health');
   });
 

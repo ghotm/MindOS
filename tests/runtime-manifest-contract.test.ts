@@ -72,6 +72,13 @@ describe('runtime artifact manifest contract', () => {
   it('keeps every runtime packaging path on the shared manifest writer', () => {
     expect(read('scripts/build-platform-packages.mjs')).toContain("from './runtime-manifest.mjs'");
     expect(read('scripts/build-runtime-archive.sh')).toContain('node scripts/runtime-manifest.mjs');
+    expect(read('scripts/build-runtime-archive.sh')).toContain('RUNTIME_DEPENDENCY_SEEDS');
+    expect(read('scripts/build-runtime-archive.sh')).toContain('Keep runtime .ts sources');
+    expect(read('scripts/build-runtime-archive.sh')).toContain('skills/mindos/SKILL.md');
+    expect(read('scripts/build-runtime-archive.sh')).toContain('skills/mindos-zh/SKILL.md');
+    expect(read('scripts/build-runtime-archive.sh')).toContain('packages/web/data/skills/mindos/SKILL.md');
+    expect(read('scripts/build-runtime-archive.sh')).toContain('packages/web/data/skills/mindos-zh/SKILL.md');
+    expect(read('scripts/build-runtime-archive.sh')).not.toContain("! -name '*.d.ts' -path '*/src/*' -delete");
     expect(read('packages/desktop/scripts/prepare-mindos-runtime.mjs')).toContain("../../../scripts/runtime-manifest.mjs");
   });
 });

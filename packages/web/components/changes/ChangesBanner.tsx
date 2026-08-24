@@ -3,16 +3,12 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
-import { History, X } from 'lucide-react';
-import { apiFetch } from '@/lib/api';
+import { FilePenLine, History, X } from 'lucide-react';
 import { useLocale } from '@/lib/stores/locale-store';
-
-interface ChangeSummaryPayload {
-  unreadCount: number;
-}
+import { agentReviewHref } from '@/lib/agent-review-links';
+import { useAgentChangeReview } from '@/hooks/useAgentChangeReview';
 
 export default function ChangesBanner() {
-  const [unreadCount, setUnreadCount] = useState(0);
   const [dismissedAtCount, setDismissedAtCount] = useState<number | null>(null);
   const [autoDismissed, setAutoDismissed] = useState(false);
   const prevUnreadRef = useRef(0);
@@ -20,47 +16,46 @@ export default function ChangesBanner() {
   const [isVisible, setIsVisible] = useState(false);
   const pathname = usePathname();
   const { t } = useLocale();
-
-  useEffect(() => {
-    let active = true;
-    const fetchSummary = async () => {
-      try {
-        const summary = await apiFetch<ChangeSummaryPayload>('/api/changes?op=summary');
-        if (active) setUnreadCount(summary.unreadCount);
-      } catch {
-        if (active) setUnreadCount(0);
+  const review = useAgentChangeReview();
+  const hasAgentReview = review.unreadAgentCount > 0;
+  const activeUnreadCount = hasAgentReview ? review.unreadAgentCount : review.unreadCount;
+  const reviewHref = hasAgentReview ? agentReviewHref() : '/changelog';
+  const notice = hasAgentReview
+    ? {
+        title: t.changes.agentReviewNoticeTitle(review.unreviewedPathCount),
+        description: t.changes.agentReviewNoticeMeta(review.unreadAgentCount),
+        action: t.changes.reviewAgentChanges,
+        Icon: FilePenLine,
       }
-    };
-    void fetchSummary();
-    const timer = setInterval(() => void fetchSummary(), 15_000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, []);
+    : {
+        title: t.changes.activityNoticeTitle(activeUnreadCount),
+        description: t.changes.activityNoticeMeta,
+        action: t.changes.viewActivity,
+        Icon: History,
+      };
 
   // Re-show banner when new changes arrive after auto-dismiss
   useEffect(() => {
-    if (unreadCount > prevUnreadRef.current && autoDismissed) {
+    if (activeUnreadCount > prevUnreadRef.current && autoDismissed) {
       setAutoDismissed(false);
     }
-    prevUnreadRef.current = unreadCount;
-  }, [unreadCount, autoDismissed]);
+    prevUnreadRef.current = activeUnreadCount;
+  }, [activeUnreadCount, autoDismissed]);
 
   const shouldShow = useMemo(() => {
-    if (unreadCount <= 0) return false;
+    if (activeUnreadCount <= 0) return false;
     if (pathname?.startsWith('/changes') || pathname?.startsWith('/changelog')) return false;
-    if (dismissedAtCount !== null && unreadCount <= dismissedAtCount) return false;
+    if (dismissedAtCount !== null && activeUnreadCount <= dismissedAtCount) return false;
     if (autoDismissed) return false;
     return true;
-  }, [dismissedAtCount, pathname, unreadCount, autoDismissed]);
+  }, [activeUnreadCount, dismissedAtCount, pathname, autoDismissed]);
 
-  // Auto-dismiss after 10 seconds
+  // Ordinary activity is a light notification; agent edits are a review task.
   useEffect(() => {
-    if (!shouldShow) return;
+    if (!shouldShow || hasAgentReview) return;
     const timer = setTimeout(() => setAutoDismissed(true), 10_000);
     return () => clearTimeout(timer);
-  }, [shouldShow]);
+  }, [hasAgentReview, shouldShow]);
 
   useEffect(() => {
     const durationMs = 160;
@@ -74,70 +69,66 @@ export default function ChangesBanner() {
     return () => clearTimeout(timer);
   }, [shouldShow]);
 
-  async function handleMarkAllRead() {
-    try {
-      await apiFetch('/api/changes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ op: 'mark_seen' }),
-      });
-    } catch {
-      // Keep UI resilient; polling will recover server state.
-    } finally {
-      setUnreadCount(0);
-      setDismissedAtCount(0);
-    }
-  }
-
   if (!isRendered) return null;
+
+  const Icon = notice.Icon;
+  const containerClass = hasAgentReview
+    ? 'fixed right-3 top-[calc(var(--app-titlebar-h)+60px)] z-app-popover w-[calc(100vw-24px)] max-w-[360px] transition-all duration-150 ease-out md:right-6 md:top-[calc(var(--app-titlebar-h)+12px)] md:w-[360px]'
+    : 'fixed bottom-4 right-3 z-app-popover w-[calc(100vw-24px)] max-w-[360px] transition-all duration-150 ease-out md:bottom-6 md:right-6 md:w-[360px]';
 
   return (
     <div
-      className={`fixed right-3 top-[60px] md:right-6 md:top-4 z-30 transition-all duration-150 ease-out ${
+      data-changes-banner
+      data-changes-banner-kind={hasAgentReview ? 'agent-review' : 'activity'}
+      className={`${containerClass} ${
         isVisible ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 -translate-y-2 scale-[0.98] pointer-events-none'
       }`}
     >
       <div
-        className="rounded-2xl border bg-card/95 backdrop-blur px-3 py-2.5 shadow-lg min-w-[260px] max-w-[350px]"
-        style={{
-          borderColor: 'color-mix(in srgb, var(--amber) 45%, var(--border))',
-          boxShadow: '0 12px 28px color-mix(in srgb, var(--amber) 14%, rgba(0,0,0,.24))',
-        }}
+        className="rounded-xl border border-border/80 bg-card/95 px-3.5 py-3 shadow-lg backdrop-blur"
       >
-        <div className="flex items-start gap-2.5">
+        <div className="flex items-start gap-3">
           <span
-            className="inline-flex h-7 w-7 items-center justify-center rounded-full text-[var(--amber)] bg-[var(--amber-subtle)]"
+            className={`mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+              hasAgentReview
+                ? 'bg-[var(--amber-subtle)] text-[var(--amber)]'
+                : 'bg-muted text-muted-foreground'
+            }`}
           >
-            <History size={14} />
+            <Icon size={15} aria-hidden="true" />
           </span>
           <div className="min-w-0 flex-1">
-            <p className="text-xs text-foreground font-medium whitespace-nowrap">
-              {t.changes.unreadBanner(unreadCount)}
-            </p>
-            <div className="mt-1 flex items-center gap-1.5">
-              <Link
-                href="/changelog"
-                className="inline-flex items-center rounded-md px-2.5 py-1 text-xs font-medium bg-[var(--amber)] text-[var(--amber-foreground)] focus-visible:ring-2 focus-visible:ring-ring hover:opacity-90"
-              >
-                {t.changes.reviewNow}
-              </Link>
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium leading-5 text-foreground">
+                  {notice.title}
+                </p>
+                <p className="mt-0.5 text-xs leading-4 text-muted-foreground">
+                  {notice.description}
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => void handleMarkAllRead()}
-                className="inline-flex items-center rounded-md px-2 py-1 text-xs font-medium bg-muted text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => setDismissedAtCount(activeUnreadCount)}
+                aria-label={t.changes.dismiss}
+                className="hit-target-box -mr-1 -mt-1 inline-flex h-7 w-7 shrink-0 items-center justify-center text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [--hit-target-hover-bg:color-mix(in_srgb,var(--muted)_60%,transparent)] [--hit-target-radius:var(--radius-md)]"
               >
-                {t.changes.markAllRead}
+                <X size={14} aria-hidden="true" />
               </button>
             </div>
+            <div className="mt-2.5 flex items-center">
+              <Link
+                href={reviewHref}
+                className={`hit-target-box inline-flex items-center px-2.5 py-1 text-xs font-medium focus-visible:ring-2 focus-visible:ring-ring [--hit-target-radius:var(--radius-md)] ${
+                  hasAgentReview
+                    ? 'text-[var(--amber-foreground)] hover:opacity-90 [--hit-target-bg:var(--amber)] [--hit-target-hover-bg:var(--amber)]'
+                    : 'text-foreground hover:text-foreground [--hit-target-bg:var(--muted)] [--hit-target-hover-bg:var(--muted)]'
+                }`}
+              >
+                {notice.action}
+              </Link>
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={() => setDismissedAtCount(unreadCount)}
-            aria-label={t.changes.dismiss}
-            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <X size={14} />
-          </button>
         </div>
       </div>
     </div>

@@ -11,12 +11,67 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   unlinkSync,
+  writeFileSync,
 } from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
 import { assertStandaloneAppFiles } from './runtime-health-contract.mjs';
+
+export const BUILTIN_AGENT_EXTENSION_RUNTIME_DEPENDENCY_SEEDS = [
+  '@juicesharp/rpiv-ask-user-question',
+  'pi-mcp-adapter',
+  'pi-schedule-prompt',
+  'pi-subagents',
+  'pi-web-access',
+];
+
+export const PI_SCHEDULE_PROMPT_STALE_RUNTIME_DEPENDENCIES = [
+  // pi-schedule-prompt@0.1.2 still declares this pre-rename package, but the
+  // MindOS wrapper only loads source files where it is a type-only import.
+  '@mariozechner/pi-coding-agent',
+];
+
+export const IM_RUNTIME_DEPENDENCY_SEEDS = [
+  '@larksuiteoapi/node-sdk',
+  '@slack/web-api',
+  'discord.js',
+  'grammy',
+];
+
+export const MINDOS_WEB_RUNTIME_EXTENSION_SOURCE_ENTRIES = [
+  'lib/acp/agent-descriptors.ts',
+  'lib/agent/ask-user-question-bridge-extension.ts',
+  'lib/agent/builtin-extension-runtime.ts',
+  'lib/agent/kb-extension.ts',
+  'lib/agent/mindos-mcp-adapter-extension.ts',
+  'lib/agent/providers.ts',
+  'lib/agent/reconnect.ts',
+  'lib/agent/subagent-ledger-extension.ts',
+  'lib/custom-endpoints.ts',
+  'lib/im',
+  'lib/mind-root.ts',
+  'lib/pi-integration/mcp-config.ts',
+  'lib/schedule-prompt/index.ts',
+  'lib/settings.ts',
+];
+
+export const RUNTIME_DEPENDENCY_SEEDS = [
+  '@sinclair/typebox',
+  '@earendil-works/pi-agent-core',
+  '@earendil-works/pi-ai',
+  '@earendil-works/pi-coding-agent',
+  'ignore',
+  'typebox',
+  'yaml',
+  ...BUILTIN_AGENT_EXTENSION_RUNTIME_DEPENDENCY_SEEDS,
+  ...IM_RUNTIME_DEPENDENCY_SEEDS,
+];
+
+export const RUNTIME_PACKAGE_ASSET_PRUNE_PATHS = [
+  path.join('pi-web-access', 'pi-web-fetch-demo.mp4'),
+  path.join('pi-web-access', 'banner.png'),
+];
 
 export function materializeStandaloneAssets(appDir, options = {}) {
   const standaloneDir = path.join(appDir, '.next', 'standalone');
@@ -44,21 +99,71 @@ export function materializeStandaloneAssets(appDir, options = {}) {
 
   materializeStandaloneNodeModules(appDir, standaloneDir);
   materializeNextServerLib(appDir, standaloneDir);
+  materializeRuntimeDependencySeeds(appDir, standaloneDir, options.runtimeDependencySeeds ?? []);
+  materializeMindosWebRuntimeExtensionSources(appDir, standaloneDir);
+  pruneDirectDevelopmentPackages(standaloneDir);
   materializeStandalonePackageDependencies(appDir, standaloneDir);
+  prunePnpmVirtualStores(standaloneDir);
   pruneNextProductionServerPayload(standaloneDir);
   pruneRedundantNestedPackages(standaloneDir);
   pruneTargetNativeBinaries(standaloneDir, {
     targetPlatform: options.targetPlatform ?? process.platform,
     targetArch: options.targetArch ?? process.arch,
   });
+  pruneClaudeAgentSdkNativePackages(standaloneDir);
   prunePackageDevelopmentPayload(standaloneDir);
+  pruneRuntimePackageAssets(standaloneDir);
+  prunePiSchedulePromptStaleDependencies(standaloneDir);
   pruneOptionalLocalEmbeddingRuntime(standaloneDir, {
     bundleLocalEmbeddingRuntime: options.bundleLocalEmbeddingRuntime === true
       || process.env.MINDOS_BUNDLE_LOCAL_EMBEDDING_RUNTIME === '1',
   });
+  pruneDirectDevelopmentPackages(standaloneDir);
   assertStandalonePackageDependencyClosure(standaloneDir);
   pruneStandaloneBuildJunk(standaloneDir);
   assertStandaloneAppFiles(appDir, 'prepare-mindos-bundle');
+}
+
+export function materializeMindosWebRuntimeExtensionSources(appDir, standaloneDir) {
+  const missing = [];
+  for (const rel of MINDOS_WEB_RUNTIME_EXTENSION_SOURCE_ENTRIES) {
+    const src = path.join(appDir, rel);
+    const dest = path.join(standaloneDir, rel);
+    if (!existsSync(src)) {
+      missing.push(rel);
+      continue;
+    }
+    rmSync(dest, { recursive: true, force: true });
+    mkdirSync(path.dirname(dest), { recursive: true });
+    copyDereferenced(src, dest);
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      '[prepare-mindos-bundle] Runtime extension source(s) missing from standalone bundle:\n'
+      + missing.map((item) => `  - ${item}`).join('\n')
+    );
+  }
+}
+
+function materializeRuntimeDependencySeeds(appDir, standaloneDir, seeds) {
+  const nodeModulesDir = path.join(standaloneDir, 'node_modules');
+  if (!existsSync(nodeModulesDir) || seeds.length === 0) return;
+
+  const missing = [];
+  for (const packageName of seeds) {
+    materializePackage(appDir, standaloneDir, packageName);
+    if (!existsSync(path.join(nodeModulesDir, packageName, 'package.json'))) {
+      missing.push(packageName);
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      '[prepare-mindos-bundle] Runtime dependency seed(s) missing from standalone bundle:\n'
+      + missing.map((item) => `  - ${item}`).join('\n')
+    );
+  }
 }
 
 function pruneStandaloneBuildJunk(standaloneDir) {
@@ -110,7 +215,7 @@ function materializePackageDependencies(appDir, standaloneDir, packageName, pack
     if (dependencySource) sourceByPackageName.set(dependencyName, dependencySource);
     const nestedDependencyDir = path.join(packageDir, 'node_modules', dependencyName);
     const topLevelDependencyDir = path.join(standaloneDir, 'node_modules', dependencyName);
-    const dependencyDir = packageAtPathSatisfies(nestedDependencyDir, dependencyRange)
+    const dependencyDir = packageAtPathSatisfies(nestedDependencyDir, dependencyRange, dependencyName)
       ? nestedDependencyDir
       : topLevelDependencyDir;
     materializePackageDependencies(
@@ -143,6 +248,7 @@ function assertStandalonePackageDependencyClosure(standaloneDir) {
 
     for (const [dependencyName, dependencyRange] of Object.entries(pkg.dependencies ?? {})) {
       if (isNodeBuiltin(dependencyName)) continue;
+      if (isTypeOnlyPackage(dependencyName)) continue;
       if (!dependencyResolvableFromStandalonePackage(nodeModulesDir, packageDir, dependencyName, dependencyRange)) {
         missing.push(`${packageName} -> ${dependencyName}@${dependencyRange}`);
       }
@@ -158,12 +264,16 @@ function assertStandalonePackageDependencyClosure(standaloneDir) {
 }
 
 function dependencyResolvableFromStandalonePackage(nodeModulesDir, packageDir, dependencyName, dependencyRange) {
-  return packageAtPathSatisfies(path.join(packageDir, 'node_modules', dependencyName), dependencyRange)
-    || packageAtPathSatisfies(path.join(nodeModulesDir, dependencyName), dependencyRange);
+  return packageAtPathSatisfies(path.join(packageDir, 'node_modules', dependencyName), dependencyRange, dependencyName)
+    || packageAtPathSatisfies(path.join(nodeModulesDir, dependencyName), dependencyRange, dependencyName);
 }
 
 function isNodeBuiltin(packageName) {
   return packageName.startsWith('node:');
+}
+
+function isTypeOnlyPackage(packageName) {
+  return packageName === '@types' || packageName.startsWith('@types/');
 }
 
 function listPackageNames(nodeModulesDir) {
@@ -171,6 +281,7 @@ function listPackageNames(nodeModulesDir) {
   if (!existsSync(nodeModulesDir)) return packageNames;
   for (const entry of readdirSync(nodeModulesDir, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name === '.bin') continue;
+    if (entry.name === '.pnpm') continue;
     if (entry.name.startsWith('@')) {
       const scopeDir = path.join(nodeModulesDir, entry.name);
       for (const scopedEntry of readdirSync(scopeDir, { withFileTypes: true })) {
@@ -195,6 +306,8 @@ function collectPackageEntries(nodeModulesDir, out = []) {
 
 function replaceSymlinksWithCopies(dir, nodeModulesRoot = dir, fallbackNodeModulesDir = null) {
   for (const name of readdirSync(dir)) {
+    if (name === '.pnpm') continue;
+
     const child = path.join(dir, name);
     const stat = lstatSync(child);
 
@@ -218,6 +331,14 @@ function replaceSymlinksWithCopies(dir, nodeModulesRoot = dir, fallbackNodeModul
     if (stat.isDirectory()) {
       replaceSymlinksWithCopies(child, nodeModulesRoot, fallbackNodeModulesDir);
     }
+  }
+}
+
+function prunePnpmVirtualStores(standaloneDir) {
+  const nodeModulesDir = path.join(standaloneDir, 'node_modules');
+  if (!existsSync(nodeModulesDir)) return;
+  for (const pnpmDir of findDirsNamed(nodeModulesDir, '.pnpm')) {
+    rmSync(pnpmDir, { recursive: true, force: true });
   }
 }
 
@@ -246,8 +367,11 @@ function materializeNextDependencies(appDir, standaloneDir, sourceNext) {
   const nextPackage = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
   const runtimeDeps = {
     ...(nextPackage.dependencies ?? {}),
-    ...(nextPackage.peerDependencies ?? {}),
   };
+  for (const [packageName, packageRange] of Object.entries(nextPackage.peerDependencies ?? {})) {
+    if (nextPackage.peerDependenciesMeta?.[packageName]?.optional === true) continue;
+    runtimeDeps[packageName] = packageRange;
+  }
   for (const packageName of Object.keys(runtimeDeps)) {
     materializePackage(appDir, standaloneDir, packageName, sourceNext);
   }
@@ -307,6 +431,32 @@ function pruneOptionalLocalEmbeddingRuntime(standaloneDir, { bundleLocalEmbeddin
     rmSync(path.join(nodeModulesDir, packageName), { recursive: true, force: true });
   }
   pruneEmptyParents(path.join(nodeModulesDir, '@huggingface', 'transformers'), nodeModulesDir);
+}
+
+function pruneDirectDevelopmentPackages(standaloneDir) {
+  const nodeModulesDir = path.join(standaloneDir, 'node_modules');
+  if (!existsSync(nodeModulesDir)) return;
+
+  const nodeModulesDirs = [nodeModulesDir];
+  collectNestedNodeModulesDirs(nodeModulesDir, nodeModulesDir, nodeModulesDirs);
+  for (const packageName of [
+    '@eslint',
+    '@types',
+    '@vitest',
+    'eslint',
+    'eslint-config-next',
+    'eslint-plugin-react-hooks',
+    'tsx',
+    'typescript',
+    'typescript-eslint',
+    'vitest',
+  ]) {
+    for (const currentNodeModulesDir of nodeModulesDirs) {
+      const packageDir = path.join(currentNodeModulesDir, packageName);
+      rmSync(packageDir, { recursive: true, force: true });
+      pruneEmptyParents(packageDir, currentNodeModulesDir);
+    }
+  }
 }
 
 function pruneDevOnlyDirs(currentDir) {
@@ -416,12 +566,17 @@ function readPackageJson(packageDir) {
 }
 
 function pruneEmptyParents(startPath, stopAt) {
+  const stopRoot = path.resolve(stopAt);
   let current = path.dirname(startPath);
-  while (current.startsWith(stopAt) && current !== path.dirname(current)) {
+  while (current !== path.dirname(current)) {
+    // path.relative boundary check — a string prefix would treat /a/b-extra
+    // as inside stopAt /a/b
+    const rel = path.relative(stopRoot, path.resolve(current));
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return;
     if (!existsSync(current)) return;
     if (readdirSync(current).length > 0) return;
     rmSync(current, { recursive: true, force: true });
-    if (current === stopAt) return;
+    if (rel === '') return; // just removed stopAt itself
     current = path.dirname(current);
   }
 }
@@ -438,29 +593,39 @@ function materializePackage(appDir, standaloneDir, packageName, fromDir = appDir
   const sourcePackage = resolvePackageDir(appDir, packageName, fromDir, dependencyRange);
   const destPackage = path.join(standaloneDir, 'node_modules', packageName);
   if (!existsSync(sourcePackage)) return null;
-  if (!existsSync(destPackage)) {
-    mkdirSync(path.dirname(destPackage), { recursive: true });
-    copyDereferenced(sourcePackage, destPackage);
-  }
 
   if (parentPackageDir) {
-    if (packageAtPathSatisfies(destPackage, dependencyRange)) return sourcePackage;
+    if (packageAtPathSatisfies(destPackage, dependencyRange, packageName)) return sourcePackage;
+
+    if (!existsSync(destPackage)) {
+      mkdirSync(path.dirname(destPackage), { recursive: true });
+      copyDereferenced(sourcePackage, destPackage);
+      return sourcePackage;
+    }
 
     const nestedDest = path.join(parentPackageDir, 'node_modules', packageName);
-    if (packageAtPathSatisfies(nestedDest, dependencyRange)) return sourcePackage;
+    if (packageAtPathSatisfies(nestedDest, dependencyRange, packageName)) return sourcePackage;
 
     rmSync(nestedDest, { recursive: true, force: true });
     mkdirSync(path.dirname(nestedDest), { recursive: true });
     copyDereferenced(sourcePackage, nestedDest);
+    return sourcePackage;
+  }
+
+  if (!packageAtPathSatisfies(destPackage, dependencyRange, packageName)) {
+    rmSync(destPackage, { recursive: true, force: true });
+    mkdirSync(path.dirname(destPackage), { recursive: true });
+    copyDereferenced(sourcePackage, destPackage);
   }
   return sourcePackage;
 }
 
-function packageAtPathSatisfies(packageDir, dependencyRange = '*') {
+function packageAtPathSatisfies(packageDir, dependencyRange = '*', expectedPackageName = null) {
   const packageJsonPath = path.join(packageDir, 'package.json');
   if (!existsSync(packageJsonPath)) return false;
   try {
     const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+    if (expectedPackageName && pkg.name !== expectedPackageName) return false;
     if (typeof pkg.version !== 'string' && !isWildcardRange(dependencyRange)) return false;
     return versionSatisfiesRange(pkg.version, dependencyRange);
   } catch {
@@ -523,19 +688,19 @@ function compareSemver(a, b) {
 function resolvePackageDir(appDir, packageName, fromDir = appDir, dependencyRange = '*') {
   const direct = path.join(appDir, 'node_modules', packageName);
   const packageLocal = path.join(fromDir, 'node_modules', packageName);
-  if (packageAtPathSatisfies(packageLocal, dependencyRange)) return realpathSync(packageLocal);
-  if (packageAtPathSatisfies(direct, dependencyRange)) return realpathSync(direct);
+  if (packageAtPathSatisfies(packageLocal, dependencyRange, packageName)) return realpathSync(packageLocal);
+  if (packageAtPathSatisfies(direct, dependencyRange, packageName)) return realpathSync(direct);
 
   try {
     const requireFromPackage = createRequire(path.join(realpathSync(fromDir), 'package.json'));
     const entrypoint = requireFromPackage.resolve(packageName);
     const packageRoot = findPackageRoot(entrypoint);
-    if (packageAtPathSatisfies(packageRoot, dependencyRange)) return packageRoot;
+    if (packageAtPathSatisfies(packageRoot, dependencyRange, packageName)) return packageRoot;
   } catch {
     // Fall through to pnpm store scan below.
   }
 
-  if (packageAtPathSatisfies(direct, dependencyRange)) return realpathSync(direct);
+  if (packageAtPathSatisfies(direct, dependencyRange, packageName)) return realpathSync(direct);
 
   const repoRoot = path.resolve(appDir, '..', '..');
   const pnpmDir = path.join(repoRoot, 'node_modules', '.pnpm');
@@ -545,7 +710,7 @@ function resolvePackageDir(appDir, packageName, fromDir = appDir, dependencyRang
   for (const entry of readdirSync(pnpmDir)) {
     if (!entry.startsWith(`${encodedName}@`)) continue;
     const candidate = path.join(pnpmDir, entry, 'node_modules', packageName);
-    if (packageAtPathSatisfies(candidate, dependencyRange)) return candidate;
+    if (packageAtPathSatisfies(candidate, dependencyRange, packageName)) return candidate;
   }
   return direct;
 }
@@ -571,13 +736,80 @@ export function copyAppForBundledRuntime(sourceAppDir, destAppDir) {
   mkdirSync(destAppDir, { recursive: true });
   copyFiltered(sourceAppDir, destAppDir, '');
   fixTurbopackHashedExternals(destAppDir);
+  const standaloneDir = path.join(destAppDir, '.next', 'standalone');
+  pruneRuntimePackageAssets(standaloneDir);
+  pruneClaudeAgentSdkNativePackages(standaloneDir);
+}
+
+export function pruneRuntimePackageAssets(standaloneDir) {
+  const nodeModulesDir = path.join(standaloneDir, 'node_modules');
+  if (!existsSync(nodeModulesDir)) return 0;
+
+  let removed = 0;
+  for (const rel of RUNTIME_PACKAGE_ASSET_PRUNE_PATHS) {
+    const target = path.join(nodeModulesDir, rel);
+    if (!existsSync(target)) continue;
+    rmSync(target, { recursive: true, force: true });
+    removed += 1;
+  }
+  return removed;
+}
+
+export function prunePiSchedulePromptStaleDependencies(standaloneDir) {
+  const packageJsonPath = path.join(standaloneDir, 'node_modules', 'pi-schedule-prompt', 'package.json');
+  if (!existsSync(packageJsonPath)) return 0;
+
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+  } catch {
+    return 0;
+  }
+
+  let removed = 0;
+  for (const dependencyName of PI_SCHEDULE_PROMPT_STALE_RUNTIME_DEPENDENCIES) {
+    if (!pkg.dependencies || !Object.hasOwn(pkg.dependencies, dependencyName)) continue;
+    delete pkg.dependencies[dependencyName];
+    removed += 1;
+  }
+
+  if (removed > 0) {
+    writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`, 'utf-8');
+  }
+  return removed;
+}
+
+export function pruneClaudeAgentSdkNativePackages(rootDir) {
+  if (!existsSync(rootDir)) return 0;
+  let removed = 0;
+  for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
+    const child = path.join(rootDir, entry.name);
+    if (!entry.isDirectory()) continue;
+    if (isClaudeAgentSdkNativePackageDir(child, entry.name)) {
+      rmSync(child, { recursive: true, force: true });
+      removed += 1;
+      continue;
+    }
+    removed += pruneClaudeAgentSdkNativePackages(child);
+  }
+  return removed;
+}
+
+function isClaudeAgentSdkNativePackageDir(dir, name) {
+  return (
+    path.basename(path.dirname(dir)) === '@anthropic-ai'
+    && name.startsWith('claude-agent-sdk-')
+  ) || name.startsWith('@anthropic-ai+claude-agent-sdk-');
 }
 
 /**
  * Turbopack appends a content hash to serverExternalPackages names
  * (e.g. `@mariozechner/pi-agent-core-805d1afb58d9a138`).
- * standalone/node_modules only has the original name. Create symlinks so
- * the hashed require resolves to the real package.
+ * standalone/node_modules only has the original name. Materialize the hashed
+ * name as a REAL directory copy — not a symlink (the desktop pipeline strips
+ * all symlinks for codesign safety and Windows can't create them unprivileged)
+ * and not a package.json "main" shim (can't replicate ESM `exports` maps or
+ * subpath requires like `pkg-<hash>/dist/x`).
  */
 function fixTurbopackHashedExternals(destAppDir) {
   const chunksDir = path.join(destAppDir, '.next', 'standalone', '.next', 'server', 'chunks');
@@ -602,10 +834,10 @@ function fixTurbopackHashedExternals(destAppDir) {
 
       if (existsSync(originalDir) && !existsSync(hashedDir)) {
         try {
-          symlinkSync(originalPkgName, hashedDir);
-          console.log(`[prepare-mindos-bundle] Symlink: ${hashed} → ${original}`);
+          copyDereferenced(originalDir, hashedDir);
+          console.log(`[prepare-mindos-bundle] Materialized hashed external: ${hashed} → copy of ${original}`);
         } catch (e) {
-          console.warn(`[prepare-mindos-bundle] Failed to symlink ${hashed}:`, e.message);
+          console.warn(`[prepare-mindos-bundle] Failed to materialize ${hashed}:`, e.message);
         }
       }
     }
@@ -677,6 +909,7 @@ function copyDereferenced(fromAbs, toAbs) {
     mkdirSync(path.dirname(toAbs), { recursive: true });
     mkdirSync(toAbs, { recursive: true });
     for (const name of readdirSync(fromAbs)) {
+      if (isExcludedDereferencedDirName(name)) continue;
       copyDereferenced(path.join(fromAbs, name), path.join(toAbs, name));
     }
     return;
@@ -686,4 +919,16 @@ function copyDereferenced(fromAbs, toAbs) {
     mkdirSync(path.dirname(toAbs), { recursive: true });
     copyFileSync(fromAbs, toAbs);
   }
+}
+
+function isExcludedDereferencedDirName(name) {
+  return [
+    '.next',
+    '.pnpm',
+    '.turbo',
+    '__next',
+    '__node_modules',
+    '_standalone',
+    'node_modules',
+  ].includes(name);
 }

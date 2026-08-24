@@ -9,7 +9,7 @@ let mockPrompt: ReturnType<typeof vi.fn>;
 let mockCancel: ReturnType<typeof vi.fn>;
 let mockSetSessionMode: ReturnType<typeof vi.fn>;
 let mockSetSessionConfigOption: ReturnType<typeof vi.fn>;
-let mockUnstableCloseSession: ReturnType<typeof vi.fn>;
+let mockCloseSession: ReturnType<typeof vi.fn>;
 let mockLoadSession: ReturnType<typeof vi.fn>;
 let mockListSessions: ReturnType<typeof vi.fn>;
 let capturedCallbacks: { onSessionUpdate?: (params: unknown) => void } = {};
@@ -30,7 +30,7 @@ vi.mock('../../../../packages/mindos/src/protocols/acp/subprocess.js', () => ({
         cancel: mockCancel,
         setSessionMode: mockSetSessionMode,
         setSessionConfigOption: mockSetSessionConfigOption,
-        unstable_closeSession: mockUnstableCloseSession,
+        closeSession: mockCloseSession,
         loadSession: mockLoadSession,
         listSessions: mockListSessions,
         signal: new AbortController().signal,
@@ -43,7 +43,7 @@ vi.mock('../../../../packages/mindos/src/protocols/acp/subprocess.js', () => ({
   killAgent: vi.fn((p: { alive: boolean }) => { p.alive = false; }),
 }));
 
-import { createSession, createSessionFromEntry, loadSession, listSessions, prompt, promptStream, cancelPrompt, closeSession, setMode, setConfigOption, getSession, getActiveSessions } from '../../../../packages/mindos/src/protocols/acp/session';
+import { createSession, createSessionFromEntry, loadSession, listSessions, listSessionsForAgent, prompt, promptStream, cancelPrompt, closeSession, setMode, setConfigOption, getSession, getActiveSessions } from '../../../../packages/mindos/src/protocols/acp/session';
 import { findAcpAgent } from '../../../../packages/mindos/src/protocols/acp/registry.js';
 
 const MOCK_ENTRY: AcpRegistryEntry = {
@@ -66,7 +66,7 @@ describe('ACP Session (SDK-based)', () => {
     mockCancel = vi.fn().mockResolvedValue(undefined);
     mockSetSessionMode = vi.fn().mockResolvedValue({});
     mockSetSessionConfigOption = vi.fn().mockResolvedValue({ configOptions: [] });
-    mockUnstableCloseSession = vi.fn().mockResolvedValue({});
+    mockCloseSession = vi.fn().mockResolvedValue({});
     mockLoadSession = vi.fn().mockResolvedValue({ sessionId: 'loaded-ses-1' });
     mockListSessions = vi.fn().mockResolvedValue({ sessions: [] });
 
@@ -145,6 +145,17 @@ describe('ACP Session (SDK-based)', () => {
       const session = await createSessionFromEntry(MOCK_ENTRY);
       expect(session).toBeDefined();
       expect(mockAuthenticate).toHaveBeenCalledWith({ methodId: 'terminal' });
+    });
+
+    it('declares readonly client capabilities when permissionMode is readonly', async () => {
+      await createSessionFromEntry(MOCK_ENTRY, { permissionMode: 'readonly' });
+
+      expect(mockInitialize).toHaveBeenCalledWith(expect.objectContaining({
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: false },
+          terminal: false,
+        },
+      }));
     });
   });
 
@@ -296,12 +307,12 @@ describe('ACP Session (SDK-based)', () => {
       await closeSession('nonexistent');
     });
 
-    it('calls unstable_closeSession on SDK connection', async () => {
+    it('calls closeSession on SDK connection', async () => {
       mockNewSession.mockResolvedValueOnce({ sessionId: 'agent-ses-close' });
       const session = await createSessionFromEntry(MOCK_ENTRY);
       await closeSession(session.id);
 
-      expect(mockUnstableCloseSession).toHaveBeenCalledWith({
+      expect(mockCloseSession).toHaveBeenCalledWith({
         sessionId: 'agent-ses-close',
       });
     });
@@ -327,16 +338,15 @@ describe('ACP Session (SDK-based)', () => {
   });
 
   describe('createSessionFromEntry — edge cases', () => {
-    it('continues when session/new fails with non-auth error', async () => {
+    it('throws and cleans up when session/new fails with non-auth error', async () => {
       mockNewSession.mockRejectedValueOnce(new Error('Network timeout'));
-      const session = await createSessionFromEntry(MOCK_ENTRY);
-      expect(session).toBeDefined();
-      expect(session.agentSessionId).toBeUndefined();
+      await expect(createSessionFromEntry(MOCK_ENTRY)).rejects.toThrow('test-agent: session/new failed: Network timeout');
+      expect(getActiveSessions()).toHaveLength(0);
     });
 
     it('throws when session/new fails with auth error', async () => {
       mockNewSession.mockRejectedValueOnce(new Error('Authentication required'));
-      await expect(createSessionFromEntry(MOCK_ENTRY)).rejects.toThrow('Authentication required');
+      await expect(createSessionFromEntry(MOCK_ENTRY)).rejects.toThrow('test-agent: session/new failed: Authentication required');
     });
 
     it('enforces max total sessions limit', async () => {
@@ -411,14 +421,54 @@ describe('ACP Session (SDK-based)', () => {
         agentCapabilities: { sessionCapabilities: { list: true } },
       });
       mockListSessions.mockResolvedValueOnce({
-        sessions: [{ sessionId: 'ses-1', cwd: '/home', title: 'My Session' }],
+        sessions: [{
+          sessionId: 'ses-1',
+          cwd: '/home',
+          title: 'My Session',
+          messages: [{ role: 'user', content: 'hello' }],
+          messageCount: 1,
+        }],
         nextCursor: 'abc',
       });
       const session = await createSessionFromEntry(MOCK_ENTRY);
       const result = await listSessions(session.id);
       expect(result.sessions).toHaveLength(1);
       expect(result.sessions[0].sessionId).toBe('ses-1');
+      expect(result.sessions[0].messages).toEqual([{ role: 'user', content: 'hello' }]);
+      expect(result.sessions[0].messageCount).toBe(1);
       expect(result.nextCursor).toBe('abc');
+    });
+
+    it('lists sessions by agent without creating a new session', async () => {
+      (findAcpAgent as ReturnType<typeof vi.fn>).mockResolvedValueOnce(MOCK_ENTRY);
+      mockInitialize.mockResolvedValueOnce({
+        agentCapabilities: { sessionCapabilities: { list: true } },
+      });
+      mockListSessions.mockResolvedValueOnce({
+        sessions: [{ sessionId: 'ses-agent-1', title: 'Agent Session', turns: [{ input: 'hi', output: 'there' }] }],
+      });
+
+      const result = await listSessionsForAgent('test-agent', { cwd: '/tmp/project' });
+
+      expect(mockNewSession).not.toHaveBeenCalled();
+      expect(mockListSessions).toHaveBeenCalledWith({ cwd: '/tmp/project' });
+      expect(result.sessions[0]).toMatchObject({
+        sessionId: 'ses-agent-1',
+        title: 'Agent Session',
+        turns: [{ input: 'hi', output: 'there' }],
+      });
+    });
+
+    it('accepts ACP 1.0 object-shaped session/list capabilities', async () => {
+      mockInitialize.mockResolvedValueOnce({
+        agentCapabilities: { sessionCapabilities: { list: {} } },
+      });
+      mockListSessions.mockResolvedValueOnce({
+        sessions: [{ sessionId: 'ses-object-cap', title: 'Object Cap' }],
+      });
+      const session = await createSessionFromEntry(MOCK_ENTRY);
+      const result = await listSessions(session.id);
+      expect(result.sessions[0].sessionId).toBe('ses-object-cap');
     });
   });
 

@@ -15,7 +15,7 @@ export const meta = {
   usage: 'mindos sync [subcommand]',
   flags: {
     '--remote <url>': 'Git remote URL for init',
-    '--token <token>': 'Auth token for private repo',
+    '--token <token>': 'Deprecated: prefer MINDOS_SYNC_TOKEN for private repo auth',
     '--branch <name>': 'Git branch (default: main)',
     '--json': 'Output as JSON',
   },
@@ -51,7 +51,7 @@ export const run = async (args, flags) => {
       await initSync(mindRoot, {
         nonInteractive: true,
         remote: typeof flags.remote === 'string' ? flags.remote : '',
-        token: typeof flags.token === 'string' ? flags.token : '',
+        token: typeof flags.token === 'string' ? flags.token : (process.env.MINDOS_SYNC_TOKEN || ''),
         branch: (typeof flags.branch === 'string' ? flags.branch : '') || 'main',
       });
     } else {
@@ -103,6 +103,30 @@ export const run = async (args, flags) => {
 
   if (flags.json) {
     console.log(JSON.stringify(status, null, 2));
+    return;
+  }
+
+  if (!status.enabled && status.configured) {
+    const ago = status.lastSync
+      ? (() => {
+          const diff = Date.now() - new Date(status.lastSync).getTime();
+          if (diff < 60000) return 'just now';
+          if (diff < 3600000) return `${Math.floor(diff / 60000)} minutes ago`;
+          return `${Math.floor(diff / 3600000)} hours ago`;
+        })()
+      : 'never';
+
+    console.log(`\n${bold('Sync Status')}`);
+    console.log(`  ${dim('Provider:')}    ${cyan(`${status.provider} (${status.remote})`)}`);
+    console.log(`  ${dim('Branch:')}      ${cyan(status.branch)}`);
+    console.log(`  ${dim('Last sync:')}   ${ago}`);
+    console.log(`  ${dim('Unpushed:')}    ${status.unpushed} commits`);
+    console.log(`  ${dim('Conflicts:')}   ${status.conflicts.length ? yellow(`${status.conflicts.length} file(s)`) : green('none')}`);
+    console.log(`  ${dim('Auto-sync:')}   ${yellow('● paused')} ${dim('Run `mindos sync on` to enable')}`);
+    if (status.lastError) {
+      console.log(`  ${dim('Last error:')}  ${red(status.lastError)}`);
+    }
+    console.log();
     return;
   }
 

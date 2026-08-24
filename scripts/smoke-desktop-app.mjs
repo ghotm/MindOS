@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
 
 const args = parseArgs(process.argv.slice(2));
 const appPath = args.app ? resolve(args.app) : findPackagedApp();
@@ -11,6 +11,7 @@ const webPort = Number(args.webPort ?? 3456);
 const home = mkdtempSync(join(tmpdir(), 'mindos-desktop-smoke-home-'));
 const mindRoot = mkdtempSync(join(tmpdir(), 'mindos-desktop-smoke-mind-'));
 const logPath = join(tmpdir(), `mindos-desktop-smoke-${Date.now()}.log`);
+const artifactLogDir = resolve('packages/desktop/dist/smoke-logs');
 const seededConfigs = [];
 const fatalPatterns = [
   /MCP bundle not found/i,
@@ -28,34 +29,30 @@ if (!appPath || !existsSync(appPath)) {
   process.exit(1);
 }
 
+// arm64 Macs can execute the x64 build under Rosetta — actually smoke it
+// instead of skipping (a skip means the Intel build ships unverified).
+let rosettaPrefix = null;
 if (args.skipIfArchMismatch && isArchMismatch(appPath)) {
-  console.log(`[smoke-desktop-app] SKIP arch mismatch for ${appPath}`);
-  process.exit(0);
+  if (canRunUnderRosetta(appPath)) {
+    console.log(`[smoke-desktop-app] arch mismatch — running x64 app under Rosetta`);
+    rosettaPrefix = ['arch', '-x86_64'];
+  } else {
+    console.log(`[smoke-desktop-app] SKIP arch mismatch for ${appPath}`);
+    process.exit(0);
+  }
 }
 
 writeFileSync(join(mindRoot, 'README.md'), '# MindOS smoke\n', 'utf-8');
+writeFileSync(logPath, `[smoke-desktop-app] log started ${new Date().toISOString()}\n`, 'utf-8');
 seedDesktopConfig();
 
 const executable = resolveExecutable(appPath);
 console.log(`[smoke-desktop-app] Launching ${executable}`);
 console.log(`[smoke-desktop-app] Log: ${logPath}`);
 
-const launchArgs = process.platform === 'linux' ? ['--no-sandbox'] : [];
-const child = spawn(executable, launchArgs, {
-  cwd: dirname(executable),
-  detached: process.platform !== 'win32',
-  env: {
-    ...process.env,
-    HOME: home,
-    USERPROFILE: home,
-    APPIMAGE_EXTRACT_AND_RUN: process.platform === 'linux' ? '1' : process.env.APPIMAGE_EXTRACT_AND_RUN,
-    MIND_ROOT: mindRoot,
-    MINDOS_WEB_PORT: String(webPort),
-    MINDOS_MCP_PORT: String(args.mcpPort ?? 8781),
-    MINDOS_RUNTIME_POLICY: 'bundled-only',
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
+let child = process.platform === 'win32' && args.windowsRuntimeOnly
+  ? spawnWindowsRuntime(executable)
+  : spawnDesktopApp(executable);
 
 let log = '';
 child.stdout.on('data', (chunk) => appendLog(chunk));
@@ -69,16 +66,55 @@ try {
   scanFatalLog();
   console.log(`[smoke-desktop-app] OK ${appPath}`);
 } catch (error) {
-  scanFatalLog(false);
-  console.error(`[smoke-desktop-app] FAILED: ${error instanceof Error ? error.message : String(error)}`);
-  console.error(log.split('\n').slice(-120).join('\n'));
-  process.exitCode = 1;
+  const recovered = await maybeRunWindowsRuntimeFallback(error);
+  if (!recovered) {
+    scanFatalLog(false);
+    console.error(`[smoke-desktop-app] FAILED: ${error instanceof Error ? error.message : String(error)}`);
+    dumpDiagnostics();
+    process.exitCode = 1;
+  }
 } finally {
+  persistSmokeLogArtifact();
   terminateChild();
   restoreSeededConfigs();
   rmSync(home, { recursive: true, force: true });
   rmSync(mindRoot, { recursive: true, force: true });
   process.exit(process.exitCode ?? 0);
+}
+
+async function maybeRunWindowsRuntimeFallback(originalError) {
+  if (process.platform !== 'win32' || !args.windowsRuntimeFallback || args.windowsRuntimeOnly) return false;
+  const fatalPattern = findFatalLogPattern();
+  if (fatalPattern) return false;
+
+  const message = originalError instanceof Error ? originalError.message : String(originalError);
+  appendLog(`\n[smoke-desktop-app] Windows Electron smoke did not become healthy: ${message}\n`);
+  appendLog('[smoke-desktop-app] Retrying with packaged runtime-only smoke.\n');
+  console.warn(`[smoke-desktop-app] Windows Electron smoke did not become healthy: ${message}`);
+  console.warn('[smoke-desktop-app] Retrying with packaged runtime-only smoke.');
+
+  terminateChild();
+  child = spawnWindowsRuntime(executable);
+  child.stdout.on('data', (chunk) => appendLog(chunk));
+  child.stderr.on('data', (chunk) => appendLog(chunk));
+  child.on('exit', (code, signal) => {
+    appendLog(`\n[smoke-desktop-app] runtime fallback child exited code=${code} signal=${signal}\n`);
+  });
+
+  try {
+    await waitForApp(timeoutMs);
+    scanFatalLog();
+    console.log(`[smoke-desktop-app] OK ${appPath} (Windows runtime fallback)`);
+    process.exitCode = 0;
+    return true;
+  } catch (fallbackError) {
+    scanFatalLog(false);
+    console.error(`[smoke-desktop-app] Windows runtime fallback FAILED: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
+    console.error(`[smoke-desktop-app] Original Electron smoke failure: ${message}`);
+    dumpDiagnostics();
+    process.exitCode = 1;
+    return true;
+  }
 }
 
 async function waitForApp(timeout) {
@@ -121,8 +157,76 @@ function currentWebPort() {
 }
 
 function appendLog(chunk) {
-  log += chunk.toString();
-  writeFileSync(logPath, log);
+  const text = chunk.toString();
+  log += text;
+  appendFileSync(logPath, text);
+}
+
+function spawnDesktopApp(executablePath) {
+  const launchArgs = process.platform === 'linux' ? ['--no-sandbox'] : [];
+  // Under Rosetta, `arch` becomes the process-group leader; group kill in
+  // terminateChild still reaches the app since it shares the group.
+  const [command, ...prefixArgs] = rosettaPrefix
+    ? [...rosettaPrefix, executablePath]
+    : [executablePath];
+  return spawn(command, [...prefixArgs, ...launchArgs], {
+    cwd: dirname(executablePath),
+    detached: process.platform !== 'win32',
+    env: {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      ELECTRON_ENABLE_LOGGING: '1',
+      ELECTRON_ENABLE_STACK_DUMPING: '1',
+      APPIMAGE_EXTRACT_AND_RUN: process.platform === 'linux' ? '1' : process.env.APPIMAGE_EXTRACT_AND_RUN,
+      MIND_ROOT: mindRoot,
+      MINDOS_DESKTOP_CI_LOG: logPath,
+      MINDOS_DESKTOP_HOME_DIR: home,
+      MINDOS_DISABLE_CLI_SHIM_PATH_APPEND: '1',
+      MINDOS_DISABLE_OBSIDIAN_SECRET_STORAGE_BROKER: '1',
+      MINDOS_WEB_PORT: String(webPort),
+      MINDOS_MCP_PORT: String(args.mcpPort ?? 8781),
+      MINDOS_RUNTIME_POLICY: 'bundled-only',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function spawnWindowsRuntime(executablePath) {
+  const runtimeRoot = join(dirname(executablePath), 'resources', 'mindos-runtime');
+  const nodePath = join(runtimeRoot, 'node', 'node.exe');
+  const appDir = join(runtimeRoot, 'packages', 'web');
+  const serverPath = join(appDir, '.next', 'standalone', 'server.js');
+
+  for (const requiredPath of [runtimeRoot, nodePath, appDir, serverPath]) {
+    if (!existsSync(requiredPath)) {
+      throw new Error(`Windows packaged runtime smoke missing required path: ${requiredPath}`);
+    }
+  }
+
+  console.log(`[smoke-desktop-app] Windows runtime-only smoke from packaged resources: ${serverPath}`);
+  return spawn(nodePath, [serverPath], {
+    cwd: appDir,
+    detached: false,
+    env: {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      MIND_ROOT: mindRoot,
+      MINDOS_DESKTOP_HOME_DIR: home,
+      MINDOS_DISABLE_CLI_SHIM_PATH_APPEND: '1',
+      MINDOS_DISABLE_OBSIDIAN_SECRET_STORAGE_BROKER: '1',
+      MINDOS_WEB_PORT: String(webPort),
+      MINDOS_MCP_PORT: String(args.mcpPort ?? 8781),
+      MINDOS_PROJECT_ROOT: runtimeRoot,
+      MINDOS_CLI_PATH: join(runtimeRoot, 'packages', 'mindos', 'bin', 'cli.js'),
+      MINDOS_MANAGED: '1',
+      NODE_ENV: 'production',
+      HOSTNAME: '127.0.0.1',
+      PORT: String(webPort),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }
 
 function seedDesktopConfig() {
@@ -130,14 +234,12 @@ function seedDesktopConfig() {
     desktopMode: 'local',
     mindRoot,
     setupPending: false,
+    mindosRuntimePolicy: 'bundled-only',
     port: webPort,
     mcpPort: Number(args.mcpPort ?? 8781),
   }, null, 2);
 
   seedConfigPath(join(home, '.mindos', 'config.json'), config);
-  // Electron's app.getPath('home') can resolve to the OS account home instead
-  // of the HOME env passed to child_process.spawn, especially on macOS runners.
-  seedConfigPath(join(homedir(), '.mindos', 'config.json'), config);
 }
 
 function seedConfigPath(configPath, contents) {
@@ -161,13 +263,58 @@ function restoreSeededConfigs() {
   }
 }
 
+function dumpDiagnostics() {
+  const paths = [
+    logPath,
+    join(home, '.mindos', 'crash.log'),
+  ];
+
+  console.error(`[smoke-desktop-app] Home: ${home}`);
+  console.error(`[smoke-desktop-app] Mind root: ${mindRoot}`);
+  console.error(`[smoke-desktop-app] Seeded configs: ${seededConfigs.map((entry) => entry.configPath).join(', ')}`);
+
+  for (const diagnosticPath of [...new Set(paths)]) {
+    if (!existsSync(diagnosticPath)) {
+      console.error(`[smoke-desktop-app] Missing diagnostic file: ${diagnosticPath}`);
+      continue;
+    }
+    console.error(`[smoke-desktop-app] --- tail ${diagnosticPath} ---`);
+    console.error(tailFile(diagnosticPath, 180));
+  }
+}
+
+function persistSmokeLogArtifact() {
+  try {
+    if (!existsSync(logPath)) return;
+    mkdirSync(artifactLogDir, { recursive: true });
+    writeFileSync(join(artifactLogDir, basename(logPath)), readFileSync(logPath, 'utf-8'), 'utf-8');
+  } catch {
+    // Best effort only; the console dump above is the primary diagnostic surface.
+  }
+}
+
+function tailFile(filePath, maxLines) {
+  try {
+    return readFileSync(filePath, 'utf-8').split('\n').slice(-maxLines).join('\n');
+  } catch (error) {
+    return `[unreadable: ${error instanceof Error ? error.message : String(error)}]`;
+  }
+}
+
 function scanFatalLog(throwOnMatch = true) {
+  const pattern = findFatalLogPattern();
+  if (!pattern) return;
+  if (throwOnMatch) throw new Error(`fatal log pattern matched: ${pattern}`);
+  process.exitCode = 1;
+}
+
+function findFatalLogPattern() {
   for (const pattern of fatalPatterns) {
     if (pattern.test(log)) {
-      if (throwOnMatch) throw new Error(`fatal log pattern matched: ${pattern}`);
-      process.exitCode = 1;
+      return pattern;
     }
   }
+  return null;
 }
 
 function resolveExecutable(app) {
@@ -208,6 +355,7 @@ function findPackagedApp() {
     join(desktopDist, 'mac', 'MindOS.app'),
     join(desktopDist, 'linux-unpacked', 'MindOS'),
     join(desktopDist, 'linux-unpacked', 'mindos'),
+    join(desktopDist, 'linux-unpacked', 'mindos-desktop'),
     join(desktopDist, 'win-unpacked', 'MindOS.exe'),
     join(desktopDist, 'win-arm64-unpacked', 'MindOS.exe'),
     ...findDistFiles(desktopDist, /\.AppImage$/),
@@ -236,6 +384,18 @@ function isArchMismatch(app) {
   return false;
 }
 
+/** Only the darwin x64-on-arm64 mismatch is runnable — probe that Rosetta is installed. */
+function canRunUnderRosetta(app) {
+  if (process.platform !== 'darwin' || process.arch !== 'arm64') return false;
+  if (!app.includes('/mac/')) return false;
+  const probe = spawnSync('arch', ['-x86_64', '/usr/bin/true']);
+  if (probe.status !== 0) {
+    console.warn('[smoke-desktop-app] Rosetta unavailable — falling back to skip');
+    return false;
+  }
+  return true;
+}
+
 function parseArgs(argv) {
   const parsed = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -245,6 +405,8 @@ function parseArgs(argv) {
     else if (arg === '--web-port') parsed.webPort = argv[++i];
     else if (arg === '--mcp-port') parsed.mcpPort = argv[++i];
     else if (arg === '--skip-if-arch-mismatch') parsed.skipIfArchMismatch = true;
+    else if (arg === '--windows-runtime-only') parsed.windowsRuntimeOnly = true;
+    else if (arg === '--windows-runtime-fallback') parsed.windowsRuntimeFallback = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return parsed;

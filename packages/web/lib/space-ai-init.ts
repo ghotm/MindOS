@@ -1,17 +1,15 @@
 import { apiFetch } from '@/lib/api';
+import { buildAgentTurnEndpoint, createTransientAgentSessionId } from '@/lib/agent-turn-endpoint';
+import { isAiConfiguredForAgentTurn, type SettingsJsonForAi } from '@/lib/settings-ai-client';
+import { notifyFilesChanged } from '@/lib/files-changed';
 
 /**
- * Check if AI is available by inspecting the active provider's API key.
+ * Check if AI is available by inspecting the active or explicitly selected provider.
  */
-export async function checkAiAvailable(): Promise<boolean> {
+export async function checkAiAvailable(providerOverride?: string | null): Promise<boolean> {
   try {
-    const data = await apiFetch<{
-      ai?: { provider?: string; providers?: Record<string, { apiKey?: string }> };
-    }>('/api/settings');
-    const provider = data.ai?.provider ?? '';
-    const providers = data.ai?.providers ?? {};
-    const active = providers[provider as keyof typeof providers];
-    return !!(active?.apiKey);
+    const data = await apiFetch<SettingsJsonForAi>('/api/settings', { cache: 'no-store' });
+    return isAiConfiguredForAgentTurn(data, providerOverride);
   } catch {
     return false;
   }
@@ -75,7 +73,7 @@ export function triggerSpaceAiInit(
     detail: { spaceName, spacePath, description, state: 'working' },
   }));
 
-  fetch('/api/ask', {
+  fetch(buildAgentTurnEndpoint(createTransientAgentSessionId('space-init')), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -88,7 +86,7 @@ export function triggerSpaceAiInit(
     window.dispatchEvent(new CustomEvent('mindos:ai-init', {
       detail: { spacePath, state: 'done' },
     }));
-    window.dispatchEvent(new Event('mindos:files-changed'));
+    notifyFilesChanged([`${spacePath}/INSTRUCTION.md`]);
   }).catch(() => {
     window.dispatchEvent(new CustomEvent('mindos:ai-init', {
       detail: { spacePath, state: 'error' },

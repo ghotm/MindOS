@@ -16,7 +16,7 @@ describe('Product server extraction contract', () => {
 
     expect(spec).toContain('Product Server');
     expect(spec).toContain('Next standalone');
-    expect(spec).toContain('/api/ask');
+    expect(spec).toContain('/api/agent/sessions/[sessionId]/turns');
     expect(spec).toContain('static Web artifact');
     expect(spec).toContain('OpenCode');
   });
@@ -31,7 +31,11 @@ describe('Product server extraction contract', () => {
     expect(http).toContain('createServer');
     expect(http).toContain('/api/recent-files');
     expect(http).toContain('/api/file');
-    expect(http).toContain('/api/ask');
+    expect(http).toContain('/api/extract-pdf');
+    expect(http).toContain('/api/extract-docx');
+    expect(http).toContain('/api/agent/sessions/');
+    expect(http).not.toContain("route === 'POST /api/ask'");
+    expect(http).toContain('/api/agent/sessions/');
     expect(http).toContain('/api/a2a');
     expect(http).toContain('/api/a2a/agents');
     expect(http).toContain('/api/a2a/delegations');
@@ -46,7 +50,12 @@ describe('Product server extraction contract', () => {
     expect(http).toContain('/api/backlinks');
     expect(http).toContain('/api/graph');
     expect(http).toContain('/api/agent-activity');
-    expect(http).toContain('/api/ask-sessions');
+    expect(http).toContain('/api/agent-runtimes');
+    expect(http).toContain('/api/agent-runtimes/extensions');
+    expect(http).toContain('/api/agent-runtimes/extensions/preflight');
+    expect(http).toContain('/api/agent-runtimes/extensions/install');
+    expect(http).toContain('/api/agent-runtimes/codex/threads');
+    expect(http).toContain('/api/agent/sessions');
     expect(http).toContain('/api/space-overview');
     expect(http).toContain('/api/git');
     expect(http).toContain('/api/inbox');
@@ -62,6 +71,8 @@ describe('Product server extraction contract', () => {
     expect(http).toContain('/api/im/status');
     expect(http).toContain('/api/im/test');
     expect(http).toContain('/api/im/webhook-status');
+    expect(http).toContain('/api/im/feishu/oauth');
+    expect(http).toContain('/api/im/feishu/oauth/callback');
     expect(http).toContain('/api/im/feishu/long-connection');
     expect(http).toContain('/api/monitoring');
     expect(http).toContain('/api/update-status');
@@ -89,8 +100,12 @@ describe('Product server extraction contract', () => {
     expect(contract).toContain("path: '/api/recent-files'");
     expect(contract).toContain("id: 'file.read'");
     expect(contract).toContain("path: '/api/file'");
-    expect(contract).toContain("id: 'ask.stream'");
-    expect(contract).toContain("path: '/api/ask'");
+    expect(contract).toContain("id: 'extract-pdf'");
+    expect(contract).toContain("path: '/api/extract-pdf'");
+    expect(contract).toContain("id: 'extract-docx'");
+    expect(contract).toContain("path: '/api/extract-docx'");
+    expect(contract).toContain("id: 'agent.sessions.turns.create'");
+    expect(contract).toContain("path: '/api/agent/sessions/[sessionId]/turns'");
     expect(contract).toContain("id: 'a2a'");
     expect(contract).toContain("id: 'a2a.agents'");
     expect(contract).toContain("id: 'a2a.delegations'");
@@ -111,9 +126,25 @@ describe('Product server extraction contract', () => {
     expect(contract).toContain("id: 'graph'");
     expect(contract).toContain("path: '/api/graph'");
     expect(contract).toContain("id: 'agent-activity'");
+    expect(contract).toContain("id: 'agent-activity.append'");
     expect(contract).toContain("path: '/api/agent-activity'");
-    expect(contract).toContain("id: 'ask-sessions'");
-    expect(contract).toContain("path: '/api/ask-sessions'");
+    expect(contract).toContain("id: 'agent-runtimes'");
+    expect(contract).toContain("path: '/api/agent-runtimes'");
+    expect(contract).toContain("id: 'agent-runtimes.extensions'");
+    expect(contract).toContain("path: '/api/agent-runtimes/extensions'");
+    expect(contract).toContain("id: 'agent-runtimes.extensions.preflight'");
+    expect(contract).toContain("path: '/api/agent-runtimes/extensions/preflight'");
+    expect(contract).toContain("id: 'agent-runtimes.extensions.install'");
+    expect(contract).toContain("path: '/api/agent-runtimes/extensions/install'");
+    expect(contract).toContain("id: 'agent-runtimes.codex.threads'");
+    expect(contract).toContain("path: '/api/agent-runtimes/codex/threads'");
+    expect(contract).toContain("id: 'agent-runtimes.codex.thread'");
+    expect(contract).toContain("path: '/api/agent-runtimes/codex/threads/[threadId]'");
+    expect(contract).toContain("id: 'agent-runtimes.codex.thread.fork'");
+    expect(contract).toContain("id: 'agent-runtimes.codex.thread.archive'");
+    expect(contract).toContain("id: 'agent-runtimes.codex.thread.unarchive'");
+    expect(contract).toContain("id: 'agent-sessions'");
+    expect(contract).toContain("path: '/api/agent/sessions'");
     expect(contract).toContain("id: 'space-overview'");
     expect(contract).toContain("path: '/api/space-overview'");
     expect(contract).toContain("id: 'git'");
@@ -145,6 +176,10 @@ describe('Product server extraction contract', () => {
     expect(contract).toContain("path: '/api/im/test'");
     expect(contract).toContain("id: 'im.webhook-status'");
     expect(contract).toContain("path: '/api/im/webhook-status'");
+    expect(contract).toContain("id: 'im.feishu.oauth'");
+    expect(contract).toContain("path: '/api/im/feishu/oauth'");
+    expect(contract).toContain("id: 'im.feishu.oauth.callback'");
+    expect(contract).toContain("path: '/api/im/feishu/oauth/callback'");
     expect(contract).toContain("id: 'im.feishu.long-connection'");
     expect(contract).toContain("path: '/api/im/feishu/long-connection'");
     expect(contract).toContain("id: 'monitoring'");
@@ -202,6 +237,8 @@ describe('Product server extraction contract', () => {
       'packages/web/app/api/files/route.ts',
       'packages/web/app/api/recent-files/route.ts',
       'packages/web/app/api/file/route.ts',
+      'packages/web/app/api/extract-pdf/route.ts',
+      'packages/web/app/api/extract-docx/route.ts',
       'packages/web/app/api/file/raw/route.ts',
       'packages/web/app/api/a2a/route.ts',
       'packages/web/app/api/a2a/agents/route.ts',
@@ -217,7 +254,17 @@ describe('Product server extraction contract', () => {
       'packages/web/app/api/backlinks/route.ts',
       'packages/web/app/api/graph/route.ts',
       'packages/web/app/api/agent-activity/route.ts',
-      'packages/web/app/api/ask-sessions/route.ts',
+      'packages/web/app/api/agent-capabilities/route.ts',
+      'packages/web/app/api/agent-runtimes/route.ts',
+      'packages/web/app/api/agent-runtimes/extensions/route.ts',
+      'packages/web/app/api/agent-runtimes/extensions/preflight/route.ts',
+      'packages/web/app/api/agent-runtimes/extensions/install/route.ts',
+      'packages/web/app/api/agent-runtimes/codex/threads/route.ts',
+      'packages/web/app/api/agent-runtimes/codex/threads/[threadId]/route.ts',
+      'packages/web/app/api/agent-runtimes/codex/threads/[threadId]/archive/route.ts',
+      'packages/web/app/api/agent-runtimes/codex/threads/[threadId]/fork/route.ts',
+      'packages/web/app/api/agent-runtimes/codex/threads/[threadId]/unarchive/route.ts',
+      'packages/web/app/api/agent/sessions/route.ts',
       'packages/web/app/api/space-overview/route.ts',
       'packages/web/app/api/git/route.ts',
       'packages/web/app/api/inbox/route.ts',
@@ -232,6 +279,8 @@ describe('Product server extraction contract', () => {
       'packages/web/app/api/im/status/route.ts',
       'packages/web/app/api/im/test/route.ts',
       'packages/web/app/api/im/webhook-status/route.ts',
+      'packages/web/app/api/im/feishu/oauth/route.ts',
+      'packages/web/app/api/im/feishu/oauth/callback/route.ts',
       'packages/web/app/api/im/feishu/long-connection/route.ts',
       'packages/web/app/api/monitoring/route.ts',
       'packages/web/app/api/update-status/route.ts',
@@ -261,6 +310,7 @@ describe('Product server extraction contract', () => {
       'packages/web/app/api/mcp/install/route.ts',
       'packages/web/app/api/mcp/install-skill/route.ts',
       'packages/web/app/api/mcp/restart/route.ts',
+      'packages/web/app/api/mcp/token/reveal/route.ts',
       'packages/web/app/api/mcp/uninstall/route.ts',
       'packages/web/app/api/tree-version/route.ts',
     ];

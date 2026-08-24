@@ -1,0 +1,225 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+  detectLocalAcpAgents: vi.fn(),
+  resolveCommandPath: vi.fn(),
+  resolveCommandPathCandidates: vi.fn(),
+  checkNativeRuntimeHealth: vi.fn(),
+  getAcpHandshakeHealthForRuntimes: vi.fn(),
+}));
+
+vi.mock('@geminilight/mindos/server', async () => {
+  const actual = await import('../../../mindos/src/server');
+  return { ...actual };
+});
+
+vi.mock('@/lib/settings', () => ({
+  readSettings: () => ({
+    ai: { activeProvider: '', providers: [] },
+    acpAgents: {},
+  }),
+}));
+
+vi.mock('@/lib/acp/detect-local', () => ({
+  detectLocalAcpAgents: mocks.detectLocalAcpAgents,
+  resolveCommandPath: mocks.resolveCommandPath,
+  resolveCommandPathCandidates: mocks.resolveCommandPathCandidates,
+  checkNativeRuntimeHealth: mocks.checkNativeRuntimeHealth,
+}));
+
+vi.mock('@/lib/acp/handshake-health', () => ({
+  getAcpHandshakeHealthForRuntimes: mocks.getAcpHandshakeHealthForRuntimes,
+}));
+
+beforeEach(() => {
+  mocks.resolveCommandPath.mockReset().mockImplementation(async (command: string) => {
+    if (command === 'codex') return '/usr/local/bin/codex';
+    if (command === 'claude') return '/usr/local/bin/claude';
+    return null;
+  });
+  mocks.resolveCommandPathCandidates.mockReset().mockResolvedValue([]);
+  mocks.checkNativeRuntimeHealth.mockReset().mockResolvedValue({ status: 'available' });
+  mocks.getAcpHandshakeHealthForRuntimes.mockReset().mockResolvedValue([]);
+  mocks.detectLocalAcpAgents.mockReset().mockResolvedValue({
+    installed: [
+      { id: 'codex-acp', name: 'Codex', binaryPath: '/usr/local/bin/codex', status: 'available' },
+      {
+        id: 'declared-acp',
+        name: 'Declared ACP',
+        binaryPath: '/usr/local/bin/declared',
+        status: 'available',
+        adapterMetadata: {
+          connectionType: 'cli',
+          authRequired: true,
+          supportsStreaming: true,
+          models: [{ id: 'fast-model', label: 'Fast Model' }],
+          promptCapabilities: { image: true },
+          mcpCapabilities: { stdio: true, http: false },
+          sessionCapabilities: { loadSession: true, list: true, resume: true },
+          output: {
+            kinds: ['text', 'diff', 'artifact'],
+            fileChanges: true,
+            artifacts: true,
+          },
+          healthCheck: {
+            command: 'TOKEN=must-not-leak declared health',
+            timeoutMs: 5_000,
+            summary: 'Declared ACP exposes a health probe.',
+          },
+          commands: [
+            { name: 'plan', description: 'Create a plan.' },
+            { name: 'commit', description: 'Prepare a commit.' },
+          ],
+        },
+      },
+      { id: 'opaque-acp', name: 'Opaque ACP', binaryPath: '/usr/local/bin/opaque', status: 'available' },
+    ],
+    notInstalled: [],
+  });
+});
+
+async function importRoute() {
+  vi.resetModules();
+  return await import('../../app/api/agent-runtimes/adapter-projections/route');
+}
+
+describe('GET /api/agent-runtimes/adapter-projections', () => {
+  it('returns adapter projections from runtime descriptors without leaking health commands', async () => {
+    const { GET } = await importRoute();
+    const res = await GET(new Request('http://localhost/api/agent-runtimes/adapter-projections'));
+    const body = await res.json();
+
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(JSON.stringify(body)).not.toContain('must-not-leak');
+
+    const mindos = body.projections.find((projection: { runtimeId: string }) => projection.runtimeId === 'mindos');
+    const codex = body.projections.find((projection: { runtimeId: string }) => projection.runtimeId === 'codex');
+    const declared = body.projections.find((projection: { runtimeId: string }) => projection.runtimeId === 'declared-acp');
+    const opaque = body.projections.find((projection: { runtimeId: string }) => projection.runtimeId === 'opaque-acp');
+
+    expect(mindos).toMatchObject({
+      status: 'ready',
+      connection: { kind: 'internal' },
+      configuration: { modelSelection: 'mindos-session' },
+      health: { mode: 'mindos-native' },
+      commands: { discovery: 'mindos-skills' },
+      output: {
+        status: 'ready',
+        discovery: 'mindos-default',
+        outputKinds: ['artifact', 'text'],
+        reviewableOutputKinds: ['artifact'],
+      },
+      protocol: { status: 'ready', supportsStreaming: true, authRequired: false },
+    });
+    expect(codex).toMatchObject({
+      status: 'ready',
+      connection: { kind: 'app-server' },
+      configuration: { modelSelection: 'runtime-native' },
+      health: { mode: 'mindos-native' },
+      commands: { discovery: 'runtime-event' },
+      output: {
+        status: 'ready',
+        discovery: 'runtime-native',
+        outputKinds: ['artifact', 'branch', 'checkpoint', 'diff', 'pr', 'text'],
+        reviewableOutputKinds: ['artifact', 'branch', 'checkpoint', 'diff', 'pr'],
+      },
+      protocol: { status: 'ready', supportsStreaming: true, authRequired: true },
+    });
+    expect(declared).toMatchObject({
+      status: 'ready',
+      connection: { kind: 'stdio' },
+      health: { mode: 'adapter-declared', hasCommand: true, timeoutMs: 5_000 },
+      commands: { discovery: 'adapter-declared', commandNames: ['commit', 'plan'] },
+      output: {
+        status: 'ready',
+        discovery: 'adapter-declared',
+        outputKinds: ['artifact', 'diff', 'text'],
+        reviewableOutputKinds: ['artifact', 'diff'],
+        supportsFileChanges: true,
+        supportsArtifacts: true,
+      },
+      protocol: {
+        status: 'ready',
+        declaredConnectionType: 'cli',
+        supportsStreaming: true,
+        authRequired: true,
+        modelCount: 1,
+        models: [{ id: 'fast-model', label: 'Fast Model' }],
+        promptCapabilities: { image: true },
+        mcpCapabilities: { stdio: true, http: false },
+        sessionCapabilities: { loadSession: true, list: true, resume: true },
+      },
+    });
+    expect(opaque).toMatchObject({
+      status: 'limited',
+      blockers: [
+        'adapter-command-discovery',
+        'adapter-health-contract',
+        'adapter-output-contract',
+        'adapter-protocol-auth',
+        'adapter-protocol-streaming',
+      ],
+      protocol: { status: 'limited', supportsStreaming: null, authRequired: null },
+    });
+  });
+
+  it('honors runtime filters', async () => {
+    const { GET } = await importRoute();
+    const res = await GET(new Request('http://localhost/api/agent-runtimes/adapter-projections?runtime=opaque-acp'));
+    const body = await res.json();
+
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.projections).toEqual([
+      expect.objectContaining({
+        runtimeId: 'opaque-acp',
+        status: 'limited',
+      }),
+    ]);
+  });
+
+  it('passes explicit handshake probes through to ACP health diagnostics', async () => {
+    mocks.getAcpHandshakeHealthForRuntimes.mockResolvedValueOnce([{
+      schemaVersion: 1,
+      agentId: 'opaque-acp',
+      status: 'ready',
+      stage: 'session-new',
+      checkedAt: '2026-06-28T00:00:00.000Z',
+      expiresAt: '2026-06-28T00:05:00.000Z',
+      session: {
+        sessionId: 'ses-local',
+        externalSessionId: 'agent-session-1',
+        supportsLoadSession: true,
+        supportsListSessions: true,
+        supportsClose: true,
+        modeCount: 0,
+        configOptionCount: 0,
+        mcpServerCount: 0,
+        authMethodCount: 0,
+      },
+    }]);
+
+    const { GET } = await importRoute();
+    const res = await GET(new Request('http://localhost/api/agent-runtimes/adapter-projections?handshake=1&force=1&runtime=opaque-acp'));
+    const body = await res.json();
+
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(mocks.getAcpHandshakeHealthForRuntimes).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'opaque-acp', kind: 'acp' }),
+      ]),
+      { probe: true, force: true },
+    );
+    expect(body.projections).toEqual([
+      expect.objectContaining({
+        runtimeId: 'opaque-acp',
+        health: expect.objectContaining({
+          status: 'ready',
+          handshake: expect.objectContaining({
+            status: 'ready',
+            supportsLoadSession: true,
+          }),
+        }),
+      }),
+    ]);
+  });
+});

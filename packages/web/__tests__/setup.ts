@@ -2,8 +2,70 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { vi, beforeEach, afterEach } from 'vitest';
+import { setMindRootResolverForTests } from '@geminilight/mindos/foundation';
+
+// --- Git env isolation ---
+// Git hooks (pre-push etc.) export GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE…
+// pointing at the real repository. Tests in this suite (and the product code
+// they invoke) spawn `git init/add/commit` in temp dirs with inherited env —
+// under a hook those commands would silently operate on the real repo (real
+// incident: sync-test commits destroyed the development worktree). Scrub the
+// repo-targeting vars for the whole test process.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('GIT_')) delete process.env[key];
+}
+
+type TestGlobal = typeof globalThis & {
+  DataTransfer: typeof DataTransfer;
+  DragEvent: typeof DragEvent;
+};
 
 // --- JSDOM polyfills ---
+
+function createMemoryStorage(): Storage {
+  const store = new Map<string, string>();
+  return {
+    get length() {
+      return store.size;
+    },
+    clear() {
+      store.clear();
+    },
+    getItem(key: string) {
+      return store.has(key) ? store.get(key)! : null;
+    },
+    key(index: number) {
+      return Array.from(store.keys())[index] ?? null;
+    },
+    removeItem(key: string) {
+      store.delete(key);
+    },
+    setItem(key: string, value: string) {
+      store.set(key, String(value));
+    },
+  };
+}
+
+function installMemoryStorage(target: object, key: 'localStorage' | 'sessionStorage', fallback?: Storage): Storage {
+  const descriptor = Object.getOwnPropertyDescriptor(target, key);
+  const existing = descriptor && 'value' in descriptor ? descriptor.value as Storage | undefined : undefined;
+  if (existing) return existing;
+
+  const storage = fallback ?? createMemoryStorage();
+  Object.defineProperty(target, key, {
+    configurable: true,
+    value: storage,
+  });
+  return storage;
+}
+
+const testLocalStorage = installMemoryStorage(globalThis, 'localStorage');
+const testSessionStorage = installMemoryStorage(globalThis, 'sessionStorage');
+
+if (typeof window !== 'undefined') {
+  installMemoryStorage(window, 'localStorage', testLocalStorage);
+  installMemoryStorage(window, 'sessionStorage', testSessionStorage);
+}
 
 // JSDOM doesn't implement scrollIntoView
 if (typeof Element !== 'undefined' && !Element.prototype.scrollIntoView) {
@@ -37,7 +99,7 @@ if (typeof globalThis.DataTransfer === 'undefined') {
     }
     setDragImage() {}
   }
-  (globalThis as any).DataTransfer = DataTransferPolyfill;
+  (globalThis as TestGlobal).DataTransfer = DataTransferPolyfill as typeof DataTransfer;
 }
 
 // JSDOM doesn't implement DragEvent
@@ -49,7 +111,7 @@ if (typeof globalThis.DragEvent === 'undefined' && typeof globalThis.MouseEvent 
       this.dataTransfer = init?.dataTransfer ?? null;
     }
   }
-  (globalThis as any).DragEvent = DragEventPolyfill;
+  (globalThis as TestGlobal).DragEvent = DragEventPolyfill as typeof DragEvent;
 }
 
 // Temp MIND_ROOT for each test
@@ -81,7 +143,10 @@ vi.mock('@/lib/settings', () => ({
     mindRoot: '',
   }),
   writeSettings: vi.fn(),
-  recordSkillInstall: vi.fn(),
+  readBaseUrlCompat: vi.fn(() => ({})),
+  writeBaseUrlCompat: vi.fn(),
+  readInstalledSkillAgents: vi.fn(() => []),
+  clearInstalledSkillAgents: vi.fn(),
   effectiveSopRoot: () => state.root,
   effectiveAiConfig: () => ({
     provider: 'anthropic',
@@ -91,11 +156,29 @@ vi.mock('@/lib/settings', () => ({
   }),
 }));
 
+// The mind-root resolver now lives in the core package (lib/mind-root is a
+// shim), so a vi.mock of the web module path would not reach core-internal
+// callers like the agent run ledger. The core test seam covers every caller.
+setMindRootResolverForTests(() => state.root);
+
 beforeEach(() => {
   state.root = fs.mkdtempSync(path.join(os.tmpdir(), 'mindos-app-test-'));
   testMindRoot = state.root;
+  localStorage.clear();
+  sessionStorage.clear();
 });
 
-afterEach(() => {
+afterEach(async () => {
   fs.rmSync(state.root, { recursive: true, force: true });
+  // agent-run-store / agent-session-store keep runs/messages/metadata at module
+  // level so background chat runs survive unmounts — in tests that means state
+  // leaks across cases unless reset here. Order matters: the run-store reset
+  // nulls its bridge slots, the session-store reset re-wires them. Dynamic
+  // import keeps non-web suites from paying the cost.
+  const { resetAgentRunStoreForTests } = await import('@/lib/agent-run-store');
+  resetAgentRunStoreForTests();
+  const { resetAgentSessionStoreForTests } = await import('@/lib/agent-session-store');
+  resetAgentSessionStoreForTests();
+  const { resetWorkspaceTabsForTests } = await import('@/lib/workspace-tabs');
+  resetWorkspaceTabsForTests();
 });

@@ -11,6 +11,7 @@ import { SkeletonBlock } from './channel-detail/shared';
 import { ChannelHeader } from './channel-detail/ChannelHeader';
 import { ChannelSetupFlow } from './channel-detail/ChannelSetupFlow';
 import { ChannelStatusBar } from './channel-detail/ChannelStatusBar';
+import { ChannelFeishuOAuth } from './channel-detail/ChannelFeishuOAuth';
 import { ChannelConversation } from './channel-detail/ChannelConversation';
 import { ChannelActivityFeed } from './channel-detail/ChannelActivityFeed';
 import { ChannelTestSend } from './channel-detail/ChannelTestSend';
@@ -111,6 +112,7 @@ export default function AgentsContentChannelDetail({ platformId }: { platformId:
   const isFeishu = platformId === 'feishu';
   const webhookState = status?.webhook?.state ?? 'disabled';
   const purpose = locale === 'zh' ? (platform.purposeZh ?? platform.purpose ?? im.emptyDesc) : (platform.purpose ?? im.emptyDesc);
+  const headerPurpose = isFeishu && isConnected ? '' : purpose;
   const recipientExample = locale === 'zh' ? (platform.recipientExampleZh ?? platform.recipientExample) : platform.recipientExample;
 
   return (
@@ -153,7 +155,7 @@ export default function AgentsContentChannelDetail({ platformId }: { platformId:
             platform={platform}
             status={status}
             im={im}
-            purpose={purpose}
+            purpose={headerPurpose}
             isConnected={isConnected}
           />
 
@@ -190,6 +192,14 @@ export default function AgentsContentChannelDetail({ platformId }: { platformId:
                 onSent={() => fetchDetail(true)}
               />
 
+              {isFeishu && (
+                <ChannelFeishuOAuth
+                  status={status?.oauth}
+                  im={im}
+                  onSaved={() => fetchDetail(true)}
+                />
+              )}
+
               <ChannelSettings
                 platform={platform}
                 im={im}
@@ -198,12 +208,22 @@ export default function AgentsContentChannelDetail({ platformId }: { platformId:
               />
             </>
           ) : (
-            <ChannelSetupFlow
-              platform={platform}
-              im={im}
-              locale={locale}
-              onSaved={() => fetchDetail(false)}
-            />
+            <div className="space-y-5">
+              <ChannelSetupFlow
+                platform={platform}
+                im={im}
+                locale={locale}
+                onSaved={() => fetchDetail(false)}
+              />
+
+              {isFeishu && status && (
+                <ChannelFeishuOAuth
+                  status={status.oauth}
+                  im={im}
+                  onSaved={() => fetchDetail(true)}
+                />
+              )}
+            </div>
           )}
         </div>
       )}

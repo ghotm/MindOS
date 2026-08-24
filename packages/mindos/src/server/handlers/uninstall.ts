@@ -68,8 +68,8 @@ export function handleUninstallPost(
 }
 
 function resolveRemoveConfig(body: UninstallPostPayload | unknown): boolean {
-  if (!body || typeof body !== 'object') return true;
-  return (body as UninstallPostPayload).removeConfig !== false;
+  if (!body || typeof body !== 'object') return false;
+  return (body as UninstallPostPayload).removeConfig === true;
 }
 
 function buildUninstallAnswers(removeConfig: boolean): string {
@@ -84,6 +84,7 @@ function cleanUninstallEnv(source: NodeJS.ProcessEnv | Record<string, string | u
   }
   delete cleaned.AUTH_TOKEN;
   delete cleaned.WEB_PASSWORD;
+  delete cleaned.WEB_SESSION_SECRET;
   delete cleaned.NODE_OPTIONS;
   return cleaned;
 }

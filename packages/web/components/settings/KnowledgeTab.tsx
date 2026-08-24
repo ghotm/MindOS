@@ -1,17 +1,20 @@
 'use client';
 
-import { useState, useEffect, useCallback, useSyncExternalStore, useRef } from 'react';
+import { useState, useEffect, useCallback, useSyncExternalStore } from 'react';
 import { Copy, Check, RefreshCw, Trash2, Sparkles, ChevronDown, ChevronRight, Loader2, Cpu, Database as DatabaseIcon, HardDrive, RotateCcw, FlaskConical } from 'lucide-react';
 import { toast } from '@/lib/toast';
 import type { KnowledgeTabProps } from './types';
 import { Field, Input, EnvBadge, Toggle, SettingCard, SettingRow, PasswordInput } from './Primitives';
 import { ConfirmDialog } from '@/components/agents/AgentsPrimitives';
 import { apiFetch } from '@/lib/api';
+import { useVisiblePolling } from '@/lib/use-visible-polling';
 import { copyToClipboard } from '@/lib/clipboard';
 import { formatBytes, formatUptime } from '@/lib/format';
-import { setShowHiddenFiles } from '@/components/FileTree';
+import { setShowHiddenFiles } from '@/lib/stores/hidden-files';
 import { scanExampleFilesAction, cleanupExamplesAction } from '@/lib/actions';
 import WebPortSection from './WebPortSection';
+import { restartWalkthrough } from '@/lib/stores/walkthrough-store';
+import { SearchIgnoredPathsSection } from './SearchIgnoredPathsSection';
 
 export function KnowledgeTab({ data, setData, t }: KnowledgeTabProps) {
   const env = data.envOverrides ?? {};
@@ -22,10 +25,6 @@ export function KnowledgeTab({ data, setData, t }: KnowledgeTabProps) {
   const [labsEcho, setLabsEcho] = useState(() =>
     typeof window !== 'undefined' ? localStorage.getItem('mindos:labs-echo') === '1' : false
   );
-  const [labsWorkflows, setLabsWorkflows] = useState(() =>
-    typeof window !== 'undefined' ? localStorage.getItem('mindos:labs-workflows') === '1' : false
-  );
-
   // Hidden files toggle
   const [showHidden, setShowHidden] = useState(() =>
     typeof window !== 'undefined' && localStorage.getItem('show-hidden-files') === 'true'
@@ -45,7 +44,6 @@ export function KnowledgeTab({ data, setData, t }: KnowledgeTabProps) {
   const [guideDismissed, setGuideDismissed] = useState(false);
 
   useEffect(() => {
-    // 🟢 MINOR #5: Use apiFetch instead of raw fetch for consistency
     apiFetch<{ guideState?: { active: boolean; dismissed: boolean } }>('/api/setup')
       .then(d => {
         const gs = d.guideState;
@@ -78,22 +76,10 @@ export function KnowledgeTab({ data, setData, t }: KnowledgeTabProps) {
   }, [guideDismissed]);
 
   const handleRestartWalkthrough = useCallback(() => {
-    apiFetch('/api/setup', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        guideState: {
-          active: true,
-          dismissed: false,
-          walkthroughStep: 0,
-          walkthroughDismissed: false,
-        },
-      }),
-    })
+    restartWalkthrough()
       .then(() => {
         setGuideActive(true);
         setGuideDismissed(false);
-        window.dispatchEvent(new Event('guide-state-updated'));
       })
       .catch(err => console.error('Failed to restart walkthrough:', err));
   }, []);
@@ -134,7 +120,7 @@ export function KnowledgeTab({ data, setData, t }: KnowledgeTabProps) {
   }
 
   function handleCopy() {
-    const text = revealedToken ?? data.authToken ?? '';
+    const text = revealedToken ?? '';
     if (!text) return;
     copyToClipboard(text).then((ok) => {
       if (ok) toast.copy();
@@ -190,6 +176,8 @@ export function KnowledgeTab({ data, setData, t }: KnowledgeTabProps) {
         )}
       </SettingCard>
 
+      <SearchIgnoredPathsSection data={data} setData={setData} t={t} />
+
       {/* ── Web UI Port ── */}
       <WebPortSection m={t.settings?.mcp ?? {}} />
 
@@ -226,7 +214,7 @@ export function KnowledgeTab({ data, setData, t }: KnowledgeTabProps) {
               <code className="flex-1 text-xs font-mono text-foreground break-all select-all">
                 {displayToken || <span className="text-muted-foreground italic">{k.tokenNotSet ?? '— not set —'}</span>}
               </code>
-              {displayToken && (
+              {revealedToken && (
                 <button
                   type="button"
                   onClick={handleCopy}
@@ -309,16 +297,6 @@ export function KnowledgeTab({ data, setData, t }: KnowledgeTabProps) {
             onChange={v => {
               setLabsEcho(v);
               localStorage.setItem('mindos:labs-echo', v ? '1' : '0');
-              window.dispatchEvent(new Event('mindos:labs-changed'));
-            }}
-          />
-          <LabsToggle
-            label={a.labsWorkflows ?? 'Flows'}
-            description={a.labsWorkflowsDesc ?? 'Visual workflow automation for agents.'}
-            checked={labsWorkflows}
-            onChange={v => {
-              setLabsWorkflows(v);
-              localStorage.setItem('mindos:labs-workflows', v ? '1' : '0');
               window.dispatchEvent(new Event('mindos:labs-changed'));
             }}
           />
@@ -427,14 +405,8 @@ function MonitoringSection({ k }: { k: Record<string, unknown> }) {
     setLoading(false);
   }, []);
 
-  // Fetch on first expand, then refresh every 10s while expanded
-  const hasFetched = useRef(false);
-  useEffect(() => {
-    if (!expanded) { hasFetched.current = false; return; }
-    if (!hasFetched.current) { fetchData(); hasFetched.current = true; }
-    const id = setInterval(fetchData, 10_000);
-    return () => clearInterval(id);
-  }, [expanded, fetchData]);
+  // Fetch on expand, then refresh every 10s while expanded and the tab is visible
+  useVisiblePolling(() => void fetchData(), 10_000, { enabled: expanded });
 
   return (
     <div className="border-t border-border pt-5">

@@ -2,23 +2,24 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { URL } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import {
-  collectAllFilesFromMindRoot,
   getDefaultMindRoot,
-  getRecentlyModifiedFromMindRoot,
-  getTreeVersionFromMindRoot,
   listDirectoriesFromMindRoot,
   listMindSpacesFromMindRoot,
   readLinesFromMindRoot,
+  readMindosIgnoreFile,
   readRuntimeSettings,
   readTextFileFromMindRoot,
   searchMindRoot,
   getSkillRootsFromRuntime,
+  writeMindosIgnoreFile,
   writeRuntimeSettings,
   type MindosRuntimeOptions,
   type MindosRuntimeSettings,
 } from './runtime.js';
+import { createMindRootTreeCache } from './tree-cache.js';
 import { MINDOS_SERVER_ROUTES } from './contract.js';
-import { createDefaultMcpAgents } from './mcp-agent-registry.js';
+import { createDefaultMcpAgents, createDefaultSkillAgentRegistry } from './mcp-agent-registry.js';
+import { listCachedAcpHandshakeHealth } from '../protocols/acp/index.js';
 import { handleA2aAgentsGet, handleA2aDelegationsGet, handleA2aDiscoverPost, handleA2aOptions, handleA2aPost } from './handlers/a2a.js';
 import {
   handleAcpConfigDelete,
@@ -30,8 +31,32 @@ import {
   handleAcpSessionDelete,
   handleAcpSessionGet,
   handleAcpSessionPost,
+  getAcpSessionSnapshots,
 } from './handlers/acp.js';
-import { handleAgentActivity } from './handlers/agent-activity.js';
+import { handleAgentActivity, handleAgentActivityPost } from './handlers/agent-activity.js';
+import {
+  handleCodexModelsGet,
+  handleCodexThreadArchivePost,
+  handleCodexThreadForkPost,
+  handleCodexThreadGet,
+  handleCodexThreadUnarchivePost,
+  handleCodexThreadsGet,
+  type CodexThreadManagerServices,
+} from './handlers/agent-runtimes-codex.js';
+import { handleAgentRuntimesGet } from './handlers/agent-runtimes.js';
+import { handleAgentRuntimeMcpProjectionsGet } from './handlers/mcp-runtime-projections.js';
+import { handleAgentRuntimeAdapterProjectionsGet } from './handlers/runtime-adapter-projections.js';
+import { handleAgentRuntimePermissionProjectionsGet } from './handlers/runtime-permission-projections.js';
+import { handleRuntimeSessionProjectionsGet } from './handlers/runtime-session-projections.js';
+import { handleAgentRuntimeArtifactProjectionsGet } from './handlers/runtime-artifact-projections.js';
+import { handleAgentRuntimeAutomationProjectionsGet } from './handlers/runtime-automation-projections.js';
+import { handleRuntimeControlPlaneGet, handleRuntimeControlPlanePost } from './handlers/runtime-control-plane.js';
+import { handleAgentRuntimeReadinessGet } from './handlers/runtime-readiness.js';
+import {
+  handleAgentRuntimeExtensionInstallPost,
+  handleAgentRuntimeExtensionPreflightPost,
+  handleAgentRuntimeExtensionsGet,
+} from './handlers/runtime-extensions.js';
 import {
   handleAgentCopySkillPost,
   handleCustomAgentDetectPost,
@@ -42,36 +67,44 @@ import {
   type CustomAgentDef,
   type CustomAgentDetectPayload,
 } from './handlers/agents.js';
-import { handleAskSessionsDelete, handleAskSessionsGet, handleAskSessionsPost } from './handlers/ask-sessions.js';
+import { handleAgentSessionsDelete, handleAgentSessionsGet, handleAgentSessionsPost } from './handlers/agent-sessions.js';
+import { handleAssistantsDelete, handleAssistantsGet, handleAssistantsPost } from './handlers/assistants.js';
 import { handleBootstrapGet } from './handlers/bootstrap.js';
-import { handleChannelsVerifyPost } from './handlers/channels-verify.js';
-import { handleFileGet, handleFilePost } from './handlers/file.js';
+import { handleChannelsVerifyPost, type ChannelsVerifyServices } from './handlers/channels-verify.js';
+import { handleFileGet, handleFilePost, handleOpenInFileManagerGet } from './handlers/file.js';
 import { handleChangesGet, handleChangesPost } from './handlers/changes.js';
 import { handleConnectGet } from './handlers/connect.js';
 import { handleEmbeddingGet, handleEmbeddingPost } from './handlers/embedding.js';
+import { EXTRACT_DOCX_MAX_BODY_BYTES, handleExtractDocxPost, type ExtractDocxServices } from './handlers/extract-docx.js';
+import { EXTRACT_PDF_MAX_BODY_BYTES, handleExtractPdfPost, type ExtractPdfServices } from './handlers/extract-pdf.js';
 import { handleFiles } from './handlers/files.js';
 import { handleBacklinks, handleGraph } from './handlers/graph.js';
 import { handleGit } from './handlers/git.js';
 import { handleHealth } from './handlers/health.js';
 import { handleInitPost } from './handlers/init.js';
 import { handleImActivityGet } from './handlers/im-activity.js';
-import { handleImConfigDelete, handleImConfigGet, handleImConfigPut } from './handlers/im-config.js';
+import { handleImConfigDelete, handleImConfigGet, handleImConfigPut, type ImConfigServices } from './handlers/im-config.js';
 import { handleImFeishuLongConnectionDelete, handleImFeishuLongConnectionGet, handleImFeishuLongConnectionPost } from './handlers/im-feishu-long-connection.js';
-import { handleImStatusGet, handleImWebhookStatusGet } from './handlers/im-status.js';
-import { handleImTestPost } from './handlers/im-test.js';
+import { handleImFeishuOAuthCallbackGet, handleImFeishuOAuthGet } from './handlers/im-feishu-oauth.js';
+import { handleImStatusGet, handleImWebhookStatusGet, type ImStatusServices } from './handlers/im-status.js';
+import { handleImTestPost, type ImTestServices } from './handlers/im-test.js';
 import { handleInboxDelete, handleInboxGet, handleInboxPost } from './handlers/inbox.js';
 import { handleMonitoringGet } from './handlers/monitoring.js';
 import {
   handleMcpInstallPost,
+  handleMcpServerCopyPost,
   handleMcpUninstallPost,
   type MindosMcpAgentDef,
   type MindosMcpInstallRequest,
+  type MindosMcpServerCopyRequest,
   type MindosMcpUninstallRequest,
 } from './handlers/mcp-install.js';
 import {
   handleMcpAgentsGet,
+  resolveSkillLinkAgents,
   type MindosMcpAgentRegistryDef,
 } from './handlers/mcp-agents.js';
+import { type MindosSkillLinkAgent } from './handlers/skill-links.js';
 import {
   handleMcpDirectToolsPost,
   handleMcpToolsGet,
@@ -84,11 +117,11 @@ import {
   type MindosMcpInstallSkillRequest,
 } from './handlers/mcp-install-skill.js';
 import { handleMcpRestartPost } from './handlers/mcp-restart.js';
-import { handleMcpStatus, type MindosMcpStatusServices, type MindosMcpStatusSettings } from './handlers/mcp-status.js';
+import { handleMcpStatus, handleMcpTokenReveal, type MindosMcpStatusServices, type MindosMcpStatusSettings } from './handlers/mcp-status.js';
 import { handleRawFile } from './handlers/file-raw.js';
-import { handleAskStream } from './handlers/ask.js';
+import { handleAgentSessionTurnStream } from './handlers/agent-turn.js';
 import { handleRecentFiles } from './handlers/recent-files.js';
-import { handleSearch } from './handlers/search.js';
+import { handleSearch, type SearchRequestOptions } from './handlers/search.js';
 import { handleSearchPrewarm } from './handlers/search-prewarm.js';
 import {
   handleSettingsGet,
@@ -100,12 +133,23 @@ import {
 } from './handlers/settings.js';
 import { handleSettingsListModelsPost } from './handlers/settings-list-models.js';
 import { handleSettingsTestKeyPost } from './handlers/settings-test-key.js';
+import {
+  MINDOS_PROVIDER_PRESETS,
+  buildMindosEndpointCandidates,
+  findMindosProvider,
+  getMindosApiKeyFromEnv,
+  isMindosProviderEntryId,
+  isMindosProviderId,
+  parseMindosProviders,
+  resolveMindosProviderConfig,
+} from './provider-settings.js';
 import { handleUninstallPost } from './handlers/uninstall.js';
 import { handleSetupCheckPort } from './handlers/setup-port.js';
 import { handleSetupGenerateToken } from './handlers/setup-token.js';
 import { handleSetupCheckPath, handleSetupListDirectories } from './handlers/setup-path.js';
 import { handleSetupGet, handleSetupPatch, handleSetupPost } from './handlers/setup.js';
-import { handleSkillsGet, handleSkillsPost, type MindosSkillRoot } from './handlers/skills.js';
+import { handleSkillMatrixGet, handleSkillsGet, handleSkillsPost, type MindosSkillRoot } from './handlers/skills.js';
+import { handleSkillRuntimeMatchesGet } from './handlers/skill-runtime-matches.js';
 import { handleSpaceOverviewGet } from './handlers/space-overview.js';
 import { handleStaticArtifact } from './handlers/static.js';
 import { handleSyncGet, handleSyncPost } from './handlers/sync.js';
@@ -113,14 +157,24 @@ import { handleTreeVersion } from './handlers/tree-version.js';
 import { handleRestartPost, handleUpdateCheckGet, handleUpdatePost, handleUpdateStatusGet } from './handlers/update.js';
 import { handleWorkflowsGet, handleWorkflowsPost } from './handlers/workflows.js';
 import { CORS_HEADERS, json, type MindosServerResponse } from './response.js';
-import { encodeMindosSseEvent, type MindOSSSEvent } from '../session/index.js';
+import {
+  encodeMindosSseEvent,
+  startMindosAgentTurnSseHeartbeat,
+  type MindOSSSEvent,
+} from '../agent/turn/index.js';
 import { getLocalIPv4 } from './handlers/connect.js';
+
+export type MindosChannelServices =
+  ChannelsVerifyServices &
+  ImConfigServices &
+  ImStatusServices &
+  ImTestServices;
 
 export type MindosHttpServices = {
   mindRoot: string;
   runtimeRoot?: string;
   staticRoot?: string;
-  askSessionsStorePath?: string;
+  agentSessionsStorePath?: string;
   updateStatusPath?: string;
   collectAllFiles(): string[];
   getRecentlyModified(limit: number): Array<{ path: string; mtime: number }>;
@@ -129,9 +183,13 @@ export type MindosHttpServices = {
   readLines(path: string): string[];
   listSpaces(): string[];
   listDirectories(): string[];
-  search(query: string, options: { limit: number }): Promise<unknown[]>;
+  search(query: string, options: SearchRequestOptions): Promise<unknown[]>;
   readSettings(): MindosRuntimeSettings;
   writeSettings(settings: MindosRuntimeSettings): void;
+  /** Marks any tree/link caches dirty after internal writes. Optional for custom services. */
+  invalidateTreeCache?(): void;
+  /** Releases watchers/timers owned by the services (called on server close for default services). */
+  dispose?(): void;
   mcpAgents?: Record<string, MindosMcpAgentDef>;
   mcpTools?: {
     readMcpConfig(): MindosMcpConfigFile;
@@ -139,7 +197,16 @@ export type MindosHttpServices = {
     updateServerDirectTools(server: string, directTools: boolean | string[]): void;
   };
   listSkills(): { disabledSkills?: string[]; skillRoots: MindosSkillRoot[] };
-  askStream(input: unknown): AsyncIterable<MindOSSSEvent>;
+  agentTurnStream(input: unknown): AsyncIterable<MindOSSSEvent>;
+  createCodexClient?: CodexThreadManagerServices['createCodexClient'];
+  documentExtraction?: ExtractPdfServices & ExtractDocxServices;
+  channels?: MindosChannelServices;
+  syncDaemon?: {
+    start?(mindRoot: string): void;
+    stop?(): void;
+    reconfigure?(mindRoot: string): void;
+    restart?(mindRoot: string): void;
+  };
 };
 
 export type MindosHttpServerOptions = {
@@ -149,12 +216,15 @@ export type MindosHttpServerOptions = {
   staticRoot?: string;
   services?: MindosHttpServices;
   runtime?: MindosRuntimeOptions;
+  syncDaemon?: MindosHttpServices['syncDaemon'];
 };
 
 type DefaultMindosHttpServicesOptions = MindosRuntimeOptions & {
   runtimeRoot?: string;
   staticRoot?: string;
   mcpAgents?: Record<string, MindosMcpAgentDef>;
+  documentExtraction?: ExtractPdfServices & ExtractDocxServices;
+  syncDaemon?: MindosHttpServices['syncDaemon'];
 };
 
 export type MindosHttpServer = {
@@ -166,15 +236,24 @@ export type MindosHttpServer = {
 
 export function createDefaultMindosHttpServices(options: DefaultMindosHttpServicesOptions = {}): MindosHttpServices {
   const mindRoot = getDefaultMindRoot(options);
+  // Watcher-driven cache: avoids walking the whole library on every poll of
+  // /api/tree-version (~5s) and on every /api/files request.
+  const treeCache = createMindRootTreeCache(mindRoot);
+  const channels: MindosChannelServices = {};
+  if (options.homeDir) {
+    channels.configPath = `${options.homeDir}/.mindos/im.json`;
+  }
   return {
     mindRoot,
     runtimeRoot: options.runtimeRoot,
     staticRoot: options.staticRoot,
-    askSessionsStorePath: options.homeDir ? `${options.homeDir}/.mindos/sessions.json` : undefined,
+    agentSessionsStorePath: options.homeDir ? `${options.homeDir}/.mindos/sessions.json` : undefined,
     updateStatusPath: options.homeDir ? `${options.homeDir}/.mindos/update-status.json` : undefined,
-    collectAllFiles: () => collectAllFilesFromMindRoot(mindRoot),
-    getRecentlyModified: (limit) => getRecentlyModifiedFromMindRoot(mindRoot, limit),
-    getTreeVersion: () => getTreeVersionFromMindRoot(mindRoot),
+    collectAllFiles: () => treeCache.collectAllFiles(),
+    getRecentlyModified: (limit) => treeCache.getRecentlyModified(limit),
+    getTreeVersion: () => treeCache.getTreeVersion(),
+    invalidateTreeCache: () => treeCache.invalidate(),
+    dispose: () => treeCache.dispose(),
     readTextFile: (filePath) => readTextFileFromMindRoot(mindRoot, filePath),
     readLines: (filePath) => readLinesFromMindRoot(mindRoot, filePath),
     listSpaces: () => listMindSpacesFromMindRoot(mindRoot),
@@ -183,6 +262,9 @@ export function createDefaultMindosHttpServices(options: DefaultMindosHttpServic
     readSettings: () => readRuntimeSettings(options),
     writeSettings: (settings) => writeRuntimeSettings(settings, options),
     mcpAgents: options.mcpAgents ?? createDefaultMcpAgents(),
+    documentExtraction: options.documentExtraction,
+    channels,
+    syncDaemon: options.syncDaemon,
     mcpTools: {
       readMcpConfig: () => ({ mcpServers: {} }),
       readMcpToolCache: () => null,
@@ -197,10 +279,10 @@ export function createDefaultMindosHttpServices(options: DefaultMindosHttpServic
         settings: readRuntimeSettings(options),
       }),
     }),
-    askStream: async function* () {
+    agentTurnStream: async function* () {
       yield {
         type: 'error',
-        message: 'Product ask runtime is not configured. Start the Next adapter or inject an askStream service.',
+        message: 'Product agent turn runtime is not configured. Start the Next adapter or inject an agentTurnStream service.',
       };
     },
   };
@@ -209,13 +291,23 @@ export function createDefaultMindosHttpServices(options: DefaultMindosHttpServic
 export function createMindosHttpServer(options: MindosHttpServerOptions = {}): MindosHttpServer {
   const hostname = options.hostname ?? process.env.MINDOS_WEB_HOST ?? '127.0.0.1';
   const port = options.port ?? Number(process.env.MINDOS_WEB_PORT || 3456);
+  const ownsServices = !options.services;
   const services = options.services ?? createDefaultMindosHttpServices({
     ...options.runtime,
     runtimeRoot: options.runtimeRoot,
     staticRoot: options.staticRoot,
+    syncDaemon: options.syncDaemon,
   });
   const server = createServer((req, res) => {
-    void handleRequest(req, res, services, options.runtimeRoot);
+    const method = (req.method ?? 'GET').toUpperCase();
+    void handleRequest(req, res, services, options.runtimeRoot).finally(() => {
+      // Any non-read API call may have written into the mind root (file ops,
+      // inbox, init, skills, ...). Invalidation is a cheap dirty flag; the
+      // watcher covers external writes, this covers internal ones immediately.
+      if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+        services.invalidateTreeCache?.();
+      }
+    });
   });
 
   return {
@@ -233,6 +325,7 @@ export function createMindosHttpServer(options: MindosHttpServerOptions = {}): M
     close() {
       return new Promise((resolve, reject) => {
         server.close((error) => {
+          if (ownsServices) services.dispose?.();
           if (error) reject(error);
           else resolve();
         });
@@ -254,14 +347,18 @@ async function handleRequest(
       return;
     }
 
-    const route = `${req.method ?? 'GET'} ${url.pathname}`;
-    if (!isAuthorizedRequest(route, req, services)) {
+    const method = req.method ?? 'GET';
+    const route = `${method} ${url.pathname}`;
+    if (!isAuthorizedRequest(resolveAuthRoute(method, url.pathname), req, services)) {
       writeResponse(res, json({ error: 'Unauthorized' }, { status: 401 }));
       return;
     }
 
     if (route === 'GET /api/health') {
-      writeResponse(res, handleHealth({ runtimeRoot: runtimeRoot ?? services.runtimeRoot }));
+      writeResponse(res, handleHealth({
+        runtimeRoot: runtimeRoot ?? services.runtimeRoot,
+        authRequired: Boolean(readWebPassword(services)),
+      }));
       return;
     }
     if (route === 'GET /api/files') {
@@ -289,12 +386,113 @@ async function handleRequest(
       return;
     }
     if (route === 'GET /api/graph') {
-      writeResponse(res, handleGraph(services));
+      writeResponse(res, handleGraph(url.searchParams, services));
       return;
     }
     if (route === 'GET /api/agent-activity') {
       writeResponse(res, await handleAgentActivity(url.searchParams, services));
       return;
+    }
+    if (route === 'POST /api/agent-activity') {
+      writeResponse(res, handleAgentActivityPost(await readJsonBody(req), services));
+      return;
+    }
+    if (route === 'GET /api/assistants') {
+      writeResponse(res, handleAssistantsGet(services));
+      return;
+    }
+    if (route === 'POST /api/assistants') {
+      writeResponse(res, handleAssistantsPost(await readJsonBody(req), services));
+      return;
+    }
+    if (route === 'DELETE /api/assistants') {
+      writeResponse(res, handleAssistantsDelete(await readJsonBody(req), services));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes') {
+      writeResponse(res, await handleAgentRuntimesGet(url.searchParams, services));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/mcp-projections') {
+      writeResponse(res, await handleAgentRuntimeMcpProjectionsGet(url.searchParams, createHttpMcpProjectionServices(services, url.searchParams)));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/adapter-projections') {
+      writeResponse(res, await handleAgentRuntimeAdapterProjectionsGet(url.searchParams, createHttpRuntimeProjectionServices(services, url.searchParams)));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/permission-projections') {
+      writeResponse(res, await handleAgentRuntimePermissionProjectionsGet(url.searchParams, createHttpRuntimeProjectionServices(services, url.searchParams)));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/session-projections') {
+      writeResponse(res, await handleRuntimeSessionProjectionsGet(url.searchParams, {
+        ...createHttpRuntimeProjectionServices(services, url.searchParams),
+        getAcpSessionSnapshots: () => getAcpSessionSnapshots(services),
+      }));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/artifact-projections') {
+      writeResponse(res, await handleAgentRuntimeArtifactProjectionsGet(url.searchParams, createHttpRuntimeProjectionServices(services, url.searchParams)));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/automation-projections') {
+      writeResponse(res, await handleAgentRuntimeAutomationProjectionsGet(url.searchParams, createHttpRuntimeProjectionServices(services, url.searchParams)));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/control-plane') {
+      writeResponse(res, await handleRuntimeControlPlaneGet(url.searchParams, { mindRoot: services.mindRoot }));
+      return;
+    }
+    if (route === 'POST /api/agent-runtimes/control-plane') {
+      writeResponse(res, handleRuntimeControlPlanePost(await readJsonBody(req), { mindRoot: services.mindRoot }));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/readiness') {
+      writeResponse(res, await handleAgentRuntimeReadinessGet(url.searchParams, {
+        ...createHttpMcpProjectionServices(services, url.searchParams),
+        getAcpSessionSnapshots: () => getAcpSessionSnapshots(services),
+      }));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/extensions') {
+      writeResponse(res, handleAgentRuntimeExtensionsGet(services));
+      return;
+    }
+    if (route === 'POST /api/agent-runtimes/extensions/preflight') {
+      writeResponse(res, handleAgentRuntimeExtensionPreflightPost(await readJsonBody(req), services));
+      return;
+    }
+    if (route === 'POST /api/agent-runtimes/extensions/install') {
+      writeResponse(res, handleAgentRuntimeExtensionInstallPost(await readJsonBody(req), services));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/codex/threads') {
+      writeResponse(res, await handleCodexThreadsGet(url.searchParams, services));
+      return;
+    }
+    if (route === 'GET /api/agent-runtimes/codex/models') {
+      writeResponse(res, await handleCodexModelsGet(services));
+      return;
+    }
+    const codexThreadRoute = parseCodexThreadRoute(method, url.pathname);
+    if (codexThreadRoute) {
+      if (codexThreadRoute.action === null && method === 'GET') {
+        writeResponse(res, await handleCodexThreadGet(codexThreadRoute.threadId, url.searchParams, services));
+        return;
+      }
+      if (codexThreadRoute.action === 'fork' && method === 'POST') {
+        writeResponse(res, await handleCodexThreadForkPost(codexThreadRoute.threadId, await readJsonBody(req), services));
+        return;
+      }
+      if (codexThreadRoute.action === 'archive' && method === 'POST') {
+        writeResponse(res, await handleCodexThreadArchivePost(codexThreadRoute.threadId, services));
+        return;
+      }
+      if (codexThreadRoute.action === 'unarchive' && method === 'POST') {
+        writeResponse(res, await handleCodexThreadUnarchivePost(codexThreadRoute.threadId, services));
+        return;
+      }
     }
     if (route === 'OPTIONS /api/a2a') {
       writeResponse(res, handleA2aOptions());
@@ -340,19 +538,19 @@ async function handleRequest(
       return;
     }
     if (route === 'GET /api/acp/registry') {
-      writeResponse(res, await handleAcpRegistryGet(url.searchParams));
+      writeResponse(res, await handleAcpRegistryGet(url.searchParams, services));
       return;
     }
     if (route === 'GET /api/acp/session') {
-      writeResponse(res, handleAcpSessionGet());
+      writeResponse(res, handleAcpSessionGet(services));
       return;
     }
     if (route === 'POST /api/acp/session') {
-      writeResponse(res, await handleAcpSessionPost(await readJsonBody(req)));
+      writeResponse(res, await handleAcpSessionPost(await readJsonBody(req), services));
       return;
     }
     if (route === 'DELETE /api/acp/session') {
-      writeResponse(res, await handleAcpSessionDelete(await readJsonBody(req)));
+      writeResponse(res, await handleAcpSessionDelete(await readJsonBody(req), services));
       return;
     }
     if (route === 'GET /api/bootstrap') {
@@ -372,7 +570,7 @@ async function handleRequest(
       return;
     }
     if (route === 'POST /api/channels/verify') {
-      writeResponse(res, await handleChannelsVerifyPost(await readJsonBody(req)));
+      writeResponse(res, await handleChannelsVerifyPost(await readJsonBody(req), services.channels));
       return;
     }
     if (route === 'GET /api/im/activity') {
@@ -380,27 +578,35 @@ async function handleRequest(
       return;
     }
     if (route === 'GET /api/im/config') {
-      writeResponse(res, handleImConfigGet());
+      writeResponse(res, handleImConfigGet(services.channels));
       return;
     }
     if (route === 'PUT /api/im/config') {
-      writeResponse(res, handleImConfigPut(await readJsonBody(req)));
+      writeResponse(res, handleImConfigPut(await readJsonBody(req), services.channels));
       return;
     }
     if (route === 'DELETE /api/im/config') {
-      writeResponse(res, handleImConfigDelete(url.searchParams));
+      writeResponse(res, handleImConfigDelete(url.searchParams, services.channels));
       return;
     }
     if (route === 'GET /api/im/status') {
-      writeResponse(res, await handleImStatusGet());
+      writeResponse(res, await handleImStatusGet(services.channels));
       return;
     }
     if (route === 'POST /api/im/test') {
-      writeResponse(res, await handleImTestPost(await readJsonBody(req)));
+      writeResponse(res, await handleImTestPost(await readJsonBody(req), services.channels));
       return;
     }
     if (route === 'GET /api/im/webhook-status') {
-      writeResponse(res, handleImWebhookStatusGet(url.searchParams));
+      writeResponse(res, handleImWebhookStatusGet(url.searchParams, services.channels));
+      return;
+    }
+    if (route === 'GET /api/im/feishu/oauth') {
+      writeResponse(res, handleImFeishuOAuthGet(url.searchParams));
+      return;
+    }
+    if (route === 'GET /api/im/feishu/oauth/callback') {
+      writeResponse(res, await handleImFeishuOAuthCallbackGet(url.searchParams));
       return;
     }
     if (route === 'GET /api/im/feishu/long-connection') {
@@ -424,7 +630,9 @@ async function handleRequest(
       return;
     }
     if (route === 'GET /api/update-check') {
-      writeResponse(res, await handleUpdateCheckGet());
+      writeResponse(res, await handleUpdateCheckGet({
+        projectRoot: services.runtimeRoot ?? runtimeRoot ?? process.cwd(),
+      }));
       return;
     }
     if (route === 'POST /api/restart') {
@@ -453,6 +661,7 @@ async function handleRequest(
     if (route === 'POST /api/sync') {
       writeResponse(res, await handleSyncPost(await readJsonBody(req), {
         runtimeRoot: services.runtimeRoot,
+        syncDaemon: services.syncDaemon,
       }));
       return;
     }
@@ -511,6 +720,29 @@ async function handleRequest(
       writeResponse(res, handleSkillsGet(services.listSkills()));
       return;
     }
+    if (route === 'GET /api/skills/matrix') {
+      const listLinkAgents = createHttpSkillLinkAgents(services);
+      const { disabledSkills, skillRoots } = services.listSkills();
+      writeResponse(res, handleSkillMatrixGet({ disabledSkills, skillRoots, listLinkAgents }));
+      return;
+    }
+    if (route === 'GET /api/skills/runtime-matches') {
+      const { disabledSkills, skillRoots } = services.listSkills();
+      writeResponse(res, await handleSkillRuntimeMatchesGet(url.searchParams, {
+        disabledSkills,
+        skillRoots,
+        listRuntimes: async () => {
+          const runtimeParams = new URLSearchParams();
+          if (url.searchParams.get('force') === '1') runtimeParams.set('force', '1');
+          const runtimeResponse = await handleAgentRuntimesGet(runtimeParams, services);
+          if (runtimeResponse.status === 200 && runtimeResponse.body && 'runtimes' in runtimeResponse.body) {
+            return runtimeResponse.body.runtimes;
+          }
+          throw new Error('Failed to build runtime descriptors for skill runtime matches.');
+        },
+      }));
+      return;
+    }
     if (route === 'GET /api/mcp/tools') {
       writeResponse(res, handleMcpToolsGet(services.mcpTools ?? {
         readMcpConfig: () => ({ mcpServers: {} }),
@@ -525,6 +757,7 @@ async function handleRequest(
         env: process.env,
         mindRoot: services.mindRoot,
         projectRoot: services.runtimeRoot ?? process.cwd(),
+        skillAgentRegistry: createDefaultSkillAgentRegistry(),
       }));
       return;
     }
@@ -532,6 +765,10 @@ async function handleRequest(
       writeResponse(res, await handleMcpStatus(createHttpMcpStatusServices(services), {
         host: typeof req.headers.host === 'string' ? req.headers.host : undefined,
       }));
+      return;
+    }
+    if (route === 'POST /api/mcp/token/reveal') {
+      writeResponse(res, await handleMcpTokenReveal(createHttpMcpStatusServices(services)));
       return;
     }
     if (route === 'POST /api/mcp/direct-tools') {
@@ -548,8 +785,20 @@ async function handleRequest(
       }));
       return;
     }
+    if (route === 'POST /api/mcp/copy-server') {
+      writeResponse(res, await handleMcpServerCopyPost(await readJsonBody(req) as MindosMcpServerCopyRequest, {
+        agents: services.mcpAgents ?? {},
+        readSettings: services.readSettings,
+        env: process.env,
+      }));
+      return;
+    }
     if (route === 'POST /api/mcp/install-skill') {
       writeResponse(res, handleMcpInstallSkillPost(await readJsonBody(req) as MindosMcpInstallSkillRequest, {
+        agents: (services.mcpAgents ?? {}) as Record<string, MindosMcpAgentRegistryDef>,
+        skillAgentRegistry: createDefaultSkillAgentRegistry(),
+        projectRoot: services.runtimeRoot ?? runtimeRoot ?? process.cwd(),
+        cwd: services.runtimeRoot ?? runtimeRoot ?? process.cwd(),
         env: process.env,
       }));
       return;
@@ -574,6 +823,7 @@ async function handleRequest(
         skillRoots: services.listSkills().skillRoots,
         readSettings: services.readSettings,
         writeSettings: services.writeSettings,
+        listLinkAgents: createHttpSkillLinkAgents(services),
       }));
       return;
     }
@@ -585,11 +835,17 @@ async function handleRequest(
       return;
     }
     if (route === 'POST /api/settings/test-key') {
-      writeResponse(res, await handleSettingsTestKeyPost(await readJsonBody(req)));
+      writeResponse(res, await handleSettingsTestKeyPost(
+        await readJsonBody(req),
+        createHttpSettingsTestKeyServices(services),
+      ));
       return;
     }
     if (route === 'POST /api/settings/list-models') {
-      writeResponse(res, await handleSettingsListModelsPost(await readJsonBody(req)));
+      writeResponse(res, await handleSettingsListModelsPost(
+        await readJsonBody(req),
+        createHttpSettingsListModelsServices(services),
+      ));
       return;
     }
     if (route === 'GET /api/settings') {
@@ -633,9 +889,10 @@ async function handleRequest(
       writeResponse(res, await handleChangesPost(await readJsonBody(req), services));
       return;
     }
-    if (route === 'POST /api/ask') {
+    const agentSessionTurnRoute = parseAgentSessionTurnRoute(method, url.pathname);
+    if (agentSessionTurnRoute) {
       const body = await readJsonBody(req);
-      const response = handleAskStream(body, services);
+      const response = handleAgentSessionTurnStream(agentSessionTurnRoute.sessionId, body, services);
       if (!response.ok) {
         writeResponse(res, response);
         return;
@@ -643,8 +900,8 @@ async function handleRequest(
       await writeSseResponse(res, response);
       return;
     }
-    if (route === 'GET /api/ask-sessions') {
-      writeResponse(res, handleAskSessionsGet({ storePath: services.askSessionsStorePath }));
+    if (route === 'GET /api/agent/sessions') {
+      writeResponse(res, handleAgentSessionsGet({ storePath: services.agentSessionsStorePath }));
       return;
     }
     if (route === 'GET /api/space-overview') {
@@ -655,15 +912,19 @@ async function handleRequest(
       writeResponse(res, await handleGit(url.searchParams, services));
       return;
     }
-    if (route === 'POST /api/ask-sessions') {
-      writeResponse(res, handleAskSessionsPost(await readJsonBody(req), { storePath: services.askSessionsStorePath }));
+    if (route === 'POST /api/agent/sessions') {
+      writeResponse(res, handleAgentSessionsPost(await readJsonBody(req), { storePath: services.agentSessionsStorePath }));
       return;
     }
-    if (route === 'DELETE /api/ask-sessions') {
-      writeResponse(res, handleAskSessionsDelete(await readJsonBody(req), { storePath: services.askSessionsStorePath }));
+    if (route === 'DELETE /api/agent/sessions') {
+      writeResponse(res, handleAgentSessionsDelete(await readJsonBody(req), { storePath: services.agentSessionsStorePath }));
       return;
     }
     if (route === 'GET /api/file') {
+      if (url.searchParams.get('op') === 'open_in_file_manager') {
+        writeResponse(res, await handleOpenInFileManagerGet(url.searchParams, services));
+        return;
+      }
       writeResponse(res, handleFileGet(url.searchParams, services));
       return;
     }
@@ -674,11 +935,33 @@ async function handleRequest(
       }));
       return;
     }
+    if (route === 'POST /api/extract-pdf') {
+      writeResponse(res, await handleExtractPdfPost(await readJsonBody(req, EXTRACT_PDF_MAX_BODY_BYTES), {
+        ...services.documentExtraction,
+        runtimeRoot: services.documentExtraction?.runtimeRoot ?? services.runtimeRoot,
+        env: services.documentExtraction?.env ?? process.env,
+      }));
+      return;
+    }
+    if (route === 'POST /api/extract-docx') {
+      writeResponse(res, await handleExtractDocxPost(await readJsonBody(req, EXTRACT_DOCX_MAX_BODY_BYTES), {
+        ...services.documentExtraction,
+        runtimeRoot: services.documentExtraction?.runtimeRoot ?? services.runtimeRoot,
+        env: services.documentExtraction?.env ?? process.env,
+      }));
+      return;
+    }
     if (route === 'GET /api/file/raw') {
       writeResponse(res, handleRawFile(url.searchParams, services, { range: req.headers.range }));
       return;
     }
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
+      if (readWebPassword(services)) {
+        writeResponse(res, json({
+          error: 'Password-protected Web UI requires the Next.js host auth adapter.',
+        }, { status: 401 }));
+        return;
+      }
       const staticResponse = handleStaticArtifact({
         staticRoot: optionsStaticRoot(services, runtimeRoot),
         path: url.pathname,
@@ -705,7 +988,7 @@ function isAuthorizedRequest(route: string, req: IncomingMessage, services: Mind
   const token = readAuthToken(services);
   if (!token) return true;
 
-  if (req.headers['sec-fetch-site'] === 'same-origin') return true;
+  if (!readWebPassword(services) && req.headers['sec-fetch-site'] === 'same-origin') return true;
 
   const authorization = req.headers.authorization ?? '';
   const match = /^Bearer\s+(.+)$/i.exec(authorization);
@@ -713,16 +996,72 @@ function isAuthorizedRequest(route: string, req: IncomingMessage, services: Mind
   return typeof candidate === 'string' && safeTokenEquals(candidate, token);
 }
 
-function readAuthToken(services: MindosHttpServices): string {
-  const envToken = process.env.MINDOS_AUTH_TOKEN || process.env.AUTH_TOKEN;
-  if (envToken) return envToken;
+function resolveAuthRoute(method: string, pathname: string): string {
+  const agentSessionTurnRoute = parseAgentSessionTurnRoute(method, pathname);
+  if (agentSessionTurnRoute) {
+    return 'POST /api/agent/sessions/[sessionId]/turns';
+  }
+  const codexThreadRoute = parseCodexThreadRoute(method, pathname);
+  if (!codexThreadRoute) {
+    if (
+      (method === 'GET' || method === 'POST')
+      && pathname.startsWith('/api/agent-runtimes/codex/threads/')
+    ) {
+      return 'GET /api/agent-runtimes/codex/threads';
+    }
+    return `${method} ${pathname}`;
+  }
+  const suffix = codexThreadRoute.action ? `/${codexThreadRoute.action}` : '';
+  return `${method} /api/agent-runtimes/codex/threads/[threadId]${suffix}`;
+}
 
+function parseAgentSessionTurnRoute(
+  method: string,
+  pathname: string,
+): { sessionId: string } | null {
+  if (method !== 'POST') return null;
+  const match = /^\/api\/agent\/sessions\/([^/]+)\/turns$/.exec(pathname);
+  if (!match?.[1]) return null;
+  return { sessionId: decodeURIComponent(match[1]) };
+}
+
+function parseCodexThreadRoute(
+  method: string,
+  pathname: string,
+): { threadId: string; action: null | 'fork' | 'archive' | 'unarchive' } | null {
+  if (method !== 'GET' && method !== 'POST') return null;
+  const match = /^\/api\/agent-runtimes\/codex\/threads\/([^/]+)(?:\/([^/]+))?$/.exec(pathname);
+  if (!match) return null;
+  const threadId = match[1];
+  if (!threadId) return null;
+  const action = match[2] ?? null;
+  if (action !== null && action !== 'fork' && action !== 'archive' && action !== 'unarchive') return null;
+  return {
+    threadId: decodeURIComponent(threadId),
+    action,
+  };
+}
+
+function readAuthToken(services: MindosHttpServices): string {
   try {
     const settings = services.readSettings();
-    return typeof settings.authToken === 'string' ? settings.authToken : '';
+    if (typeof settings.authToken === 'string') return settings.authToken;
   } catch {
-    return '';
+    // Fall through to environment fallback.
   }
+
+  return process.env.MINDOS_AUTH_TOKEN || process.env.AUTH_TOKEN || '';
+}
+
+function readWebPassword(services: MindosHttpServices): string {
+  try {
+    const settings = services.readSettings();
+    if (typeof settings.webPassword === 'string' && settings.webPassword) return settings.webPassword;
+  } catch {
+    // Fall through to environment fallback.
+  }
+
+  return process.env.WEB_PASSWORD || '';
 }
 
 function safeTokenEquals(candidate: string, expected: string): boolean {
@@ -736,7 +1075,10 @@ function createHttpSettingsServices(services: MindosHttpServices): MindosSetting
   return {
     env: process.env,
     readSettings: () => normalizeSettingsForHttp(services.readSettings()),
-    writeSettings: (settings) => services.writeSettings(settings as MindosRuntimeSettings),
+    writeSettings: (settings) => {
+      const current = services.readSettings();
+      services.writeSettings({ ...current, ...(settings as MindosRuntimeSettings) });
+    },
     readWebSearchConfig: () => {
       const raw = services.readSettings().webSearch;
       return raw && typeof raw === 'object' ? raw as MindosWebSearchConfig : {};
@@ -745,13 +1087,17 @@ function createHttpSettingsServices(services: MindosHttpServices): MindosSetting
       const current = services.readSettings();
       services.writeSettings({ ...current, webSearch: config });
     },
-    parseProviders: (providers) => providers,
+    parseProviders: parseMindosProviders,
     getEmbeddingStatus: () => ({ enabled: false, ready: false, building: false, docCount: 0 }),
     invalidateCache: () => {},
+    readSearchIgnoreFile: (mindRoot) => mindRoot ? readMindosIgnoreFile(mindRoot) : [],
+    writeSearchIgnoreFile: (mindRoot, ignoredPaths) => {
+      writeMindosIgnoreFile(mindRoot, ignoredPaths);
+    },
     providerEnv: {
-      ids: [],
-      getApiKeyEnvVar: () => undefined,
-      getApiKeyFromEnv: () => undefined,
+      ids: Object.keys(MINDOS_PROVIDER_PRESETS),
+      getApiKeyEnvVar: (id) => MINDOS_PROVIDER_PRESETS[id]?.envKeys[0],
+      getApiKeyFromEnv: (id) => getMindosApiKeyFromEnv(id),
     },
   };
 }
@@ -760,13 +1106,127 @@ function normalizeSettingsForHttp(settings: MindosRuntimeSettings) {
   const ai = settings.ai && typeof settings.ai === 'object'
     ? settings.ai as { activeProvider?: string; providers?: unknown }
     : {};
+  const providers = parseMindosProviders(ai.providers, ai.activeProvider);
   return {
     ...settings,
     ai: {
-      activeProvider: ai.activeProvider ?? '',
-      providers: ai.providers ?? [],
+      activeProvider: normalizeHttpActiveProvider(ai.activeProvider, providers),
+      providers,
     },
   };
+}
+
+function normalizeHttpActiveProvider(activeProvider: unknown, providers: Array<{ id: string; protocol: string }>): string {
+  const active = typeof activeProvider === 'string' ? activeProvider : '';
+  if (active && isMindosProviderEntryId(active) && providers.some((provider) => provider.id === active)) {
+    return active;
+  }
+  if (active && isMindosProviderId(active)) {
+    return providers.find((provider) => provider.protocol === active)?.id ?? providers[0]?.id ?? '';
+  }
+  return providers[0]?.id ?? '';
+}
+
+function createHttpSettingsTestKeyServices(services: MindosHttpServices) {
+  return {
+    isProviderId: isMindosProviderId,
+    isProviderEntryId: isMindosProviderEntryId,
+    readSettings: () => normalizeSettingsForHttp(services.readSettings()),
+    findProvider: findMindosProvider,
+    effectiveAiConfig: (provider: string) => resolveMindosProviderConfig(
+      normalizeSettingsForHttp(services.readSettings()),
+      provider,
+      process.env,
+    ),
+    testModel: testProviderConnectivity,
+    clearCompatCacheForBaseUrl: () => undefined,
+  };
+}
+
+function createHttpSettingsListModelsServices(services: MindosHttpServices) {
+  return {
+    isProviderId: isMindosProviderId,
+    isProviderEntryId: isMindosProviderEntryId,
+    readSettings: () => normalizeSettingsForHttp(services.readSettings()),
+    findProvider: findMindosProvider,
+    effectiveAiConfig: (provider: string) => resolveMindosProviderConfig(
+      normalizeSettingsForHttp(services.readSettings()),
+      provider,
+      process.env,
+    ),
+    supportsListModels: (provider: string) => MINDOS_PROVIDER_PRESETS[provider]?.supportsListModels !== false,
+    getRegistryModels: (provider: string) => MINDOS_PROVIDER_PRESETS[provider]?.registryModels ?? [],
+    getProviderApiType: (provider: string) => MINDOS_PROVIDER_PRESETS[provider]?.apiType ?? 'openai-completions',
+    getDefaultBaseUrl: (provider: string) => MINDOS_PROVIDER_PRESETS[provider]?.defaultBaseUrl ?? '',
+    buildEndpointCandidates: buildMindosEndpointCandidates,
+    fetch: async (input: string, init: { headers: Record<string, string>; signal: AbortSignal }) => fetch(input, init),
+  };
+}
+
+async function testProviderConnectivity(input: {
+  provider: string;
+  apiKey: string;
+  model?: string;
+  baseUrl?: string;
+  signal: AbortSignal;
+}): Promise<void> {
+  const preset = MINDOS_PROVIDER_PRESETS[input.provider];
+  const apiType = preset?.apiType ?? 'openai-completions';
+  const baseUrl = input.baseUrl || preset?.defaultBaseUrl || '';
+  const model = input.model || preset?.defaultModel || '';
+
+  if (!model) throw new Error('Model is required');
+  if (!baseUrl) throw new Error('No base URL configured');
+
+  if (apiType === 'anthropic-messages') {
+    const endpoint = buildMindosEndpointCandidates(baseUrl, '/messages', apiType)[0];
+    if (!endpoint) throw new Error('No endpoint configured');
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      signal: input.signal,
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': input.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+    return;
+  }
+
+  if (apiType === 'gemini') {
+    const endpoint = `${baseUrl.replace(/\/+$/, '')}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(input.apiKey)}`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      signal: input.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }] }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+    return;
+  }
+
+  const endpoint = buildMindosEndpointCandidates(baseUrl, '/chat/completions', apiType)[0];
+  if (!endpoint) throw new Error('No endpoint configured');
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    signal: input.signal,
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${input.apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
 }
 
 function createHttpSetupServices(services: MindosHttpServices) {
@@ -831,6 +1291,53 @@ function maskToken(token: string): string {
   return `${token.slice(0, 4)}••••••••${token.slice(-4)}`;
 }
 
+/** Downstream agents eligible for skill linking, sourced like GET /api/mcp/agents. */
+function createHttpSkillLinkAgents(services: MindosHttpServices): () => MindosSkillLinkAgent[] {
+  return () => resolveSkillLinkAgents({
+    agents: (services.mcpAgents ?? {}) as Record<string, MindosMcpAgentRegistryDef>,
+    skillAgentRegistry: createDefaultSkillAgentRegistry(),
+  });
+}
+
+function createHttpMcpProjectionServices(services: MindosHttpServices, searchParams: URLSearchParams) {
+  return {
+    listRuntimes: () => listHttpRuntimeDescriptors(services, searchParams),
+    listMcpAgents: async () => {
+      const response = await handleMcpAgentsGet({
+        agents: (services.mcpAgents ?? {}) as Record<string, MindosMcpAgentRegistryDef>,
+        readSettings: services.readSettings,
+        env: process.env,
+        mindRoot: services.mindRoot,
+        projectRoot: services.runtimeRoot ?? process.cwd(),
+        skillAgentRegistry: createDefaultSkillAgentRegistry(),
+      });
+      if (response.status === 200 && response.body && 'agents' in response.body) return response.body.agents;
+      throw new Error('Failed to build MCP agent profiles for runtime projections.');
+    },
+    readMcpConfig: () => services.mcpTools?.readMcpConfig() ?? { mcpServers: {} },
+    listAcpHandshakeHealth: ({ runtimes }: { runtimes: Awaited<ReturnType<typeof listHttpRuntimeDescriptors>> }) => (
+      listCachedAcpHandshakeHealth(runtimes.filter((runtime) => runtime.kind === 'acp').map((runtime) => runtime.id))
+    ),
+  };
+}
+
+function createHttpRuntimeProjectionServices(services: MindosHttpServices, searchParams: URLSearchParams) {
+  return {
+    listRuntimes: () => listHttpRuntimeDescriptors(services, searchParams),
+    listAcpHandshakeHealth: ({ runtimes }: { runtimes: Awaited<ReturnType<typeof listHttpRuntimeDescriptors>> }) => (
+      listCachedAcpHandshakeHealth(runtimes.filter((runtime) => runtime.kind === 'acp').map((runtime) => runtime.id))
+    ),
+  };
+}
+
+async function listHttpRuntimeDescriptors(services: MindosHttpServices, searchParams: URLSearchParams) {
+  const runtimeParams = new URLSearchParams();
+  if (searchParams.get('force') === '1') runtimeParams.set('force', '1');
+  const response = await handleAgentRuntimesGet(runtimeParams, services);
+  if (response.status === 200 && response.body && 'runtimes' in response.body) return response.body.runtimes;
+  throw new Error('Failed to build runtime descriptors for runtime projections.');
+}
+
 function optionsStaticRoot(services: MindosHttpServices, runtimeRoot?: string): string | undefined {
   return services.staticRoot
     ?? (runtimeRoot ? `${runtimeRoot}/static-web` : undefined);
@@ -887,12 +1394,19 @@ async function writeSseResponse(
     ...CORS_HEADERS,
     ...response.headers,
   });
+  const stopHeartbeat = startMindosAgentTurnSseHeartbeat((event) => {
+    if (res.destroyed || res.writableEnded) throw new Error('SSE response is closed');
+    res.write(encodeMindosSseEvent(event));
+  });
+  res.once('close', stopHeartbeat);
   try {
     for await (const event of response.body) {
       res.write(encodeMindosSseEvent(event));
     }
   } finally {
-    res.end();
+    stopHeartbeat();
+    res.off('close', stopHeartbeat);
+    if (!res.writableEnded) res.end();
   }
 }
 
