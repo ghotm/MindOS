@@ -33,7 +33,6 @@ export async function register() {
         // mindRoot not configured yet — skip prewarming
       }
     });
-
     // Skill auto-update: check if bundled skills are newer than installed
     // ones (covers both CLI startup and Desktop hot-update restarts).
     process.nextTick(async () => {

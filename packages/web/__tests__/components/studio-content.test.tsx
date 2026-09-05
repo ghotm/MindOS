@@ -35,6 +35,7 @@ vi.mock('next/navigation', () => ({
 
 let host: HTMLDivElement;
 let root: Root | null = null;
+let automationFetchMock: ReturnType<typeof vi.fn>;
 
 type TestAutomation = {
   id: string;
@@ -42,17 +43,25 @@ type TestAutomation = {
   prompt: string;
   scope: 'worktree' | 'project' | 'mind';
   projectId?: string;
-  schedule: 'daily-0900' | 'every-4-hours' | 'weekdays-0900' | 'weekly-review';
-  model: 'mindos-auto' | 'claude-code';
+  schedule: 'manual' | 'daily-0900' | 'every-4-hours' | 'weekdays-0900' | 'weekly-review';
+  trigger?: { type: 'manual' } | { type: 'schedule'; schedule: string; timezone: string } | {
+    type: 'event'; sources: string[]; events: string[]; debounceMs: number; storm: { windowMs: number; maxEvents: number };
+  };
+  model: 'mindos-auto' | 'gpt-5.5' | 'codex' | 'claude-code';
   effort: 'normal' | 'high';
+  timezone: string;
+  permissionMode: 'read' | 'ask' | 'auto';
+  retry: 'never' | 'once';
+  timeoutMs: number;
   status: 'active' | 'paused';
   updated: string;
   lastRun?: string;
   nextRun?: string;
   runCount: number;
-  lastStatus: 'pending' | 'running' | 'success' | 'error';
-  runtime: 'mindos-pi';
-  source: 'schedule-prompt';
+  lastStatus: 'pending' | 'running' | 'waiting_approval' | 'success' | 'error';
+  recentRuns?: Array<{ id: string; status: 'success' | 'error'; outputPreview?: string; error?: string }>;
+  runtime: 'mindos-pi' | 'codex' | 'claude';
+  source: 'mindos-durable';
   controlPlaneScheduleId: string;
 };
 
@@ -65,14 +74,19 @@ const seedAutomations = (): TestAutomation[] => [
     schedule: 'daily-0900',
     model: 'mindos-auto',
     effort: 'high',
+    timezone: 'Asia/Shanghai',
+    permissionMode: 'read',
+    retry: 'once',
+    timeoutMs: 600000,
     status: 'active',
     updated: '2026-06-30T09:04:00.000Z',
     lastRun: '2026-06-30T09:04:00.000Z',
     nextRun: '2026-07-01T09:00:00.000Z',
     runCount: 18,
     lastStatus: 'success',
+    recentRuns: [{ id: 'run-radar-18', status: 'success', outputPreview: 'Research radar updated with three strong papers.' }],
     runtime: 'mindos-pi',
-    source: 'schedule-prompt',
+    source: 'mindos-durable',
     controlPlaneScheduleId: 'studio-daily-research-radar',
   },
   {
@@ -84,6 +98,10 @@ const seedAutomations = (): TestAutomation[] => [
     schedule: 'weekdays-0900',
     model: 'mindos-auto',
     effort: 'normal',
+    timezone: 'Asia/Shanghai',
+    permissionMode: 'read',
+    retry: 'once',
+    timeoutMs: 600000,
     status: 'paused',
     updated: '2026-06-29T09:12:00.000Z',
     lastRun: '2026-06-29T09:12:00.000Z',
@@ -91,7 +109,7 @@ const seedAutomations = (): TestAutomation[] => [
     runCount: 7,
     lastStatus: 'success',
     runtime: 'mindos-pi',
-    source: 'schedule-prompt',
+    source: 'mindos-durable',
     controlPlaneScheduleId: 'studio-inbox-cleanup-review',
   },
   {
@@ -102,6 +120,10 @@ const seedAutomations = (): TestAutomation[] => [
     schedule: 'weekly-review',
     model: 'claude-code',
     effort: 'high',
+    timezone: 'Asia/Shanghai',
+    permissionMode: 'read',
+    retry: 'once',
+    timeoutMs: 600000,
     status: 'active',
     updated: '2026-06-28T17:30:00.000Z',
     lastRun: '2026-06-26T17:30:00.000Z',
@@ -109,80 +131,104 @@ const seedAutomations = (): TestAutomation[] => [
     runCount: 4,
     lastStatus: 'pending',
     runtime: 'mindos-pi',
-    source: 'schedule-prompt',
+    source: 'mindos-durable',
     controlPlaneScheduleId: 'studio-release-note-sweep',
   },
 ];
 
-function automationPayload(automations: TestAutomation[]) {
+type AutomationExtras = {
+  approvals?: Array<Record<string, unknown>>;
+  notifications?: Array<Record<string, unknown>>;
+  worker?: Record<string, unknown> | null;
+};
+
+function automationPayload(automations: TestAutomation[], extras: AutomationExtras = {}) {
   const enabled = automations.filter((automation) => automation.status === 'active').length;
   return {
     schemaVersion: 1,
     generatedAt: '2026-06-30T12:00:00.000Z',
     automations,
+    approvals: extras.approvals ?? [],
+    notifications: extras.notifications ?? [],
+    worker: extras.worker ?? null,
     summary: {
       total: automations.length,
       enabled,
       paused: automations.length - enabled,
+      running: automations.filter((automation) => automation.lastStatus === 'running').length,
+      failed: automations.filter((automation) => automation.lastStatus === 'error').length,
+      migratedLegacyJobs: 0,
       externalSchedulePromptJobs: 0,
       scheduleStorePath: '/tmp/.mindos/schedule-prompts.json',
       controlPlaneScheduleCount: automations.length,
+      pendingApprovals: (extras.approvals ?? []).filter((approval) => approval.status === 'pending').length,
+      unreadNotifications: (extras.notifications ?? []).filter((notification) => !notification.readAt).length,
+      queuedEventDeliveries: 0,
+      recentEventCount: 0,
     },
   };
 }
 
-function setupAutomationFetch(initial: TestAutomation[] = seedAutomations()) {
+function setupAutomationFetch(initial: TestAutomation[] = seedAutomations(), initialExtras: AutomationExtras = {}) {
   let automations = initial.map((automation) => ({ ...automation }));
+  const extras: AutomationExtras = {
+    approvals: [...(initialExtras.approvals ?? [])],
+    notifications: [...(initialExtras.notifications ?? [])],
+    worker: initialExtras.worker ?? null,
+  };
+  const payload = () => automationPayload(automations, extras);
   const fetchMock = vi.fn(async (href: string | URL | Request, init?: RequestInit) => {
     const url = typeof href === 'string' ? href : href instanceof Request ? href.url : href.toString();
     if (!url.endsWith('/api/studio/automations')) {
       return Response.json({ error: `Unexpected request: ${url}` }, { status: 404 });
     }
-    if (!init || init.method === 'GET') {
-      return Response.json(automationPayload(automations));
-    }
+    if (!init || init.method === 'GET') return Response.json(payload());
     const body = JSON.parse(String(init.body ?? '{}')) as {
       action?: string;
       id?: string;
+      approvalId?: string;
+      notificationId?: string;
+      decision?: string;
       status?: 'active' | 'paused';
       draft?: Partial<TestAutomation>;
     };
     if (body.action === 'create' && body.draft) {
       const id = `studio-${String(body.draft.title || 'automation').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
       automations = [{
-        id,
-        title: body.draft.title || 'Untitled automation',
-        prompt: body.draft.prompt || '',
-        scope: body.draft.scope || 'worktree',
-        projectId: body.draft.projectId,
-        schedule: body.draft.schedule || 'daily-0900',
-        model: body.draft.model || 'mindos-auto',
-        effort: body.draft.effort || 'high',
-        status: 'active',
-        updated: '2026-06-30T12:01:00.000Z',
-        runCount: 0,
-        lastStatus: 'pending',
-        runtime: 'mindos-pi',
-        source: 'schedule-prompt',
+        id, title: body.draft.title || 'Untitled automation', prompt: body.draft.prompt || '',
+        scope: body.draft.scope || 'worktree', projectId: body.draft.projectId,
+        schedule: body.draft.schedule || 'daily-0900', trigger: body.draft.trigger, model: body.draft.model || 'mindos-auto',
+        effort: body.draft.effort || 'high', timezone: body.draft.timezone || 'Asia/Shanghai',
+        permissionMode: body.draft.permissionMode || 'read', retry: body.draft.retry || 'once',
+        timeoutMs: body.draft.timeoutMs || 600000, status: 'active', updated: '2026-06-30T12:01:00.000Z',
+        runCount: 0, lastStatus: 'pending', runtime: 'mindos-pi', source: 'mindos-durable',
         controlPlaneScheduleId: `studio-${id}`,
       }, ...automations];
-      return Response.json(automationPayload(automations), { status: 201 });
+      return Response.json(payload(), { status: 201 });
     }
     if (body.action === 'update' && body.id && body.draft) {
-      automations = automations.map((automation) => automation.id === body.id
-        ? { ...automation, ...body.draft, updated: '2026-06-30T12:02:00.000Z' }
-        : automation);
-      return Response.json(automationPayload(automations));
+      automations = automations.map((automation) => automation.id === body.id ? { ...automation, ...body.draft, updated: '2026-06-30T12:02:00.000Z' } : automation);
+      return Response.json(payload());
     }
     if (body.action === 'set-status' && body.id && body.status) {
-      automations = automations.map((automation) => automation.id === body.id
-        ? { ...automation, status: body.status!, nextRun: body.status === 'paused' ? 'Paused' : automation.nextRun }
-        : automation);
-      return Response.json(automationPayload(automations));
+      automations = automations.map((automation) => automation.id === body.id ? { ...automation, status: body.status!, nextRun: body.status === 'paused' ? 'Paused' : automation.nextRun } : automation);
+      return Response.json(payload());
+    }
+    if (body.action === 'run-now' && body.id) {
+      automations = automations.map((automation) => automation.id === body.id ? { ...automation, lastStatus: 'success', lastRun: '2026-06-30T12:03:00.000Z', runCount: automation.runCount + 1, nextRun: automation.schedule === 'manual' ? 'Manual' : automation.nextRun } : automation);
+      return Response.json(payload());
     }
     if (body.action === 'delete' && body.id) {
       automations = automations.filter((automation) => automation.id !== body.id);
-      return Response.json(automationPayload(automations));
+      return Response.json(payload());
+    }
+    if (body.action === 'resolve-approval') {
+      extras.approvals = (extras.approvals ?? []).map((approval) => approval.id === body.approvalId ? { ...approval, status: body.decision === 'allow' ? 'approved' : 'denied' } : approval);
+      return Response.json(payload());
+    }
+    if (body.action === 'acknowledge-notification') {
+      extras.notifications = (extras.notifications ?? []).map((notification) => notification.id === body.notificationId ? { ...notification, readAt: '2026-06-30T12:05:00.000Z' } : notification);
+      return Response.json(payload());
     }
     return Response.json({ error: 'Unsupported action' }, { status: 400 });
   });
@@ -254,7 +300,7 @@ describe('StudioContent', () => {
     localStorage.clear();
     push.mockClear();
     mockPathname = '/studio';
-    setupAutomationFetch();
+    automationFetchMock = setupAutomationFetch();
   });
 
   afterEach(async () => {
@@ -274,10 +320,11 @@ describe('StudioContent', () => {
 
     expect(host.querySelector('[data-studio-overview]')).not.toBeNull();
     expect(host.textContent).toContain('Studio');
-    expect(host.textContent).toContain('Overview for projects, apps, and automations.');
+    expect(host.textContent).toContain('Overview for projects, apps, automations, and inspectable context.');
     expect(host.querySelector('a[href="/studio/projects"]')).not.toBeNull();
     expect(host.querySelector('a[href="/studio/apps"]')).not.toBeNull();
     expect(host.querySelector('a[href="/studio/automation"]')).not.toBeNull();
+    expect(host.querySelector('a[href="/studio/context"]')).not.toBeNull();
     expect(host.textContent).toContain('Projects');
     expect(host.textContent).toContain('Apps');
     expect(host.textContent).toContain('Automation');
@@ -513,6 +560,60 @@ describe('StudioContent', () => {
     expect(host.textContent).toContain('Automation');
   });
 
+  it('refreshes durable automation state while a run is active', async () => {
+    vi.useFakeTimers();
+    automationFetchMock = setupAutomationFetch([{
+      ...seedAutomations()[0],
+      lastStatus: 'running',
+    }]);
+    try {
+      await renderStudioAutomation();
+      expect(automationFetchMock).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_100);
+      });
+      expect(automationFetchMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows resident worker health, failure notifications, and resumes durable approvals', async () => {
+    automationFetchMock = setupAutomationFetch([{
+      ...seedAutomations()[0],
+      lastStatus: 'waiting_approval' as TestAutomation['lastStatus'],
+      runtime: 'codex' as TestAutomation['runtime'],
+      model: 'codex' as TestAutomation['model'],
+      permissionMode: 'ask' as TestAutomation['permissionMode'],
+    }], {
+      worker: { schemaVersion: 1, ownerId: 'automation-service-42', pid: 42, status: 'idle', updatedAt: '2026-06-30T12:00:00.000Z' },
+      approvals: [{
+        id: 'approval-1', jobId: 'daily-research-radar', fingerprint: 'fp-1', runtime: 'codex', status: 'pending',
+        toolName: 'write_file', resource: 'notes/release.md', inputPreview: '{"path":"notes/release.md"}',
+        risk: { level: 'medium', summary: 'Writes a knowledge file' }, allowDecision: 'allow_once', denyDecision: 'deny',
+        createdAt: '2026-06-30T11:59:00.000Z',
+      }],
+      notifications: [{
+        id: 'notification-1', jobId: 'daily-research-radar', runId: 'run-1', kind: 'failure',
+        title: 'Daily research radar failed', body: 'Provider unavailable', createdAt: '2026-06-30T11:58:00.000Z',
+      }],
+    });
+    await renderStudioAutomation();
+
+    expect(host.textContent).toContain('Executor online');
+    expect(host.textContent).toContain('Provider unavailable');
+    expect(host.textContent).toContain('write_file');
+    expect(host.textContent).toContain('notes/release.md');
+    const allow = Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.includes('Allow once'));
+    expect(allow).not.toBeNull();
+    await act(async () => { allow?.click(); });
+    await flushAsync();
+    expect(automationFetchMock).toHaveBeenCalledWith('/api/studio/automations', expect.objectContaining({
+      body: JSON.stringify({ action: 'resolve-approval', approvalId: 'approval-1', decision: 'allow' }),
+    }));
+  });
+
   it('keeps Studio panel Project rows flat without expandable Sessions', async () => {
     mockPathname = '/studio/launch-practice';
     host = document.createElement('div');
@@ -722,8 +823,13 @@ describe('StudioContent', () => {
     expect(seededCard?.className).toContain('lg:grid-cols-');
     expect(seededCard?.className).not.toContain('rounded-xl');
     expect(seededCard?.className).not.toContain('bg-card/45');
-    expect(seededCard?.textContent).toContain('Pi schedule');
-    expect(seededCard?.textContent).not.toContain('Local plan');
+    expect(seededCard?.textContent).toContain('Durable worker');
+    expect(seededCard?.textContent).toContain('Research radar updated with three strong papers.');
+    expect(seededCard?.textContent).not.toContain('Pi schedule');
+    expect(seededCard?.textContent).not.toContain('2026-07-01T09:00:00.000Z');
+    expect(seededCard?.querySelector('[data-studio-automation-next-run]')?.getAttribute('title'))
+      .toContain('Jul 1, 2026');
+    expect(seededCard?.querySelector('[data-studio-automation-run-now]')).not.toBeNull();
 
     await act(async () => {
       enabledFilter!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -793,6 +899,30 @@ describe('StudioContent', () => {
     expect(composer?.textContent).toContain('Interval');
     expect(composer?.textContent).toContain('Advanced settings');
     expect(document.body.querySelector('[data-studio-automation-advanced]')).not.toBeNull();
+
+    const advanced = document.body.querySelector<HTMLDetailsElement>('[data-studio-automation-advanced]');
+    advanced!.open = true;
+    expect(document.body.querySelector('select[aria-label="Unattended access"]')).not.toBeNull();
+    expect(document.body.textContent).toContain('Read only');
+    const modelSelect = document.body.querySelector<HTMLSelectElement>('select[aria-label="Model"]');
+    expect(Array.from(modelSelect?.options ?? []).map((option) => option.value)).toEqual([
+      'mindos-auto',
+      'gpt-5.5',
+      'codex',
+      'claude-code',
+    ]);
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+      setter?.call(modelSelect, 'codex');
+      modelSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const permissionSelect = document.body.querySelector<HTMLSelectElement>('select[aria-label="Unattended access"]');
+    expect(Array.from(permissionSelect?.options ?? []).map((option) => option.value)).toContain('ask');
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+      setter?.call(modelSelect, 'mindos-auto');
+      modelSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
 
     const everyFourHours = composer!.querySelector('[data-studio-automation-repeat-option="every-4-hours"]');
     expect(everyFourHours).toBeNull();
@@ -868,6 +998,19 @@ describe('StudioContent', () => {
     ));
     expect(updatedCard).not.toBeNull();
 
+    const runNowButton = updatedCard!.querySelector<HTMLButtonElement>('[data-studio-automation-run-now]');
+    expect(runNowButton?.textContent).toContain('Run now');
+    await act(async () => {
+      runNowButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushAsync();
+    const runNowCall = automationFetchMock.mock.calls.find(([, init]) => {
+      if (init?.method !== 'POST') return false;
+      return JSON.parse(String(init.body ?? '{}')).action === 'run-now';
+    });
+    expect(runNowCall).toBeTruthy();
+    expect(updatedCard!.textContent).toContain('Last run succeeded');
+
     const pauseButton = Array.from(updatedCard!.querySelectorAll('button')).find((button) => (
       button.textContent?.includes('Pause')
     ));
@@ -907,5 +1050,42 @@ describe('StudioContent', () => {
 
     expect(document.body.textContent).toContain('Add a prompt before creating an automation.');
     expect(host.textContent).not.toContain('Empty automationActive');
+  });
+
+  it('creates an event-driven automation with exact metadata, debounce, and storm limits', async () => {
+    await renderStudioAutomation();
+    await act(async () => host.querySelector<HTMLElement>('[data-studio-automation-create]')!.click());
+    const composer = document.body.querySelector('[data-studio-automation-composer]')!;
+    const eventButton = Array.from(composer.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Event');
+    expect(eventButton).not.toBeNull();
+    await act(async () => eventButton!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
+    expect(document.body.querySelector('[data-studio-automation-event-trigger]')).not.toBeNull();
+    await setInputValue('input[aria-label="Event source"]', 'feishu, inbox');
+    await setInputValue('input[aria-label="Event type"]', 'im.message.receive_v1, inbox.created');
+    await setInputValue('input[aria-label="Debounce (seconds)"]', '5');
+    await setInputValue('input[aria-label="Max events / minute"]', '25');
+    await setInputValue('textarea[aria-label="Metadata filter (JSON)"]', '{"message.chat_type":"p2p","mentionsBot":true}');
+    await setInputValue('input[aria-label="Automation title"]', 'Inbox and Feishu triage');
+    await setInputValue('textarea[aria-label="Automation prompt"]', 'Triage the incoming event and record the next action.');
+    const submit = Array.from(composer.querySelectorAll('button')).find((button) => button.textContent?.includes('Create automation'))!;
+    await act(async () => submit.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    await flushAsync();
+
+    const createCall = automationFetchMock.mock.calls.find(([, init]) => init?.method === 'POST'
+      && JSON.parse(String(init.body ?? '{}')).action === 'create');
+    const body = JSON.parse(String(createCall?.[1]?.body ?? '{}'));
+    expect(body.draft).toMatchObject({
+      schedule: 'manual',
+      trigger: {
+        type: 'event',
+        sources: ['feishu', 'inbox'],
+        events: ['im.message.receive_v1', 'inbox.created'],
+        where: { 'message.chat_type': 'p2p', mentionsBot: true },
+        debounceMs: 5_000,
+        storm: { windowMs: 60_000, maxEvents: 25 },
+      },
+    });
+    expect(host.textContent).toContain('Event: im.message.receive_v1, inbox.created');
   });
 });

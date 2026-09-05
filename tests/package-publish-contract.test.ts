@@ -15,7 +15,7 @@ function readText(relativePath: string): string {
 describe('product npm publish contract', () => {
   it('keeps every direct Pi runtime dependency on the same upgraded release', () => {
     const product = readJson<{
-      devDependencies?: Record<string, string>;
+      dependencies?: Record<string, string>;
     }>('packages/mindos/package.json');
     const web = readJson<{
       dependencies?: Record<string, string>;
@@ -26,10 +26,26 @@ describe('product npm publish contract', () => {
       '@earendil-works/pi-ai',
       '@earendil-works/pi-coding-agent',
     ]) {
-      expect(product.devDependencies?.[name], name).toBe('0.81.1');
-      expect(web.dependencies?.[name], name).toBe('0.81.1');
+      expect(product.dependencies?.[name], name).toBe('0.84.4');
+      expect(web.dependencies?.[name], name).toBe('0.84.4');
     }
-    expect(web.dependencies?.['@earendil-works/pi-ai']).toBe('0.81.1');
+    expect(web.dependencies?.['@earendil-works/pi-ai']).toBe('0.84.4');
+    expect(web.dependencies).toEqual(expect.objectContaining({
+      'pi-mcp-adapter': '2.31.0',
+      'pi-schedule-prompt': '0.4.1',
+      'pi-subagents': '0.62.0',
+      'pi-web-access': '0.27.0',
+    }));
+  });
+
+  it('declares the minimum Node.js version required by the Pi runtime', () => {
+    const rootPkg = readJson<{ engines?: { node?: string } }>('package.json');
+    const productPkg = readJson<{ engines?: { node?: string } }>('packages/mindos/package.json');
+    const webPkg = readJson<{ engines?: { node?: string } }>('packages/web/package.json');
+
+    expect(rootPkg.engines?.node).toBe('>=22.19.0');
+    expect(productPkg.engines?.node).toBe('>=22.19.0');
+    expect(webPkg.engines?.node).toBe('>=22.19.0');
   });
 
   it('keeps the repository root as a private monorepo package', () => {
@@ -118,8 +134,10 @@ describe('product npm publish contract', () => {
     expect(pkg.scripts?.build).toBe('tsc && node ../../scripts/copy-mindos-agent-assets.mjs && pnpm run build:protocols');
     expect(pkg.scripts?.['build:protocols']).toBe('node ../../scripts/build-product-protocols.mjs');
     expect(pkg.scripts?.['type-check']).toBe('tsc --noEmit');
-    expect(pkg.dependencies).not.toHaveProperty('@anthropic-ai/claude-agent-sdk');
-    expect(pkg.devDependencies).toHaveProperty('@anthropic-ai/claude-agent-sdk');
+    // The published CLI owns the resident automation executor, so native
+    // Claude and Pi SDKs are part of the product runtime closure.
+    expect(pkg.dependencies).toHaveProperty('@anthropic-ai/claude-agent-sdk', '0.3.170');
+    expect(pkg.devDependencies).not.toHaveProperty('@anthropic-ai/claude-agent-sdk');
   });
 
   it('ships the sunk agent core modules inside the publish closure', () => {

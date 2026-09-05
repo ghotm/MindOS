@@ -48,6 +48,11 @@ import {
   SUBAGENT_EARLY_ASYNC_COMPLETIONS_KEY,
   SUBAGENT_LEDGER_EVENT_UNSUBSCRIBE_KEY,
 } from '../global-state.js';
+import {
+  directChildParams,
+  normalizeLegacySubagentExecutionParams,
+  PI_SUBAGENT_MAX_WORKFLOW_KEY_LENGTH,
+} from './pi-subagents-compat.js';
 
 export type ToolWithRuntimeContext = ToolDefinition & {
   execute: (
@@ -295,6 +300,11 @@ function subagentDisplayName(params: unknown): string {
   const input = params as Record<string, unknown>;
   if (typeof input.action === 'string' && input.action) return `Subagent ${input.action}`;
   if (typeof input.agent === 'string' && input.agent) return input.agent;
+  if (typeof input.workflow === 'string' && input.workflow.trim()) return `Workflow ${input.workflow.trim()}`;
+  if ((typeof input.workflowScript === 'string' && input.workflowScript.trim())
+    || (typeof input.workflowScriptPath === 'string' && input.workflowScriptPath.trim())) {
+    return 'Subagent workflow';
+  }
   if (Array.isArray(input.tasks)) return `Parallel subagents (${input.tasks.length})`;
   if (Array.isArray(input.chain)) return `Subagent chain (${input.chain.length})`;
   return 'Subagent';
@@ -305,6 +315,14 @@ function subagentRuntimeId(params: unknown): string {
   const input = params as Record<string, unknown>;
   if (typeof input.agent === 'string' && input.agent) return input.agent;
   if (typeof input.action === 'string' && input.action) return `subagent:${input.action}`;
+  if (typeof input.workflow === 'string' && input.workflow.trim()) {
+    const name = input.workflow.trim().replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, PI_SUBAGENT_MAX_WORKFLOW_KEY_LENGTH);
+    return name ? `subagent:workflow:${name}` : 'subagent:workflow';
+  }
+  if ((typeof input.workflowScript === 'string' && input.workflowScript.trim())
+    || (typeof input.workflowScriptPath === 'string' && input.workflowScriptPath.trim())) {
+    return 'subagent:workflow';
+  }
   if (Array.isArray(input.tasks)) return 'subagent:parallel';
   if (Array.isArray(input.chain)) return 'subagent:chain';
   return 'subagent';
@@ -496,16 +514,11 @@ export function wrapSubagentToolForLedger(
       if (orchestrationPlan) {
         const orchestrationResult = await executeSubagentOrchestrationPlan(orchestrationPlan, async (task, context) => {
           const childParams = {
-            ...(isRecord(params) ? params : {}),
+            ...directChildParams(params),
             agent: task.agent,
             task: task.task,
             cwd: task.cwd,
             async: false,
-            tasks: undefined,
-            subtasks: undefined,
-            chain: undefined,
-            mindosOrchestration: undefined,
-            orchestrator: undefined,
             ...(task.timeoutMs ? { timeoutMs: task.timeoutMs } : {}),
           };
           const childToolCallId = `${toolCallId}:${task.id}`;
@@ -550,6 +563,7 @@ export function wrapSubagentToolForLedger(
           source: 'pi-subagents',
         },
       });
+      const upstreamParams = normalizeLegacySubagentExecutionParams(params);
 
       const upstreamAbort = new AbortController();
       const abortUpstream = (reason?: unknown) => {
@@ -574,8 +588,8 @@ export function wrapSubagentToolForLedger(
           parentRunId: run.id,
         }, () => runWithOptionalSubagentChildRuntime(
           options,
-          { toolCallId, params, ctx },
-          () => tool.execute(toolCallId, params, upstreamAbort.signal, onUpdateWithLedger(run.id, onUpdate), ctx),
+          { toolCallId, params: upstreamParams, ctx },
+          () => tool.execute(toolCallId, upstreamParams, upstreamAbort.signal, onUpdateWithLedger(run.id, onUpdate), ctx),
         ));
         if (hasAsyncStartDetails(result) && !resultIsError(result)) {
           const metadata = resultMetadata(result);

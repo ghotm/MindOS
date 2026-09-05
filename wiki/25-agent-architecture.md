@@ -1,6 +1,6 @@
 # MindOS Agent 架构
 
-> 最后更新: 2026-06-26
+> 最后更新: 2026-09-02
 >
 > 当前 canonical turn endpoint 是 `POST /api/agent/sessions/:sessionId/turns`。历史文档中的 `/api/ask` 只代表旧实现或历史记录，不能作为新代码入口。
 
@@ -247,7 +247,7 @@ projection 输出：
 当前结论：
 
 - MindOS Pi / Codex / Claude / ACP 可以是 `server-runnable`，但这只证明 remote/manual control 的底层可能性。
-- 24/7 readiness 需要 durable scheduler、无人值守审批路由、wake/resume/missed trigger reconciliation、failure audit；缺一项就不能在 UI 上承诺 fully unattended。
+- Studio 的 MindOS Pi 自动化已具备 durable scheduler、显式无人值守权限策略、wake/resume reconciliation、failure audit 与运行产物；这只提升 `mindos-pi` 的 Studio-owned job，不代表所有 native/ACP runtime 都已 fully unattended。
 - Native runtime 的 permission bridge 是交互式能力，不自动升级成后台任务审批；automation projection 会继续把它标成 `limited`，直到 durable approval queue 落地。
 - Generic ACP 需要 adapter-specific health / permission / artifact contract 才能进一步从 `limited` 或 `unknown` 提升。
 
@@ -288,7 +288,41 @@ POST mutation 使用 `action` 分发：
 - 只接受声明式 metadata，不保存 env、headers、token、api key、secret 或 artifact/blob 内容；文本摘要会做 secret redaction。
 - schedule 默认 `disabled`，即使 status 设为 `enabled`，当前也只是 registry 状态，不会启动真实 runner。
 - cron 只做基础格式校验，不计算 next fire、不创建后台 timer。
-- automation projection 仍然保守：有 control-plane substrate 不等于 24/7 fully ready；runner、approval routing policy、missed-trigger executor 和通知/UI 仍要后续实现。
+- automation projection 仍然按 runtime 保守判断：control-plane substrate 本身不执行任务。Studio durable worker 是独立的 Product-owned scheduler；MindOS Pi、Codex、Claude 由常驻 executor 显式路由，ACP runtime 仍需自己的无人值守权限、恢复与 artifact contract。
+
+### Studio Durable Automation
+
+Studio Automation 的产品状态、调度规则和 executor 都由 `@geminilight/mindos` 持有；Web 只负责队列 mutation、健康状态、通知与审批界面。
+
+```text
+Studio UI / Product HTTP
+  -> .mindos/automations/state.json
+  -> atomic claim + expiring lease
+  -> OS user service: mindos automation worker
+  -> runtime router: MindOS Pi / Codex / Claude
+  -> .mindos/automations/runs/YYYY/MM/<run-id>.md
+  -> Context Asset Registry + runtime control-plane wake/failure audit
+```
+
+- schedule 使用明确时区计算 `nextRunAt`；默认 `Asia/Shanghai`，覆盖 DST、工作日、月末等边界。
+- 每个 occurrence 只能被一个进程 lease；lease 长度至少覆盖任务 timeout，重启后过期 lease 会记为 `interrupted`，并按策略最多重试一次。
+- 无人值守权限默认 `read`；MindOS Pi 接受 `read/auto`，Codex 与 Claude 接受 `read/ask/auto`。`ask` 会把稳定 fingerprint 的请求持久化，用户决定后安全重放；非法 runtime/model/permission 组合 fail closed。
+- `Run now` 只入队并立即返回，实际执行由 worker 完成；页面在存在 running job 时短轮询，而不是让 HTTP 请求一直挂住。
+- `mindos automation service install` 安装 launchd/systemd user service；Windows 首版使用 `mindos automation worker` 前台模式。heartbeat 写入 `.mindos/automations/worker.json`，关闭 Web 或 Desktop 不影响执行。
+- failure、timeout、interrupted 与 approval-required 都写入有界、脱敏、幂等通知；Studio 可逐条或批量确认通知，并对 pending approval 执行 Allow once / Deny。
+- `GET /api/agent-runs` 在 Product 层把 run index card、live events、artifact pointer、Retrieval Receipt、Context Asset、session pointer 与 Automation history 聚合成 Observatory trace；重启后没有 live event 的记录明确标为 `summary-only`，附属 store 读取失败会返回 warning 而不是拖垮 run 列表。
+- durable Automation approval 只有一份事实源：Studio、Mobile `pending-actions` 与飞书 OAuth owner 都调用 `resolveStudioAutomationApproval()`。飞书仅接受绑定 owner 在私聊中完整匹配的 `批准/拒绝 approval-*` 命令；投递失败保持 pending，并把脱敏 delivery error 暴露给 Observatory。
+- 旧 `schedule-prompts.json` 只迁移 `source=mindos-studio-automation` 的 job。迁移采用两阶段状态，先把新 job 置为 paused，再禁用旧 job，最后恢复目标状态，因此中途崩溃不会造成双跑。
+
+### Run Capsule、Connection Broker 与事件唤醒
+
+Run ledger 继续负责“发生过什么”，Run Capsule 负责“如何安全重放一次 root turn”。canonical turn 在 runtime 执行前创建 `<mindRoot>/.mindos/agent-run-capsules/YYYY/MM/<id>.json`，Pi、Codex、Claude 和 ACP 共用同一 finalize 边界。私有 capsule 保存规范化 messages、runtime/model/thinking/permission、附件、receipt/asset 引用、native session binding，以及最多 64 KiB 的模型输出；文件为 0600。Agent Runs 和 capsule list 只返回脱敏 public projection，不返回上传正文、完整 request 或模型输出。
+
+Recovery 是两阶段且幂等的：`POST /api/agent-run-capsules/:id/recovery` 创建 plan，canonical turn 再以 `X-MindOS-Recovery-Plan-Id` 原子 claim。Retry 与 Fork 清除旧 native binding，Resume 只保留已经记录的外部 session；Rollback 在没有 verified executor 时保持 disabled，即使存在 checkpoint pointer 也不会假装可用。Web 与 Mobile 都消费这份 readiness。
+
+Connection & Identity Broker 把“已有外部身份”从 IM 配置中独立出来。首个 adapter 发现 PATH 及用户本地 Node 安装下的 `lark-cli`，读取 `config show` 与 `auth status --json --verify`，分别投影 Bot/User 身份。绑定文件 `<mindRoot>/.mindos/connections/bindings.json` 只保存 executable realpath、profile、app id、owner 和 capability snapshot；每次真实执行前重新验证 executable 是可信的绝对 regular file，绝不复制 secret/token/env。Bot ready、User missing 是合法的 degraded 状态，Bot 发送和长连接消费不需要重复 OAuth 或创建新机器人。
+
+Studio event trigger 与 schedule trigger 共用同一 job/lease/worker。`emitStudioAutomationEvent()` 把脱敏且不超过 16 KiB 的事件写入现有 state，按 source/type 与安全的 exact metadata filter 为 active job 建 delivery；相同 source+key 幂等。每个 job 可设置 debounce 和 storm window。500 条 event 上限只淘汰 terminal event，pending/claimed/waiting-approval delivery 不会被静默切掉；worker crash、单次 retry 与 durable approval 继续绑定同一 delivery。首批真实事件源是 Agent run 终态、飞书 `im.message.receive_v1`、Inbox create 与 knowledge change；source enqueue 失败不拖垮主路径，但会写 runtime-control-plane failure audit。
 
 ### Permission Runtime Projection
 
@@ -309,7 +343,7 @@ projection 输出：
 
 - MindOS Pi 的 `read` mode 从 permission 角度可无人值守，因为没有写入、terminal、MCP、IM、schedule 或 user-extension scope；但真正 24/7 仍需要 scheduler / wake-resume / failure audit。
 - MindOS Pi 的 `ask` mode 是交互安全默认值，不等于 durable approval queue；后台任务如果需要保留“问用户”的语义，还需要持久审批队列。
-- Codex / Claude 的 permission bridge 是 `interactive-only`：MindOS 能把 native permission prompt 变成产品流事件，但 pending 状态在 active run 的进程内，不能当作 headless / resumed run 的 durable approval。
+- Codex / Claude 的普通 Agent turn permission bridge 仍是 `interactive-only`；Studio Automation 另有 Product-owned durable approval queue，可在 worker 重启和 event delivery 重放后继续消费同一决定，不能把两种 bridge 混为一谈。
 - Generic ACP 仍是 `unknown`：ACP adapter 必须声明自己的 approval contract，MindOS 才能可靠路由或预授权。
 
 ### MCP Runtime Projection
@@ -445,6 +479,22 @@ Turn context 包括：
 - Active recall：按用户消息召回相关知识片段。
 - Initialization context：MindOS Pi 初始化失败、截断或规则加载结果。
 
+### Context Asset Registry 与 Retrieval Receipt
+
+Active Recall 不再只返回一段不可解释的 prompt 文本。被实际选中的知识文件会按需登记到 `<mindRoot>/.mindos/context-assets/registry.json`；每次 recall（包括 empty、timeout、error、skipped）都会写入不可变的 `<mindRoot>/.mindos/retrieval-receipts/YYYY/MM/*.json`。
+
+Studio 的 `/studio/context` 是这两类对象的只读检查器：Assets 视图用于查看版本、来源、状态和关联回执，Receipts 视图用于查看 query preview、预算、候选/入选数量、选择理由和失败信息。页面不读取完整检索正文，也不修改 registry 或 receipt。
+
+- Registry 是治理索引，不复制 Markdown 正文。asset 保存稳定 id、类型、相对路径、source ref、内容哈希、版本和状态；同 source + 同 hash 幂等，内容变化才增版本。
+- Receipt 只保存脱敏 query preview/hash、候选与选择分数、heading/行号、token budget 和裁剪原因，不保存召回正文。
+- `AgentRun.metadata` 保存 `retrievalReceiptId` 与 `retrievalSelectedAssetIds`，可从一次运行反查当时使用的依据；自动化 receipt 还保存 automation/run id。
+- Registry/receipt 写入使用安全相对路径、跨进程锁和原子 rename；ID/source 冲突拒绝覆盖，receipt 对同一 ID 保持不可变。
+- observability 写入失败采用 fail-open：正常 Agent 回答继续，但 run metadata 不伪造不存在的 receipt。
+
+Echo 的 `playbook` / `practice` 候选只有在用户审核通过后才进入长期资产：服务端验证 session message evidence，写入 `Echo/Playbooks` 或 `Echo/Practices`，登记 context asset，并保存审核 receipt。拒绝不会生成长期 Markdown；重复审核幂等，冲突决定被拒绝。
+
+Context Learning Loop 在此基础上增加 `<mindRoot>/.mindos/context-feedback/ledger.json`。反馈必须引用真实 Retrieval Receipt；helpful/irrelevant/stale 只能指向该 receipt 实际选择的当前 asset version，missing 不绑定现有 asset。单个信号不改变排序，至少 3 个当前版本 active 信号才产生最多 ±0.15 的 ranking hint。`stale` 只给出 review 建议，必须经过显式 keep/deprecate 决定；retract 保留 revision history。由 capsule 生成 Echo candidate 时，证据必须精确命中原 request message 或私有 result output，之后仍走现有 immutable Echo review。
+
 ### MindOS 文件上下文去重
 
 `currentFile` / `attachedFiles` 会先被本地读取并生成签名：
@@ -501,6 +551,10 @@ MindOS 区分两类文件：
 | Runtime binding | `runtime_binding` SSE event → session store |
 | Agent run timeline | run ledger |
 | File/session context signatures | run metadata |
+| 可重放 root turn intent / recovery plan | Agent Run Capsule store |
+| 外部 Bot/User 身份引用 | Connection Broker registry；secret 仍归外部 CLI/profile |
+| Event delivery / durable approval | Studio Automation state |
+| Context helpful/irrelevant/stale/missing | Context feedback ledger |
 
 Run metadata 会记录 `sessionContextSignature`、`fileContextSignature`、是否注入全文、以及相关路径，供下一轮 turn 判断是否需要重复注入。
 
@@ -538,7 +592,20 @@ MindOS Pi 的 persisted session 由 Pi `SessionManager` 自己持有完整 JSONL
 | `packages/mindos/src/server/handlers/mcp-runtime-projections.ts` | MCP runtime projection contract，统一解释每个 runtime 的 MCP ready/projectable/limited/blocked/unknown |
 | `packages/mindos/src/server/handlers/runtime-artifact-projections.ts` | Artifact runtime projection contract，统一解释每个 runtime 的 output/handoff/artifact-index readiness |
 | `packages/mindos/src/server/handlers/runtime-automation-projections.ts` | Automation runtime projection contract，统一解释 remote-control 与 24/7 unattended readiness |
+| `packages/mindos/src/server/automations/*` | Studio durable store、时区 schedule、legacy 两阶段迁移、lease worker 与运行 artifact |
+| `packages/mindos/src/agent/capsules/*` | 私有 Run Capsule、脱敏 projection、幂等 recovery plan/claim |
+| `packages/mindos/src/server/connections/*` | 外部 CLI/profile discovery、Bot/User capability projection 与无 secret 绑定 |
+| `packages/mindos/src/knowledge/context-feedback/*` | Context feedback ledger、stale review、bounded ranking hint 与 capsule evidence |
+| `packages/mindos/src/server/handlers/studio-automations.ts` | Product-owned Studio Automation CRUD / run-now contract |
+| `packages/mindos/src/server/handlers/agent-run-capsules.ts` | Capsule list/recovery Product contract |
+| `packages/mindos/src/server/handlers/connections.ts` | Connection discovery/bind/refresh/unbind Product contract |
+| `packages/mindos/src/server/handlers/automation-events.ts` | Event inbox list/emit Product contract |
+| `packages/mindos/src/server/handlers/context-feedback.ts` | Feedback/list/profile/review/promotion candidate Product contract |
 | `packages/mindos/src/server/handlers/runtime-readiness.ts` | Runtime Doctor 聚合契约，把 compatibility profile 与 permission/MCP/artifact/automation projection 合并成用例级 readiness / gaps / recommendations |
+| `packages/mindos/src/knowledge/context-assets/*` | Context Asset Registry 与 Echo 审核式晋升 |
+| `packages/mindos/src/retrieval/receipt.ts` | 不可变 Retrieval Receipt 的写入、读取与过滤 |
+| `packages/mindos/src/server/automations/service.ts` | 独立 Automation executor service、heartbeat 与无重叠 resident loop；不依赖 Web 生命周期 |
+| `packages/mindos/src/server/automations/executor.ts` | MindOS Pi / Codex / Claude unattended runtime 路由与 durable permission bridge |
 | `packages/mindos/src/agent/prompt/agent-prompt.txt` | MindOS 默认 base prompt |
 | `packages/mindos/src/agent/prompt/assistant-prompt.ts` | Active Assistant overlay 解析与渲染 |
 | `packages/mindos/src/agent/prompt/context-prompt.ts` | context prompt 渲染 |

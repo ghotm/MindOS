@@ -1,12 +1,25 @@
-<!-- Last verified: 2026-06-12 | Current version: v1.1.8 -->
+<!-- Last verified: 2026-09-03 | Current version: v1.1.66 -->
 
 # 变更日志 (CHANGELOG)
 
 ## Unreleased
 
+### Agent 控制与学习闭环
+
+- **Run Capsule 与接管/恢复**：canonical Pi、Codex、Claude、ACP turn 现在都会写入私有 0600 Capsule，并在终态保存 bounded 模型输出证据；Web 与 Mobile 共享 capability-aware Retry、Fork、Resume 和明确不可用的 Rollback readiness，恢复 plan 幂等且只能 claim 一次。
+- **Connection & Identity Broker**：飞书 Channel 会优先发现和复用本机现有 `lark-cli` profile，独立判断 Bot/User 身份；Bot 已就绪时不再因为 User OAuth 缺失要求创建新机器人或重新审批。MindOS 只保存外部 credential reference，并在每次执行前验证 CLI 文件可信度。
+- **Event-driven Automation**：Studio job 支持 schedule/manual/event trigger、精确 metadata filter、debounce 和 storm guard；Agent run、飞书消息、Inbox 与知识变更进入 durable event inbox，worker crash/retry/approval 仍绑定同一 delivery，容量上限不会静默淘汰 active 工作。
+- **Context Learning Loop**：Web/Mobile 支持 helpful、irrelevant、stale、missing 和 undo；反馈只绑定 receipt 实际 selection，多个当前版本信号才产生 bounded ranking hint。stale 需显式审核，Capsule request/output 证据可继续进入 Echo immutable review。
+
+## v1.1.66 (2026-09-03)
+
 ### Runtime / Agents
 
-- **Pi thinking effort 与运行时升级**：Pi 依赖升级到 `0.81.1` 并迁移到 `ModelRuntime` / `Models` API；MindOS runtime 现在按具体模型暴露并执行 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，Chat composer 会按 provider/model 记忆选择并在模型能力变化时安全夹取。
+- **Agent Run Observatory**：Agents / Runs 现在按一次 root run 聚合 Agent 与 Automation 的运行树、实时事件、artifact、Context receipt、session 与审批，不再只显示文件活动；重启后的历史会明确标为“仅摘要”，附属存储异常会降级并提示。
+- **Automation 跨端审批**：durable Codex / Claude Automation approval 进入 Mobile 全局待办，并可向飞书 OAuth 绑定账号发送脱敏私聊通知；Mobile、Studio 与飞书严格命令共用同一幂等状态机，投递失败不会自动放行。
+- **审批预览脱敏加固**：Automation 结构化 tool input 在生成预览前按敏感键递归脱敏，避免 `token`、`secret`、authorization 等字段以普通 JSON 值泄露。
+- **Pi thinking effort 与运行时升级**：三个 Pi 核心包统一升级到 `0.84.4` 并迁移到 `ModelRuntime` / `Models` API；MindOS runtime 现在按具体模型暴露并执行 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，Chat composer 会按 provider/model 记忆选择并在模型能力变化时安全夹取。
+- **平台包体积回归修复**：平台 runtime 闭包不再误内嵌 Claude Agent SDK 的 200+ MB 可选原生 CLI；Claude 继续使用本机检测到的 `claude`，darwin-arm64 平台 tarball 从约 136 MiB 回落到约 73.6 MiB，并保留 100 MiB 发布门禁。
 - **Runtime 诊断面板可视化**：Agents / Agent 页新增 Runtime Diagnostics，直接展示 catalog、readiness、命令解析、能力矩阵与诊断缺口，方便排查 Codex、Claude Code、MindOS 与 ACP runtime 的兼容状态。
 - **Artifacts / Preview 工作流可视化**：Agents / Agent 页新增 Artifacts / Preview 面板，统一展示 runtime artifact readiness、指针式 artifact 预览和 Agent 文件变更入口，方便从 ledger 跳到文件或变更审阅。
 - **Agent runtime 基础能力收口**：新增 runtime catalog 与 readiness/capability matrix，统一展示本机 Codex、Claude Code、ACP 等 runtime 的安装、可用性和能力状态。
@@ -31,6 +44,25 @@
 - **Skill 矩阵读接口去副作用**：`GET /api/skills/matrix` 不再迁移或清空旧 `installedSkillAgents[]`，也不会在只读页面访问时改写下游 agent skill 目录；用户改过的 legacy copy 不再写 `.mindos-managed`，后续 unlink 会按用户自有目录拒删。
 - **MCP 安装去副作用**：`/api/mcp/install` 不再隐式拷贝 skill 或写入旧 `installedSkillAgents` 记账，安装成功后的 skill 绑定统一走矩阵接口。
 - **stdio MCP packaged runtime 修复**：打包运行时缺少协议构建脚本时不再强制 rebuild；构建提示改走 stderr，避免污染 JSON-RPC stdout。
+
+## v1.1.65 (2026-09-02)
+
+### Runtime / Agents
+
+- **Pi delegation v2**：模型、demo 与 UI 以 direct / named workflow / `workflowScript` 为一等委托契约；workflow ledger 使用稳定标识，旧 `tasks[]` / `chain[]` 只在独立 compatibility boundary 内转换。
+- **移动端 Agent 授权闭环**：Mobile 新增全局 permission / AskUserQuestion sheet；Product Server 与 Web 共用受认证的 pending-action list/resolve handler，支持 runtime 原生授权 option、单选、多选、自定义回答、取消与过期同步。
+
+### 发布 / 平台
+
+- **Windows ARM64 平台包瘦身**：无法跨编译 Bun ARM64 Windows binary 时改发 19.7 KiB runtime bootstrap，首次真实命令安全下载并校验 runtime archive；`--version` / `--help` 仍可离线使用。
+- **八平台严格发布**：CI 在主包前发布并验证全部八个平台包，逐包执行 100 MiB tarball preflight；发布重跑会幂等跳过已存在版本，不再让主包 latest 指向缺失的 optional runtime。
+
+## v1.1.64 (2026-09-01)
+
+### Runtime / Agents
+
+- **Pi runtime 与内置扩展升级**：Pi 核心升级到 `0.84.4`，同步更新 MCP、schedule、subagents 和 web-access；旧 parallel/chain 子任务调用会自动迁移到 workflowScript，Desktop 内置 Node 升级到安全修复版 `22.23.2`。同时补齐 MCP keyring 的跨平台原生 binding、CLI Node 版本回退与长时定时任务不中断保障。
+- **非交互 MCP 安装正常退出**：`mindos mcp install <agent> -g -y` 不再提前创建未关闭的 readline，写完 agent 配置与 skill 后会立即以成功状态退出。
 
 ## v1.1.8 (2026-06-12)
 

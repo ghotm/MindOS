@@ -13,9 +13,19 @@ import type {
   FileRenameResponse,
   AgentRuntimesResponse,
   AgentRunsResponse,
+  AskUserQuestionAnswer,
+  PendingAgentActionsResponse,
+  AgentRunCapsuleRecoveryAction,
 } from './types';
 import { normalizeFilesResponseToTree } from './file-tree';
 import type { ConnectionIssueReason } from './connection-diagnostics';
+import {
+  normalizeMobileContextFeedback,
+  normalizeMobileRetrievalReceipts,
+  type MobileContextFeedback,
+  type MobileContextFeedbackSignal,
+  type MobileRetrievalReceipt,
+} from './context-feedback';
 import {
   clearConnectionAuthToken,
   persistConnectionAuthToken,
@@ -355,6 +365,64 @@ class MindOSClient {
     return { ok: true };
   }
 
+  async getPendingAgentActions(input: { signal?: AbortSignal } = {}): Promise<PendingAgentActionsResponse> {
+    const res = await this.fetchWithTimeout('/api/agent/pending-actions', {
+      timeout: 10_000,
+      signal: input.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new ApiError(res.status, readErrorMessage(data, 'Failed to load pending agent actions'));
+    }
+    const permissions = Array.isArray(data.permissions) ? data.permissions : [];
+    const questions = Array.isArray(data.questions) ? data.questions : [];
+    const automationApprovals = Array.isArray(data.automationApprovals) ? data.automationApprovals : [];
+    return {
+      permissions,
+      questions,
+      automationApprovals,
+      pendingCount: typeof data.pendingCount === 'number'
+        ? data.pendingCount
+        : permissions.length + questions.length + automationApprovals.length,
+      generatedAt: typeof data.generatedAt === 'number' ? data.generatedAt : Date.now(),
+    };
+  }
+
+  async resolveAutomationApproval(input: {
+    approvalId: string;
+    decision: 'allow' | 'deny';
+  }): Promise<{ ok: true }> {
+    const res = await this.fetchWithTimeout('/api/agent/automation-approval', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      timeout: 15_000,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new ApiError(res.status, readErrorMessage(data, 'Automation approval could not be resolved'));
+    }
+    return { ok: true };
+  }
+
+  async resolveUserQuestion(input: {
+    runId: string;
+    toolCallId: string;
+    action?: 'answer' | 'cancel';
+    answers?: AskUserQuestionAnswer[];
+    reason?: string;
+  }): Promise<{ ok: true }> {
+    const res = await this.fetchWithTimeout('/api/agent/user-question', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      timeout: 15_000,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new ApiError(res.status, readErrorMessage(data, 'Question could not be resolved'));
+    }
+    return { ok: true };
+  }
+
   async getAgentRuns(input: {
     chatSessionId?: string;
     rootRunId?: string;
@@ -384,7 +452,100 @@ class MindOSClient {
     return {
       runs: Array.isArray(data.runs) ? data.runs : [],
       events: Array.isArray(data.events) ? data.events : [],
+      ...(data.observatory && typeof data.observatory === 'object' && Array.isArray(data.observatory.traces)
+        ? { observatory: { traces: data.observatory.traces } }
+        : {}),
     };
+  }
+
+  async recoverAgentRunCapsule(
+    capsuleId: string,
+    action: Exclude<AgentRunCapsuleRecoveryAction, 'rollback'>,
+  ): Promise<{ planId: string; chatSessionId: string }> {
+    const idempotencyKey = `mobile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const planResponse = await this.fetchWithTimeout(
+      `/api/agent-run-capsules/${enc(capsuleId)}/recovery`,
+      { method: 'POST', body: JSON.stringify({ action, idempotencyKey }), timeout: 15_000 },
+    );
+    const planPayload = await planResponse.json().catch(() => ({})) as {
+      plan?: { id?: string; targetChatSessionId?: string };
+      error?: string;
+    };
+    if (!planResponse.ok || !planPayload.plan?.id) {
+      throw new ApiError(planResponse.status, readErrorMessage(planPayload, 'Recovery plan could not be created'));
+    }
+    const planId = planPayload.plan.id;
+    const chatSessionId = planPayload.plan.targetChatSessionId ?? `recovery-${planId}`;
+    const turnResponse = await this.fetchWithTimeout(
+      `/api/agent/sessions/${enc(chatSessionId)}/turns`,
+      {
+        method: 'POST',
+        body: '{}',
+        timeout: 15_000,
+        headers: { 'X-MindOS-Recovery-Plan-Id': planId, Accept: 'text/event-stream' },
+      },
+    );
+    if (!turnResponse.ok) {
+      const errorPayload = await turnResponse.json().catch(() => ({}));
+      throw new ApiError(turnResponse.status, readErrorMessage(errorPayload, 'Recovery run could not be started'));
+    }
+    return { planId, chatSessionId };
+  }
+
+  async getRetrievalReceipts(input: { limit?: number; signal?: AbortSignal } = {}): Promise<MobileRetrievalReceipt[]> {
+    const limit = Number.isFinite(input.limit) ? Math.max(1, Math.min(20, Math.floor(input.limit!))) : 6;
+    const res = await this.fetchWithTimeout(`/api/retrieval-receipts?limit=${limit}`, {
+      timeout: 10_000,
+      signal: input.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(res.status, readErrorMessage(data, 'Failed to load retrieval receipts'));
+    return normalizeMobileRetrievalReceipts(data);
+  }
+
+  async submitContextFeedback(input: {
+    receiptId: string;
+    signal: MobileContextFeedbackSignal;
+    assetId?: string;
+    note?: string;
+    expectedPath?: string;
+  }): Promise<Record<string, unknown>> {
+    return this.postContextFeedback({ action: 'submit', ...input });
+  }
+
+  async getContextFeedback(input: { limit?: number; signal?: AbortSignal } = {}): Promise<MobileContextFeedback[]> {
+    const limit = Number.isFinite(input.limit) ? Math.max(1, Math.min(500, Math.floor(input.limit!))) : 100;
+    const res = await this.fetchWithTimeout(`/api/context-feedback?limit=${limit}`, {
+      timeout: 10_000,
+      signal: input.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(res.status, readErrorMessage(data, 'Failed to load context feedback'));
+    return normalizeMobileContextFeedback(data);
+  }
+
+  async retractContextFeedback(feedbackId: string): Promise<Record<string, unknown>> {
+    return this.postContextFeedback({ action: 'retract', feedbackId });
+  }
+
+  async reviewStaleContextAsset(input: {
+    assetId: string;
+    decision: 'keep' | 'deprecate';
+    idempotencyKey: string;
+    note?: string;
+  }): Promise<Record<string, unknown>> {
+    return this.postContextFeedback({ action: 'review-stale', ...input });
+  }
+
+  private async postContextFeedback(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const res = await this.fetchWithTimeout('/api/context-feedback', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      timeout: 15_000,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(res.status, readErrorMessage(data, 'Context feedback could not be saved'));
+    return data as Record<string, unknown>;
   }
 
   // ---------------------------------------------------------------------------
@@ -399,6 +560,7 @@ class MindOSClient {
       timeout?: number;
       signal?: AbortSignal;
       notifyConnection?: boolean;
+      headers?: Record<string, string>;
     } = {},
   ): Promise<Response> {
     const {
@@ -407,8 +569,9 @@ class MindOSClient {
       timeout = DEFAULT_TIMEOUT,
       signal,
       notifyConnection = true,
+      headers: extraHeaders = {},
     } = opts;
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...extraHeaders };
     if (body) headers['Content-Type'] = 'application/json';
     if (this._authToken) headers.Authorization = `Bearer ${this._authToken}`;
 

@@ -1,6 +1,6 @@
 {
   "name": "@geminilight/mindos",
-  "version": "1.1.62",
+  "version": "1.1.66",
   "description": "MindOS — Human-Agent Collaborative Mind System. Local-first knowledge base that syncs your mind to all AI Agents via MCP.",
   "keywords": [
     "mindos",
@@ -13,6 +13,9 @@
     "second-brain"
   ],
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "license": "MIT",
   "author": "GeminiLight",
   "repository": {
@@ -224,6 +227,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.93.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.170",
+    "@earendil-works/pi-agent-core": "0.84.4",
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@sinclair/typebox": "^0.34.33",
     "chokidar": "^4.0.3",
@@ -232,21 +239,17 @@
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
-    "@geminilight/mindos-darwin-arm64": "1.1.62",
-    "@geminilight/mindos-darwin-x64": "1.1.62",
-    "@geminilight/mindos-linux-arm64": "1.1.62",
-    "@geminilight/mindos-linux-arm64-musl": "1.1.62",
-    "@geminilight/mindos-linux-x64": "1.1.62",
-    "@geminilight/mindos-linux-x64-musl": "1.1.62",
-    "@geminilight/mindos-windows-arm64": "1.1.62",
-    "@geminilight/mindos-windows-x64": "1.1.62"
+    "@geminilight/mindos-darwin-arm64": "1.1.66",
+    "@geminilight/mindos-darwin-x64": "1.1.66",
+    "@geminilight/mindos-linux-arm64": "1.1.66",
+    "@geminilight/mindos-linux-arm64-musl": "1.1.66",
+    "@geminilight/mindos-linux-x64": "1.1.66",
+    "@geminilight/mindos-linux-x64-musl": "1.1.66",
+    "@geminilight/mindos-windows-arm64": "1.1.66",
+    "@geminilight/mindos-windows-x64": "1.1.66"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "^1.0.0",
-    "@anthropic-ai/claude-agent-sdk": "0.3.170",
-    "@earendil-works/pi-agent-core": "0.81.1",
-    "@earendil-works/pi-ai": "0.81.1",
-    "@earendil-works/pi-coding-agent": "0.81.1",
     "@types/node": "^22.10.5",
     "esbuild": "^0.25.0",
     "typescript": "^5.7.3",

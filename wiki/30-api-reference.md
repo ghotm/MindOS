@@ -1,8 +1,8 @@
-<!-- Last verified: 2026-04-04 | Current version: v0.6 -->
+<!-- Last verified: 2026-09-03 -->
 
 # API Reference
 
-> MindOS 提供 51 个 API 端点，覆盖文件操作、AI 对话、Agent 协作、系统管理等。
+> MindOS API 覆盖文件、上下文治理、AI 对话、Agent 协作、自动化和系统管理。
 > 所有端点要求 Bearer Token 认证（浏览器同源请求免认证）。
 
 ---
@@ -21,6 +21,8 @@
 | `/api/tree-version` | GET | 文件树版本号（用于客户端缓存失效） |
 | `/api/backlinks` | GET | 反向链接查询。参数：`?path=` |
 | `/api/search` | GET | 全文搜索。参数：`?q=` |
+| `/api/context-assets` | GET | Context Asset Registry。可按 `?kind=`、`?status=`、`?sourceRef=` 过滤 |
+| `/api/retrieval-receipts` | GET | Retrieval Receipt 列表或单条查询。参数：`?id=`、`?outcome=`、`?limit=` |
 | `/api/graph` | GET | Wiki 知识图谱数据（nodes + edges） |
 | `/api/export` | POST | 导出文件/目录（MD/HTML/ZIP） |
 | `/api/extract-pdf` | POST | PDF 文本提取 |
@@ -37,6 +39,52 @@
 | `/api/skills` | GET/POST | Skills 列表与 CRUD。POST action 全集：`create`/`update`/`delete`/`toggle`/`read`/`read-native`/`record-install`/`link`/`unlink`/`disable-native`/`enable-native`。`link`/`unlink` 把 skill 链接到/移出下游 agent 的 skill 目录（symlink → Windows junction → copy fallback，副本带 `.mindos-managed` 标记）；`disable-native`/`enable-native` 停用/恢复 agent 自有技能——停用不删除，把技能目录整体移入 `{skillDir}/.mindos-disabled/` 暂存，恢复即原样移回 |
 | `/api/skills/matrix` | GET | 统一 (skill × agent) 启用矩阵：`{ skills, agents, state, cells }`，首列恒为 MindOS 自身（`disabledSkills`），外部 agent 列以链接是否存在为唯一事实源，单元格状态含 `linked`/`copied`/`broken`/`conflict`/`native-disabled`（已停放）/`none`；矩阵会并入仅存在于各 agent `.mindos-disabled` 停放区的技能（保证停放后仍可恢复）；universal agent 具备私房目录感知（如 Codex 的 `~/.codex/skills`），本体在私房目录的技能判定为已启用、对其 link 不会向共享池写入链接；GET 只读，不迁移或清空遗留 `installedSkillAgents[]` 记账 |
 | `/api/agent-activity` | POST | Agent 活动日志记录 |
+| `/api/agent-runs` | GET | Agent / Automation 运行观测。保留 `runs/events`，并返回按 root run 聚合的 `observatory`（run tree、artifact、receipt、session、approval、coverage 与 delivery 状态）；支持 `runId`、`rootRunId`、`chatSessionId`、`kind`、`status`、`startedAfter`、`includeEvents` 等筛选 |
+| `/api/agent-run-capsules` | GET | Run Capsule 脱敏 projection。支持 `runId`、`rootRunId`、`chatSessionId`、`status`、`limit`；不返回完整 request、附件正文或模型输出 |
+| `/api/agent-run-capsules/:capsuleId/recovery` | POST | 创建幂等 recovery plan。Body：`{ action: "retry" | "fork" | "resume" | "rollback", idempotencyKey }`；plan 由 canonical turn 通过 `X-MindOS-Recovery-Plan-Id` claim |
+| `/api/agent/pending-actions` | GET | 统一待处理动作：runtime permission、AskUserQuestion 与 durable Automation approval |
+| `/api/agent/runtime-permission` | POST | 决议当前进程中的 runtime permission |
+| `/api/agent/user-question` | POST | 回答或取消 AskUserQuestion |
+| `/api/agent/automation-approval` | POST | 幂等决议 durable Automation approval。Body：`{ approvalId, decision: "allow" | "deny" }` |
+
+## Studio Automation
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/studio/automations` | GET | 读取 durable jobs、worker heartbeat、pending approvals、notifications、真实 last/next run 和最近运行历史 |
+| `/api/studio/automations` | POST | 自动化 mutation。Body action：`create`、`update`、`delete`、`set-status`、`run-now`、`resolve-approval`、`acknowledge-notification`、`acknowledge-all-notifications` |
+| `/api/studio/automation-events` | GET | 查询 bounded event inbox 和 per-job deliveries；支持 `source`、`type`、`limit`，响应 summary 汇总 pending/failed/suppressed |
+| `/api/studio/automation-events` | POST | 幂等写入事件。Body：`{ source, key, type, occurredAt?, payload? }`；payload 最大 16 KiB，写入前递归脱敏 |
+
+Automation mutation 由 Product Server 校验。MindOS Pi 只接受 `read/auto`，Codex 与 Claude 接受 `read/ask/auto`；任务状态、审批和通知持久化在 `<mindRoot>/.mindos/automations/state.json`。`run-now` 是非阻塞入队，响应不等待 Agent 执行完成。独立执行器用 `mindos automation service install` 安装，也可用 `mindos automation once|worker` 前台运行。
+
+Automation job 的 `trigger` 是 `schedule | manual | event` union。event trigger 使用 `sources[]`、`events[]`、可选 exact `where`（最多 20 个、最多 4 层安全 dot path、primitive value）、`debounceMs` 与 `storm`。event inbox 最多 500 条，只会淘汰 terminal event；如果 500 条都含 active delivery，emit 返回可重试错误，不丢 pending 工作。CLI 等价入口为 `mindos automation emit --source ... --type ... --key ... [--payload '{...}']`。
+
+Codex / Claude Automation 新建审批后会尝试向已连接的飞书 OAuth owner 私聊发送脱敏摘要；回复完整的 `批准 approval-*` 或 `拒绝 approval-*` 会调用同一 resolver。发送失败只写入 approval delivery 状态，不改变 pending 权限，也不会自动放行。
+
+## Context Governance
+
+`GET /api/context-assets` 返回资产索引，不返回文件正文。首批 `kind` 包括 `knowledge`、`echo-playbook`、`echo-practice`、`skill`、`workflow`、`automation-run`。
+
+`GET /api/retrieval-receipts?id=<id>` 返回指定不可变回执；无 `id` 时按时间倒序返回。回执包含 query hash/脱敏 preview、预算、候选、入选片段 provenance 和 outcome，不包含完整检索正文。
+
+`/studio/context` 提供上述两个接口的只读检查器，支持 Assets / Receipts 搜索、状态筛选、关联回执与安全文件入口。
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/context-feedback` | GET | 同时返回 feedback、asset profiles 与 stale reviews；支持 `receiptId`、`assetId`、`runId`、`status`、`limit` |
+| `/api/context-feedback` | POST | `submit`、`retract`、`review-stale` 或 `review-capsule-promotion`；所有 asset 反馈必须归属于 receipt 实际 selection，promotion evidence 必须命中 capsule request/output |
+
+feedback 支持 `helpful`、`irrelevant`、`stale`、`missing`。`stale` 本身不改变 asset 状态；只有 `review-stale` 的显式 `deprecate` 才更新 registry。ranking hint 至少需要 3 个当前 asset version 的 active 信号，且绝对值不超过 0.15。CLI 覆盖 `mindos context feedback`、`feedback undo` 与 `review-stale`；profile 和 promotion candidate 由受认证 API 提供。
+
+## Connections
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/connections` | GET | 读取已绑定 Connection；`?discover=true&provider=feishu` 同时探测本机现有 `lark-cli` profile、Bot/User 和 capability |
+| `/api/connections` | POST | `bind`、`refresh`、`unbind`。只持久化 external credential reference，不复制 app secret、token 或 env |
+
+首个 broker adapter 是 `lark-cli-profile`。发现会读取 `config show` 和 `auth status --json --verify`；Bot/User 分开判定，Bot ready 时即使 User OAuth 缺失也可绑定。发送与 event long connection 都显式使用 Bot identity，且每次真实执行前重新验证 CLI realpath、owner 与可写权限。
 
 ## A2A Protocol (Agent-to-Agent 通信)
 

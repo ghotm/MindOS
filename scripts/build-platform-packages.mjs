@@ -5,7 +5,7 @@
  * Input: packages/mindos must already contain built dist/, staged runtime assets,
  * and either static-web/ or a pruned _standalone/ fallback runtime.
  */
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,21 +17,39 @@ import {
   pruneStandaloneToExtractionRuntime,
 } from './prune-standalone-extraction.mjs';
 import { writeRuntimeManifest as writeSharedRuntimeManifest } from './runtime-manifest.mjs';
-import { pruneClaudeAgentSdkNativePackages } from '../packages/desktop/scripts/prepare-mindos-bundle.mjs';
+import {
+  pruneClaudeAgentSdkNativePackages,
+  pruneKeyringNativePackages,
+} from '../packages/desktop/scripts/prepare-mindos-bundle.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
 const productRoot = resolve(root, 'packages', 'mindos');
-const CLI_RUNTIME_ROOT_DEPENDENCIES = ['chokidar'];
+// The compiled binary extracts plain ESM files into ~/.mindos/runtime-cache.
+// Every external imported by that tree must therefore live inside the archive;
+// packages installed next to the npm platform package are not visible there.
+const CLI_RUNTIME_ROOT_DEPENDENCIES = [
+  '@anthropic-ai/claude-agent-sdk',
+  '@anthropic-ai/sdk',
+  '@earendil-works/pi-agent-core',
+  '@earendil-works/pi-ai',
+  '@earendil-works/pi-coding-agent',
+  '@modelcontextprotocol/sdk',
+  '@sinclair/typebox',
+  'chokidar',
+  'pino',
+  'pino-pretty',
+  'zod',
+];
 
 const platforms = [
   { key: 'darwin-arm64', os: 'darwin', cpu: 'arm64', koffi: ['darwin_arm64'], clipboard: ['clipboard', 'clipboard-darwin-arm64', 'clipboard-darwin-universal'] },
   { key: 'darwin-x64', os: 'darwin', cpu: 'x64', koffi: ['darwin_x64'], clipboard: ['clipboard', 'clipboard-darwin-x64', 'clipboard-darwin-universal'] },
-  { key: 'linux-arm64', os: 'linux', cpu: 'arm64', koffi: ['linux_arm64'], clipboard: ['clipboard', 'clipboard-linux-arm64-gnu'] },
-  { key: 'linux-arm64-musl', os: 'linux', cpu: 'arm64', koffi: ['musl_arm64'], clipboard: ['clipboard', 'clipboard-linux-arm64-musl'] },
-  { key: 'linux-x64', os: 'linux', cpu: 'x64', koffi: ['linux_x64'], clipboard: ['clipboard', 'clipboard-linux-x64-gnu'] },
-  { key: 'linux-x64-musl', os: 'linux', cpu: 'x64', koffi: ['musl_x64'], clipboard: ['clipboard', 'clipboard-linux-x64-musl'] },
-  { key: 'windows-arm64', os: 'win32', cpu: 'arm64', koffi: ['win32_arm64'], clipboard: ['clipboard', 'clipboard-win32-arm64-msvc'], binary: false },
+  { key: 'linux-arm64', os: 'linux', cpu: 'arm64', libc: 'glibc', koffi: ['linux_arm64'], clipboard: ['clipboard', 'clipboard-linux-arm64-gnu'] },
+  { key: 'linux-arm64-musl', os: 'linux', cpu: 'arm64', libc: 'musl', koffi: ['musl_arm64'], clipboard: ['clipboard', 'clipboard-linux-arm64-musl'] },
+  { key: 'linux-x64', os: 'linux', cpu: 'x64', libc: 'glibc', koffi: ['linux_x64'], clipboard: ['clipboard', 'clipboard-linux-x64-gnu'] },
+  { key: 'linux-x64-musl', os: 'linux', cpu: 'x64', libc: 'musl', koffi: ['musl_x64'], clipboard: ['clipboard', 'clipboard-linux-x64-musl'] },
+  { key: 'windows-arm64', os: 'win32', cpu: 'arm64', koffi: ['win32_arm64'], clipboard: ['clipboard', 'clipboard-win32-arm64-msvc'], binary: false, runtimeBootstrap: true },
   { key: 'windows-x64', os: 'win32', cpu: 'x64', koffi: ['win32_x64'], clipboard: ['clipboard', 'clipboard-win32-x64-msvc'] },
 ];
 
@@ -47,21 +65,33 @@ mkdirSync(outDir, { recursive: true });
 
 for (const target of selected) {
   const targetBuildBinary = buildBinary && target.binary !== false;
+  const targetRuntimeBootstrap = target.runtimeBootstrap === true && !fallbackRuntime;
   const packageDir = resolve(outDir, target.key);
   rmSync(packageDir, { recursive: true, force: true });
   mkdirSync(packageDir, { recursive: true });
 
   copyRuntimeRoot(packageDir);
-  copyCliRuntimeNodeModules(packageDir);
-  writePlatformPackageJson(packageDir, target, targetBuildBinary);
-  writePlatformRuntimeManifest(packageDir, target, targetBuildBinary);
-  pruneKoffi(packageDir, target);
-  pruneMarioClipboardPackages(packageDir, target);
+  // The staged Web runtime may contain Claude's 200+ MB native CLI package.
+  // MindOS intentionally requires a separately installed local `claude`, so
+  // no SDK optional native package belongs in the compiled platform runtime.
   const removedClaudeNativePackages = pruneClaudeAgentSdkNativePackages(packageDir);
   if (removedClaudeNativePackages > 0) {
-    console.log(`[build-platform-packages] Removed ${removedClaudeNativePackages} Claude Agent SDK native package(s) from ${target.key}`);
+    console.log(`[build-platform-packages] Removed ${removedClaudeNativePackages} non-target Claude Agent SDK native package(s) from ${target.key}`);
   }
-  if (targetBuildBinary) {
+  copyCliRuntimeNodeModules(packageDir);
+  writePlatformPackageJson(packageDir, target, targetBuildBinary, targetRuntimeBootstrap);
+  writePlatformRuntimeManifest(packageDir, target, targetBuildBinary, targetRuntimeBootstrap);
+  pruneKoffi(packageDir, target);
+  pruneMarioClipboardPackages(packageDir, target);
+  pruneKeyringNativePackages(packageDir, {
+    targetPlatform: target.os,
+    targetArch: target.cpu,
+    targetLibc: target.libc,
+  });
+  if (targetRuntimeBootstrap) {
+    writeRuntimeBootstrap(packageDir);
+    pruneRuntimeBootstrapPackageRoot(packageDir);
+  } else if (targetBuildBinary) {
     // Binary targets serve static-web; the standalone Next server is dead
     // weight in the embedded archive, but the document extraction runtime
     // under _standalone must survive — excluding it wholesale shipped a
@@ -182,7 +212,12 @@ function copyRuntimeRoot(packageDir) {
   rmSync(resolve(packageDir, 'bin', 'mindos-shim.cjs'), { force: true });
 }
 
-function writePlatformPackageJson(packageDir, target, targetBuildBinary = buildBinary) {
+function writePlatformPackageJson(
+  packageDir,
+  target,
+  targetBuildBinary = buildBinary,
+  targetRuntimeBootstrap = false,
+) {
   const manifest = {
     name: `@geminilight/mindos-${target.key}`,
     version: productPkg.version,
@@ -191,8 +226,18 @@ function writePlatformPackageJson(packageDir, target, targetBuildBinary = buildB
     license: productPkg.license ?? 'MIT',
     os: [target.os],
     cpu: [target.cpu],
-    dependencies: platformRuntimeDependencies(),
-    files: fallbackRuntime || !targetBuildBinary
+    dependencies: targetRuntimeBootstrap ? {} : platformRuntimeDependencies(),
+    files: targetRuntimeBootstrap
+      ? [
+        'bin/cli.cjs',
+        'bin/mindos-shim.cjs',
+        'package.json',
+        'runtime-manifest.json',
+        'README.md',
+        'README_zh.md',
+        'LICENSE',
+      ]
+      : fallbackRuntime || !targetBuildBinary
       ? [
         'bin/',
         'dist/',
@@ -240,9 +285,6 @@ function copyCliRuntimeNodeModules(packageDir) {
   const targetNodeModules = resolve(packageDir, 'node_modules');
   mkdirSync(targetNodeModules, { recursive: true });
 
-  // bin/lib/sync.js dynamically imports chokidar after the Bun binary extracts
-  // this runtime into ~/.mindos/runtime-cache; dependencies installed beside
-  // the npm platform package are not visible from that extracted cache root.
   copyDependencyClosure(CLI_RUNTIME_ROOT_DEPENDENCIES, {
     targetNodeModules,
     resolveFromDir: productRoot,
@@ -279,6 +321,8 @@ function copyDependencyClosure(rootPackages, options) {
 }
 
 function resolvePackageDir(resolveFromDir, packageName) {
+  const installedDir = findInstalledPackageDir(resolveFromDir, packageName);
+  if (installedDir) return installedDir;
   const requireFromDir = createRequire(resolve(resolveFromDir, 'package.json'));
   try {
     return dirname(requireFromDir.resolve(`${packageName}/package.json`));
@@ -293,6 +337,22 @@ function resolvePackageDir(resolveFromDir, packageName) {
         + `\n  entrypoint cause: ${entryErr instanceof Error ? entryErr.message : String(entryErr)}`,
       );
     }
+  }
+}
+
+function findInstalledPackageDir(resolveFromDir, packageName) {
+  // pnpm exposes package roots through symlinks. Resolve them before walking
+  // ancestors so a package's peer/optional dependency links remain visible.
+  let current = realpathSync(resolve(resolveFromDir));
+  for (;;) {
+    const nodeModules = basename(current) === 'node_modules'
+      ? current
+      : resolve(current, 'node_modules');
+    const candidate = resolvePackageName(nodeModules, packageName);
+    if (existsSync(resolve(candidate, 'package.json'))) return candidate;
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
   }
 }
 
@@ -334,15 +394,62 @@ function shouldCopyRuntimeDependency(src) {
   return true;
 }
 
-function writePlatformRuntimeManifest(packageDir, target, targetBuildBinary = buildBinary) {
+function writePlatformRuntimeManifest(
+  packageDir,
+  target,
+  targetBuildBinary = buildBinary,
+  targetRuntimeBootstrap = false,
+) {
+  const layout = targetRuntimeBootstrap
+    ? 'runtime-bootstrap'
+    : targetBuildBinary
+      ? 'bun-single-binary'
+      : 'platform';
   writeSharedRuntimeManifest(packageDir, {
     productPkg,
     packageName: `@geminilight/mindos-${target.key}`,
     platform: target.key,
     os: target.os,
     cpu: target.cpu,
-    layout: targetBuildBinary ? 'bun-single-binary' : 'platform',
+    layout,
   });
+}
+
+function writeRuntimeBootstrap(packageDir) {
+  const binDir = resolve(packageDir, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  cpSync(
+    resolve(productRoot, 'bin', 'mindos-shim.cjs'),
+    resolve(binDir, 'mindos-shim.cjs'),
+  );
+  const bootstrapPath = resolve(binDir, 'cli.cjs');
+  writeFileSync(bootstrapPath, `#!/usr/bin/env node
+process.env.MINDOS_DISABLE_PLATFORM_PACKAGE_LOOKUP = '1';
+require('./mindos-shim.cjs');
+`, 'utf-8');
+  chmodSync(bootstrapPath, 0o755);
+}
+
+function pruneRuntimeBootstrapPackageRoot(packageDir) {
+  const keep = new Set([
+    'bin',
+    'package.json',
+    'runtime-manifest.json',
+    'README.md',
+    'README_zh.md',
+    'LICENSE',
+  ]);
+  for (const entry of readdirSync(packageDir, { withFileTypes: true })) {
+    if (!keep.has(entry.name)) {
+      rmSync(resolve(packageDir, entry.name), { recursive: true, force: true });
+    }
+  }
+  const binDir = resolve(packageDir, 'bin');
+  for (const entry of readdirSync(binDir, { withFileTypes: true })) {
+    if (entry.name !== 'cli.cjs' && entry.name !== 'mindos-shim.cjs') {
+      rmSync(resolve(binDir, entry.name), { recursive: true, force: true });
+    }
+  }
 }
 
 function pruneBinaryPackageRoot(packageDir, target) {

@@ -51,6 +51,11 @@ import {
   sendAgentRunContext,
 } from './turn-sse';
 import type { RunAcpRuntimeLaneTurnInput } from './turn-lane-shared';
+import {
+  capsuleRuntimeBinding,
+  captureAgentTurnCapsule,
+  finalizeAgentTurnCapsule,
+} from './turn-capsule';
 
 export function runAcpRuntimeLaneTurn(input: RunAcpRuntimeLaneTurnInput): Response {
   return createAgentTurnSseResponse((send) => runWithAgentRunContext({ chatSessionId: input.chatSessionId }, async () => {
@@ -75,6 +80,7 @@ async function runAcpRuntimeTurn(
   let hasContent = false;
   let outputSummary = '';
   const acpRun = startAgentRun({
+    ...(input.capsule.runId ? { id: input.capsule.runId } : {}),
     agentKind: 'acp',
     runtimeId: selectedAcpAgent.id,
     displayName: selectedAcpAgent.name,
@@ -93,12 +99,15 @@ async function runAcpRuntimeTurn(
       },
       ...input.sessionContextMetadata,
       ...input.fileContextMetadata,
+      ...input.retrievalMetadata,
       sessionWorkDir: input.sessionWorkDir.path,
       sessionSpaces: input.sessionContextSelection.spaces.map((space) => space.path),
       sessionAssistants: input.sessionContextSelection.assistants.map((assistant) => assistant.id),
       ...(input.assistantId ? { assistantId: input.assistantId } : {}),
     },
   });
+  captureAgentTurnCapsule(acpRun, input.capsule);
+  let activeCapsuleBinding = input.capsule.request.runtimeBinding;
   const runtimeRunId = randomUUID();
   const sendWithLedger = (event: MindOSSSEvent) => {
     if (event.type === 'text_delta') outputSummary += event.delta;
@@ -143,6 +152,12 @@ async function runAcpRuntimeTurn(
         },
         externalSessionId: resumableAcpBindingExternalSessionId(input.runtimeBinding),
         onSessionReady: (session, details) => {
+          activeCapsuleBinding = capsuleRuntimeBinding({
+            kind: 'acp',
+            runtimeId: selectedAcpAgent.id,
+            externalSessionId: details.externalSessionId,
+            cwd: input.executionCwd,
+          });
           updateAgentRun(acpRun.id, {
             archive: { sessionId: details.externalSessionId ?? session.id },
             metadata: {
@@ -185,6 +200,13 @@ async function runAcpRuntimeTurn(
           source: 'selected-acp-runtime',
         },
       });
+      finalizeAgentTurnCapsule({
+        mindRoot: input.capsule.mindRoot,
+        runId: acpRun.id,
+        status: terminalStatus,
+        outputText: outputSummary,
+        runtimeBinding: activeCapsuleBinding,
+      });
       throw error;
     })
     .finally(async () => {
@@ -207,6 +229,13 @@ async function runAcpRuntimeTurn(
         source: 'selected-acp-runtime',
       },
     });
+    finalizeAgentTurnCapsule({
+      mindRoot: input.capsule.mindRoot,
+      runId: acpRun.id,
+      status: terminalStatus,
+      outputText: outputSummary,
+      runtimeBinding: activeCapsuleBinding,
+    });
   } else {
     const modeArtifacts = recordModeArtifacts(
       acpRun.id,
@@ -226,7 +255,15 @@ async function runAcpRuntimeTurn(
         },
         ...input.sessionContextMetadata,
         ...input.fileContextMetadata,
+        ...input.retrievalMetadata,
       },
+    });
+    finalizeAgentTurnCapsule({
+      mindRoot: input.capsule.mindRoot,
+      runId: acpRun.id,
+      status: 'completed',
+      outputText: outputSummary,
+      runtimeBinding: activeCapsuleBinding,
     });
   }
 }

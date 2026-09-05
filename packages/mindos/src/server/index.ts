@@ -6,6 +6,22 @@ export {
 } from './contract.js';
 
 export {
+  handleContextAssetsGet,
+  type ContextAssetsHandlerServices,
+} from './handlers/context-assets.js';
+
+export {
+  handleRetrievalReceiptsGet,
+  type RetrievalReceiptsHandlerServices,
+} from './handlers/retrieval-receipts.js';
+
+export {
+  handleContextFeedbackGet,
+  handleContextFeedbackPost,
+  type ContextFeedbackHandlerServices,
+} from './handlers/context-feedback.js';
+
+export {
   MINDOS_WEB_API_ROUTE_OWNERSHIP,
   getMindosWebApiRouteOwnership,
   type MindosWebApiRouteAdapter,
@@ -51,6 +67,35 @@ export {
   type AgentActivityHandlerServices,
   type AgentActivityPayload,
 } from './handlers/agent-activity.js';
+
+export {
+  buildAgentRunObservatory,
+  handleAgentRunsGet,
+  type AgentRunObservatory,
+  type AgentRunObservatoryCoverage,
+  type AgentRunObservatoryInput,
+  type AgentRunObservatoryStatus,
+  type AgentRunObservatoryTrace,
+  type AgentRunsHandlerServices,
+  type AgentRunsPayload,
+  type PublicAgentEvent,
+  type PublicAgentRunRecord,
+} from './handlers/agent-runs.js';
+
+export {
+  handleAgentRunCapsuleRecoveryPost,
+  handleAgentRunCapsulesGet,
+  type AgentRunCapsuleHandlerServices,
+} from './handlers/agent-run-capsules.js';
+
+export {
+  handleAutomationApprovalDecisionPost,
+  handlePendingAgentActionsGet,
+  handleRuntimePermissionDecisionPost,
+  handleUserQuestionDecisionPost,
+  type PendingAgentActionServices,
+  type PendingAutomationApproval,
+} from './handlers/pending-agent-actions.js';
 
 export {
   buildAgentRuntimesPayload,
@@ -199,6 +244,59 @@ export {
   type RuntimeControlPlaneWakeEvent,
   type RuntimeControlPlaneWakeStatus,
 } from './handlers/runtime-control-plane.js';
+
+export {
+  claimNextDueStudioAutomation,
+  handleStudioAutomationsGet,
+  handleStudioAutomationsPost,
+  readStudioAutomationState,
+  recoverStaleStudioAutomationLeases,
+  tickStudioAutomationWorker,
+  acknowledgeAllStudioAutomationNotifications,
+  acknowledgeStudioAutomationNotification,
+  appendStudioAutomationNotification,
+  requestStudioAutomationPermission,
+  resolveStudioAutomationApproval,
+  StudioAutomationApprovalRequiredError,
+  DEFAULT_STUDIO_AUTOMATION_TICK_INTERVAL_MS,
+  STUDIO_AUTOMATION_WORKER_HEARTBEAT_FILE,
+  readStudioAutomationWorkerHeartbeat,
+  runStudioAutomationWorkerOnce,
+  runStudioAutomationWorkerService,
+  createStudioAutomationExecutor,
+  notifyStudioAutomationApprovalViaFeishu,
+  type StudioAutomationApproval,
+  type StudioAutomationApprovalDecision,
+  type StudioAutomationDraft,
+  type StudioAutomationExecutor,
+  type StudioAutomationExecutorContext,
+  type StudioAutomationExecutorResult,
+  type StudioAutomationJob,
+  type StudioAutomationModel,
+  type StudioAutomationNotification,
+  type StudioAutomationPayload,
+  type StudioAutomationPermissionMode,
+  type StudioAutomationRun,
+  type StudioAutomationRunStatus,
+  type StudioAutomationRuntime,
+  type StudioAutomationSchedule,
+  type StudioAutomationServices,
+  type FeishuApprovalDeliveryOptions,
+  type FeishuApprovalDeliveryResult,
+  type StudioAutomationState,
+} from './handlers/studio-automations.js';
+
+export {
+  handleAutomationEventsGet,
+  handleAutomationEventsPost,
+  type AutomationEventServices,
+} from './handlers/automation-events.js';
+export {
+  emitStudioAutomationEvent,
+  recordStudioAutomationEventSourceFailure,
+  type EmitStudioAutomationEventInput,
+  type EmitStudioAutomationEventResult,
+} from './automations/events.js';
 
 export {
   buildAgentRuntimeReadinessPayload,
@@ -483,6 +581,39 @@ export {
   type ImConfigPutPayload,
   type ImConfigServices,
 } from './handlers/im-config.js';
+
+export {
+  handleConnectionsGet,
+  handleConnectionsPost,
+  type ConnectionBrokerServices,
+  type ConnectionMutationPayload,
+  type ConnectionsPayload,
+} from './handlers/connections.js';
+
+export {
+  bindConnection,
+  discoverLarkCliConnections,
+  findLarkCliExecutable,
+  getConnectionBinding,
+  listConnectionBindings,
+  parseLarkCliFailure,
+  resolveSafeLarkCliExecutable,
+  refreshConnectionBinding,
+  runLarkCli,
+  unbindConnection,
+  type ConnectionAdapter,
+  type ConnectionBinding,
+  type ConnectionCandidate,
+  type ConnectionCapability,
+  type ConnectionIdentity,
+  type ConnectionIssue,
+  type ConnectionProvider,
+  type ConnectionRegistry,
+  type ConnectionStatus,
+  type ExternalCredentialReference,
+  type LarkCliRunner,
+  type LarkCliRunResult,
+} from './connections/index.js';
 
 export {
   handleImFeishuLongConnectionDelete,

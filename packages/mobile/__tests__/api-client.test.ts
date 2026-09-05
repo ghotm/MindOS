@@ -249,6 +249,76 @@ describe('mindosClient auth', () => {
     );
   });
 
+  it('loads pending agent actions and normalizes missing collections', async () => {
+    mindosClient.setBaseUrl('http://127.0.0.1:4567');
+    mindosClient.setAuthToken('secret-token');
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      permissions: [{ kind: 'runtime-permission', requestId: 'req-1' }],
+      questions: null,
+      automationApprovals: [{ kind: 'automation-approval', approvalId: 'approval-1' }],
+      pendingCount: 2,
+      generatedAt: 123,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await expect(mindosClient.getPendingAgentActions()).resolves.toEqual({
+      permissions: [{ kind: 'runtime-permission', requestId: 'req-1' }],
+      questions: [],
+      automationApprovals: [{ kind: 'automation-approval', approvalId: 'approval-1' }],
+      pendingCount: 2,
+      generatedAt: 123,
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:4567/api/agent/pending-actions',
+      expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer secret-token' }) }),
+    );
+  });
+
+  it('resolves a durable automation approval through the MindOS server', async () => {
+    mindosClient.setBaseUrl('http://127.0.0.1:4567');
+    mindosClient.setAuthToken('secret-token');
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    await expect(mindosClient.resolveAutomationApproval({
+      approvalId: 'approval-1',
+      decision: 'allow',
+    })).resolves.toEqual({ ok: true });
+    expect(fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:4567/api/agent/automation-approval',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ approvalId: 'approval-1', decision: 'allow' }),
+      }),
+    );
+  });
+
+  it('answers and cancels AskUserQuestion requests through the MindOS server', async () => {
+    mindosClient.setBaseUrl('http://127.0.0.1:4567');
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    const answer = {
+      runId: 'run-1',
+      toolCallId: 'tool-1',
+      answers: [{ questionIndex: 0, question: 'Ship?', kind: 'option' as const, answer: 'Yes' }],
+    };
+    await expect(mindosClient.resolveUserQuestion(answer)).resolves.toEqual({ ok: true });
+    await expect(mindosClient.resolveUserQuestion({
+      runId: 'run-2', toolCallId: 'tool-2', action: 'cancel', reason: 'user_cancelled',
+    })).resolves.toEqual({ ok: true });
+
+    expect(fetch).toHaveBeenNthCalledWith(1,
+      'http://127.0.0.1:4567/api/agent/user-question',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(answer) }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(2,
+      'http://127.0.0.1:4567/api/agent/user-question',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({
+        runId: 'run-2', toolCallId: 'tool-2', action: 'cancel', reason: 'user_cancelled',
+      }) }),
+    );
+  });
+
   it('loads agent run activity for the active mobile chat session', async () => {
     mindosClient.setBaseUrl('http://127.0.0.1:4567');
     mindosClient.setAuthToken('secret-token');
@@ -314,6 +384,7 @@ describe('mindosClient auth', () => {
           },
         ],
         events: [],
+        observatory: { traces: [{ id: 'run-1', capsule: { id: 'capsule-1' } }] },
       }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -326,6 +397,7 @@ describe('mindosClient auth', () => {
     })).resolves.toMatchObject({
       runs: [expect.objectContaining({ id: 'run-1' })],
       events: [],
+      observatory: { traces: [{ id: 'run-1', capsule: { id: 'capsule-1' } }] },
     });
 
     expect(fetch).toHaveBeenCalledWith(
@@ -336,6 +408,70 @@ describe('mindosClient auth', () => {
         }),
       }),
     );
+  });
+
+  it('starts capsule recovery through the plan and canonical turn contracts', async () => {
+    mindosClient.setBaseUrl('http://127.0.0.1:4567');
+    mindosClient.setAuthToken('secret-token');
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        plan: { id: 'recovery-plan-1', targetChatSessionId: 'chat-recovery' },
+      }), { status: 201, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response('data: {"type":"agent_run_context"}\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }));
+
+    await expect(mindosClient.recoverAgentRunCapsule('capsule-1', 'retry')).resolves.toEqual({
+      planId: 'recovery-plan-1',
+      chatSessionId: 'chat-recovery',
+    });
+    expect(fetch).toHaveBeenNthCalledWith(1,
+      'http://127.0.0.1:4567/api/agent-run-capsules/capsule-1/recovery',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(2,
+      'http://127.0.0.1:4567/api/agent/sessions/chat-recovery/turns',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer secret-token',
+          'X-MindOS-Recovery-Plan-Id': 'recovery-plan-1',
+        }),
+      }),
+    );
+  });
+
+  it('loads retrieval receipts and sends all four context-learning decisions through the shared contract', async () => {
+    mindosClient.setBaseUrl('http://127.0.0.1:4567');
+    mindosClient.setAuthToken('secret-token');
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ receipts: [{
+        id: 'receipt-1', queryPreview: 'launch', outcome: 'selected', startedAt: '2026-09-03T03:00:00.000Z',
+        selections: [{ assetId: 'asset-1', path: 'launch.md', score: 1, reason: 'selected' }],
+      }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ feedback: [{
+        id: 'feedback-existing', receiptId: 'receipt-1', assetId: 'asset-1', signal: 'helpful', status: 'active',
+      }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true, feedback: { id: 'feedback-1' } }), { status: 201 }));
+
+    await expect(mindosClient.getRetrievalReceipts({ limit: 4 })).resolves.toEqual([
+      expect.objectContaining({ id: 'receipt-1', selections: [expect.objectContaining({ assetId: 'asset-1' })] }),
+    ]);
+    await expect(mindosClient.getContextFeedback({ limit: 100 })).resolves.toEqual([
+      expect.objectContaining({ id: 'feedback-existing', signal: 'helpful' }),
+    ]);
+    for (const signal of ['helpful', 'irrelevant', 'stale'] as const) {
+      await mindosClient.submitContextFeedback({ receiptId: 'receipt-1', assetId: 'asset-1', signal });
+    }
+    await mindosClient.submitContextFeedback({ receiptId: 'receipt-1', signal: 'missing' });
+
+    expect(vi.mocked(fetch).mock.calls.slice(2).map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
+      { action: 'submit', receiptId: 'receipt-1', assetId: 'asset-1', signal: 'helpful' },
+      { action: 'submit', receiptId: 'receipt-1', assetId: 'asset-1', signal: 'irrelevant' },
+      { action: 'submit', receiptId: 'receipt-1', assetId: 'asset-1', signal: 'stale' },
+      { action: 'submit', receiptId: 'receipt-1', signal: 'missing' },
+    ]);
   });
 
   it('notifies connection observers for API success and connection failures only', async () => {

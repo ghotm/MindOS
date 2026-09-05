@@ -1,0 +1,595 @@
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { errorResponse, json, type MindosServerResponse } from '../response.js';
+import { applyRuntimeControlPlaneMutation, readRuntimeControlPlane } from './runtime-control-plane.js';
+import { migrateLegacyStudioAutomations } from '../automations/migration.js';
+import {
+  DEFAULT_AUTOMATION_TIMEZONE,
+  assertValidTimezone,
+  automationTrigger,
+  nextAutomationRunAt,
+} from '../automations/schedule.js';
+import {
+  mutateStudioAutomationState,
+  readStudioAutomationState,
+} from '../automations/store.js';
+import {
+  acknowledgeAllStudioAutomationNotifications,
+  acknowledgeStudioAutomationNotification,
+  resolveStudioAutomationApproval,
+} from '../automations/approvals.js';
+import { readStudioAutomationWorkerHeartbeat } from '../automations/service.js';
+import {
+  STUDIO_AUTOMATION_SCHEDULES,
+  type StudioAutomationDraft,
+  type StudioAutomationJob,
+  type StudioAutomationPayload,
+  type StudioAutomationStatus,
+  type StudioAutomationTrigger,
+} from '../automations/types.js';
+
+export {
+  claimNextDueStudioAutomation,
+  recoverStaleStudioAutomationLeases,
+  tickStudioAutomationWorker,
+} from '../automations/worker.js';
+export { readStudioAutomationState } from '../automations/store.js';
+export {
+  acknowledgeAllStudioAutomationNotifications,
+  acknowledgeStudioAutomationNotification,
+  appendStudioAutomationNotification,
+  requestStudioAutomationPermission,
+  resolveStudioAutomationApproval,
+  StudioAutomationApprovalRequiredError,
+} from '../automations/approvals.js';
+export {
+  DEFAULT_STUDIO_AUTOMATION_TICK_INTERVAL_MS,
+  STUDIO_AUTOMATION_WORKER_HEARTBEAT_FILE,
+  readStudioAutomationWorkerHeartbeat,
+  runStudioAutomationWorkerOnce,
+  runStudioAutomationWorkerService,
+} from '../automations/service.js';
+export { createStudioAutomationExecutor } from '../automations/executor.js';
+export {
+  notifyStudioAutomationApprovalViaFeishu,
+  type FeishuApprovalDeliveryOptions,
+  type FeishuApprovalDeliveryResult,
+} from '../automations/feishu-approval.js';
+export type * from '../automations/types.js';
+
+export type StudioAutomationServices = {
+  mindRoot: string;
+  homeDir?: string;
+  now?(): Date;
+};
+
+type HandlerPayload = StudioAutomationPayload | { error: string };
+
+export function handleStudioAutomationsGet(
+  services: StudioAutomationServices,
+): MindosServerResponse<StudioAutomationPayload | { error: string }> {
+  try {
+    const now = services.now?.() ?? new Date();
+    migrateLegacyStudioAutomations(services.mindRoot, services.homeDir, now);
+    syncAllControlPlaneSchedules(services.mindRoot, now);
+    return json(buildPayload(services.mindRoot, now), { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+export function handleStudioAutomationsPost(
+  body: unknown,
+  services: StudioAutomationServices,
+): MindosServerResponse<HandlerPayload> {
+  try {
+    if (!isRecord(body)) return json({ error: 'Expected an object payload.' }, { status: 400 });
+    const action = typeof body.action === 'string' ? body.action : '';
+    const now = services.now?.() ?? new Date();
+    migrateLegacyStudioAutomations(services.mindRoot, services.homeDir, now);
+
+    if (action === 'acknowledge-all-notifications') {
+      acknowledgeAllStudioAutomationNotifications(services.mindRoot, now);
+      return json(buildPayload(services.mindRoot, now), { headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    if (action === 'acknowledge-notification') {
+      const notificationId = safeId(body.notificationId);
+      if (!notificationId) return json({ error: 'acknowledge-notification requires notificationId.' }, { status: 400 });
+      const result = acknowledgeStudioAutomationNotification(services.mindRoot, notificationId, now);
+      if (result === 'missing') return json({ error: `Automation notification not found: ${notificationId}` }, { status: 404 });
+      return json(buildPayload(services.mindRoot, now), { headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    if (action === 'resolve-approval') {
+      const approvalId = safeId(body.approvalId);
+      const decision = body.decision === 'allow' || body.decision === 'deny' ? body.decision : null;
+      if (!approvalId || !decision) return json({ error: 'resolve-approval requires approvalId and allow or deny decision.' }, { status: 400 });
+      const result = resolveStudioAutomationApproval(services.mindRoot, approvalId, decision, now);
+      if (result.kind === 'missing') return json({ error: `Automation approval not found: ${approvalId}` }, { status: 404 });
+      if (result.kind === 'job-missing') return json({ error: 'The automation for this approval no longer exists.' }, { status: 409 });
+      if (result.kind === 'conflict') return json({ error: 'This approval was already resolved or consumed with a different decision.' }, { status: 409 });
+      return json(buildPayload(services.mindRoot, now), { headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    if (action === 'create') {
+      const parsed = parseDraft(body.draft ?? body);
+      if ('error' in parsed) return json({ error: parsed.error }, { status: 400 });
+      const job = mutateStudioAutomationState(services.mindRoot, (state) => {
+        const created = createJob(parsed.value, state.automations, now);
+        state.automations = [created, ...state.automations.filter((item) => item.id !== created.id)];
+        state.updatedAt = now.toISOString();
+        return created;
+      });
+      syncControlPlaneSchedule(services.mindRoot, job, now);
+      return json(buildPayload(services.mindRoot, now), { status: 201, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    const id = safeId(body.id);
+    if (!id) return json({ error: `${action || 'mutation'} requires id.` }, { status: 400 });
+
+    if (action === 'update') {
+      const parsed = parseDraft(body.draft ?? body);
+      if ('error' in parsed) return json({ error: parsed.error }, { status: 400 });
+      const updated = mutateStudioAutomationState(services.mindRoot, (state) => {
+        const index = state.automations.findIndex((job) => job.id === id);
+        if (index < 0) return null;
+        const current = state.automations[index]!;
+        const next = updateJob(current, parsed.value, now);
+        state.automations[index] = next;
+        state.updatedAt = now.toISOString();
+        return next;
+      });
+      if (!updated) return json({ error: `Automation not found: ${id}` }, { status: 404 });
+      syncControlPlaneSchedule(services.mindRoot, updated, now);
+      return json(buildPayload(services.mindRoot, now), { headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    if (action === 'set-status') {
+      const status = body.status === 'active' || body.status === 'paused' ? body.status : null;
+      if (!status) return json({ error: 'set-status requires active or paused status.' }, { status: 400 });
+      const updated = mutateStudioAutomationState(services.mindRoot, (state) => {
+        const job = state.automations.find((item) => item.id === id);
+        if (!job) return null;
+        job.status = status;
+        job.updatedAt = now.toISOString();
+        delete job.retryAttempt;
+        if (status === 'paused') {
+          delete job.nextRunAt;
+        } else {
+          const nextRunAt = nextAutomationRunAt(job.schedule, now, job.timezone);
+          if (nextRunAt) job.nextRunAt = nextRunAt;
+          else delete job.nextRunAt;
+        }
+        state.updatedAt = now.toISOString();
+        return { ...job };
+      });
+      if (!updated) return json({ error: `Automation not found: ${id}` }, { status: 404 });
+      syncControlPlaneSchedule(services.mindRoot, updated, now);
+      return json(buildPayload(services.mindRoot, now), { headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    if (action === 'run-now') {
+      const updated = mutateStudioAutomationState(services.mindRoot, (state) => {
+        const job = state.automations.find((item) => item.id === id);
+        if (!job) return { kind: 'missing' as const };
+        if (job.status !== 'active') return { kind: 'paused' as const };
+        if (job.lease) return { kind: 'running' as const };
+        job.nextRunAt = now.toISOString();
+        job.retryAttempt = 1;
+        job.updatedAt = now.toISOString();
+        state.updatedAt = now.toISOString();
+        return { kind: 'updated' as const, job: { ...job } };
+      });
+      if (updated.kind === 'missing') return json({ error: `Automation not found: ${id}` }, { status: 404 });
+      if (updated.kind === 'paused') return json({ error: 'Paused automations cannot run. Resume it first.' }, { status: 409 });
+      if (updated.kind === 'running') return json({ error: 'Automation is already running.' }, { status: 409 });
+      syncControlPlaneSchedule(services.mindRoot, updated.job, now);
+      return json(buildPayload(services.mindRoot, now), { status: 202, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    if (action === 'delete') {
+      const removed = mutateStudioAutomationState(services.mindRoot, (state) => {
+        const job = state.automations.find((item) => item.id === id);
+        if (!job) return null;
+        if (job.lease) return { running: true as const, job };
+        settleDeletedAutomationWork(state, id, now);
+        state.automations = state.automations.filter((item) => item.id !== id);
+        state.updatedAt = now.toISOString();
+        return { running: false as const, job };
+      });
+      if (!removed) return json({ error: `Automation not found: ${id}` }, { status: 404 });
+      if (removed.running) return json({ error: 'Running automations cannot be deleted.' }, { status: 409 });
+      archiveControlPlaneSchedule(services.mindRoot, removed.job, now);
+      return json(buildPayload(services.mindRoot, now), { headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    return json({ error: `Unsupported studio automation action: ${action || '(missing)'}` }, { status: 400 });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function settleDeletedAutomationWork(
+  state: ReturnType<typeof readStudioAutomationState>,
+  jobId: string,
+  now: Date,
+): void {
+  const timestamp = now.toISOString();
+  for (const event of state.events) {
+    for (const delivery of event.deliveries) {
+      if (delivery.jobId !== jobId || (delivery.status !== 'pending' && delivery.status !== 'waiting_approval')) continue;
+      delivery.status = 'superseded';
+      delivery.reason = 'Automation was deleted before this event delivery ran.';
+      delivery.updatedAt = timestamp;
+      delivery.finishedAt = timestamp;
+      delete delivery.nextAttemptAt;
+      delete delivery.ownerId;
+      delete delivery.leaseExpiresAt;
+    }
+  }
+  for (const approval of state.approvals) {
+    if (approval.jobId !== jobId || approval.status !== 'pending') continue;
+    approval.status = 'denied';
+    approval.decision = 'deny';
+    approval.resolvedAt = timestamp;
+  }
+  for (const notification of state.notifications) {
+    if (notification.jobId === jobId && notification.kind === 'approval_required' && !notification.readAt) {
+      notification.readAt = timestamp;
+    }
+  }
+}
+
+function buildPayload(mindRoot: string, now: Date): StudioAutomationPayload {
+  const state = readStudioAutomationState(mindRoot);
+  const controlPlane = readRuntimeControlPlane(mindRoot);
+  const automations = state.automations.map((job) => ({
+    id: job.id,
+    title: job.title,
+    prompt: job.prompt,
+    scope: job.scope,
+    ...(job.projectId ? { projectId: job.projectId } : {}),
+    schedule: job.schedule,
+    trigger: job.trigger ?? (job.schedule === 'manual'
+      ? { type: 'manual' as const }
+      : { type: 'schedule' as const, schedule: job.schedule, timezone: job.timezone }),
+    timezone: job.timezone,
+    model: job.model,
+    effort: job.effort,
+    permissionMode: job.permissionMode,
+    status: job.status,
+    retry: job.retry,
+    timeoutMs: job.timeoutMs,
+    updated: job.updatedAt,
+    ...(job.lastRun ? { lastRun: job.lastRun } : {}),
+    nextRun: job.status === 'paused' ? 'Paused' : job.lease ? 'Running' : job.nextRunAt ?? (job.schedule === 'manual' ? 'Manual' : undefined),
+    runCount: job.runCount,
+    lastStatus: job.lease ? 'running' as const : job.lastStatus,
+    ...(job.lastError ? { lastError: job.lastError } : {}),
+    recentRuns: job.history.slice(0, 10),
+    runtime: job.runtime,
+    source: job.source,
+    controlPlaneScheduleId: job.controlPlaneScheduleId,
+  }));
+  return {
+    schemaVersion: 1,
+    generatedAt: now.toISOString(),
+    automations,
+    approvals: state.approvals.map((approval) => structuredClone(approval)),
+    notifications: state.notifications.map((notification) => structuredClone(notification)),
+    worker: readStudioAutomationWorkerHeartbeat(mindRoot),
+    summary: {
+      total: automations.length,
+      enabled: automations.filter((job) => job.status === 'active').length,
+      paused: automations.filter((job) => job.status === 'paused').length,
+      running: automations.filter((job) => job.lastStatus === 'running').length,
+      failed: automations.filter((job) => job.lastStatus === 'error' || job.lastStatus === 'timed_out' || job.lastStatus === 'interrupted').length,
+      externalSchedulePromptJobs: state.migration.externalSchedulePromptJobs,
+      migratedLegacyJobs: state.migration.importedCount,
+      ...(state.migration.warning ? { migrationWarning: state.migration.warning } : {}),
+      scheduleStorePath: path.join(mindRoot, '.mindos/automations/state.json'),
+      controlPlaneScheduleCount: controlPlane.summary.scheduleCount,
+      pendingApprovals: state.approvals.filter((approval) => approval.status === 'pending').length,
+      unreadNotifications: state.notifications.filter((notification) => !notification.readAt).length,
+      queuedEventDeliveries: state.events.flatMap((event) => event.deliveries).filter((delivery) => delivery.status === 'pending' || delivery.status === 'claimed' || delivery.status === 'waiting_approval').length,
+      recentEventCount: state.events.length,
+    },
+  };
+}
+
+function createJob(draft: StudioAutomationDraft, existing: StudioAutomationJob[], now: Date): StudioAutomationJob {
+  const id = nextId(draft.title || titleFromPrompt(draft.prompt), existing.map((job) => job.id));
+  const nextRunAt = draft.trigger?.type === 'event' ? undefined : nextAutomationRunAt(draft.schedule, now, draft.timezone);
+  return {
+    id,
+    title: draft.title || titleFromPrompt(draft.prompt),
+    prompt: draft.prompt,
+    scope: draft.scope,
+    ...(draft.projectId ? { projectId: draft.projectId } : {}),
+    schedule: draft.schedule,
+    trigger: draft.trigger ?? (draft.schedule === 'manual'
+      ? { type: 'manual' }
+      : { type: 'schedule', schedule: draft.schedule, timezone: draft.timezone }),
+    timezone: draft.timezone,
+    model: draft.model,
+    runtime: runtimeForModel(draft.model),
+    effort: draft.effort,
+    permissionMode: draft.permissionMode,
+    status: 'active',
+    retry: draft.retry,
+    timeoutMs: draft.timeoutMs,
+    overlap: 'skip',
+    source: 'mindos-durable',
+    controlPlaneScheduleId: `studio-automation-${id.replace(/^studio-/, '')}`,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    ...(nextRunAt ? { nextRunAt } : {}),
+    runCount: 0,
+    lastStatus: 'pending',
+    history: [],
+  };
+}
+
+function updateJob(current: StudioAutomationJob, draft: StudioAutomationDraft, now: Date): StudioAutomationJob {
+  const nextRunAt = current.status === 'active' && draft.trigger?.type !== 'event'
+    ? nextAutomationRunAt(draft.schedule, now, draft.timezone)
+    : undefined;
+  return {
+    ...current,
+    title: draft.title || titleFromPrompt(draft.prompt),
+    prompt: draft.prompt,
+    scope: draft.scope,
+    ...(draft.projectId ? { projectId: draft.projectId } : { projectId: undefined }),
+    schedule: draft.schedule,
+    trigger: draft.trigger ?? (draft.schedule === 'manual'
+      ? { type: 'manual' }
+      : { type: 'schedule', schedule: draft.schedule, timezone: draft.timezone }),
+    timezone: draft.timezone,
+    model: draft.model,
+    runtime: runtimeForModel(draft.model),
+    effort: draft.effort,
+    permissionMode: draft.permissionMode,
+    retry: draft.retry,
+    timeoutMs: draft.timeoutMs,
+    updatedAt: now.toISOString(),
+    ...(nextRunAt ? { nextRunAt } : { nextRunAt: undefined }),
+    retryAttempt: undefined,
+    lastError: current.lastStatus === 'error' ? undefined : current.lastError,
+  };
+}
+
+function parseDraft(value: unknown): { value: StudioAutomationDraft } | { error: string } {
+  if (!isRecord(value)) return { error: 'Automation draft must be an object.' };
+  const prompt = text(value.prompt, 4_000);
+  if (!prompt) return { error: 'Automation prompt is required.' };
+  const title = text(value.title, 160) ?? '';
+  if (value.scope !== undefined && value.scope !== 'project' && value.scope !== 'mind' && value.scope !== 'worktree') {
+    return { error: 'Automation scope is invalid.' };
+  }
+  const scope = value.scope === 'project' || value.scope === 'mind' ? value.scope : 'worktree';
+  if (value.schedule !== undefined && (
+    typeof value.schedule !== 'string' || !STUDIO_AUTOMATION_SCHEDULES.includes(value.schedule as never)
+  )) {
+    return { error: 'Automation schedule is invalid.' };
+  }
+  let schedule = typeof value.schedule === 'string'
+    ? value.schedule as StudioAutomationDraft['schedule']
+    : isRecord(value.trigger) && value.trigger.type === 'event' ? 'manual' : 'daily-0900';
+  if (value.model !== undefined && value.model !== 'mindos-auto' && value.model !== 'gpt-5.5'
+    && value.model !== 'codex' && value.model !== 'claude-code' && value.model !== 'local-agent') {
+    return { error: 'Automation model is invalid.' };
+  }
+  const model: StudioAutomationDraft['model'] = value.model === 'gpt-5.5' || value.model === 'claude-code' || value.model === 'codex'
+    ? value.model
+    : value.model === 'local-agent'
+      ? 'codex'
+      : 'mindos-auto';
+  if (value.effort !== undefined && value.effort !== 'normal' && value.effort !== 'high' && value.effort !== 'extra-high') {
+    return { error: 'Automation effort is invalid.' };
+  }
+  const effort = value.effort === 'normal' || value.effort === 'extra-high' ? value.effort : 'high';
+  const permissionMode = value.permissionMode === undefined || value.permissionMode === 'read'
+    ? 'read'
+    : value.permissionMode === 'ask'
+      ? 'ask'
+      : value.permissionMode === 'auto'
+        ? 'auto'
+        : null;
+  if (!permissionMode) return { error: 'Automations only support read, ask, or explicit auto permission.' };
+  if (permissionMode === 'ask' && runtimeForModel(model) === 'mindos-pi') {
+    return { error: 'Ask permission is supported by Codex or Claude Code automations; MindOS Pi requires read or explicit auto.' };
+  }
+  const timezone = text(value.timezone, 100) ?? DEFAULT_AUTOMATION_TIMEZONE;
+  try { assertValidTimezone(timezone); } catch (error) { return { error: error instanceof Error ? error.message : String(error) }; }
+  const trigger = parseAutomationTrigger(value.trigger, schedule, timezone);
+  if ('error' in trigger) return trigger;
+  if (trigger.value.type === 'event') schedule = 'manual';
+  return {
+    value: {
+      title,
+      prompt,
+      scope,
+      ...(text(value.projectId, 120) ? { projectId: text(value.projectId, 120) } : {}),
+      schedule,
+      timezone,
+      model,
+      effort,
+      permissionMode,
+      retry: value.retry === 'never' ? 'never' : 'once',
+      timeoutMs: clampNumber(value.timeoutMs, 1_000, 3_600_000, 600_000),
+      trigger: trigger.value,
+    },
+  };
+}
+
+function parseAutomationTrigger(
+  value: unknown,
+  schedule: StudioAutomationDraft['schedule'],
+  timezone: string,
+): { value: StudioAutomationTrigger } | { error: string } {
+  if (value === undefined) {
+    return {
+      value: schedule === 'manual'
+        ? { type: 'manual' }
+        : { type: 'schedule', schedule, timezone },
+    };
+  }
+  if (!isRecord(value)) return { error: 'Automation trigger must be an object.' };
+  if (value.type === 'manual') return { value: { type: 'manual' } };
+  if (value.type === 'schedule') return { value: { type: 'schedule', schedule, timezone } };
+  if (value.type !== 'event') return { error: 'Automation trigger type must be manual, schedule, or event.' };
+  const sources = eventPatterns(value.sources);
+  const events = eventPatterns(value.events);
+  if (sources.length === 0 || events.length === 0) {
+    return { error: 'Event triggers require at least one valid source and event type.' };
+  }
+  if (value.debounceMs !== undefined && (typeof value.debounceMs !== 'number' || !Number.isFinite(value.debounceMs) || value.debounceMs < 0)) {
+    return { error: 'Event trigger debounceMs must be a non-negative number.' };
+  }
+  const storm = isRecord(value.storm) ? value.storm : {};
+  if (storm.maxEvents !== undefined && (typeof storm.maxEvents !== 'number' || !Number.isFinite(storm.maxEvents) || storm.maxEvents < 1)) {
+    return { error: 'Event trigger storm.maxEvents must be a positive number.' };
+  }
+  if (storm.windowMs !== undefined && (typeof storm.windowMs !== 'number' || !Number.isFinite(storm.windowMs) || storm.windowMs < 1_000)) {
+    return { error: 'Event trigger storm.windowMs must be at least 1000ms.' };
+  }
+  const where = parseEventMetadataFilter(value.where);
+  if ('error' in where) return where;
+  return {
+    value: {
+      type: 'event',
+      sources,
+      events,
+      ...(where.value ? { where: where.value } : {}),
+      debounceMs: clampNumber(value.debounceMs, 0, 60 * 60_000, 0),
+      storm: {
+        windowMs: clampNumber(storm.windowMs, 1_000, 60 * 60_000, 60_000),
+        maxEvents: clampNumber(storm.maxEvents, 1, 10_000, 100),
+      },
+    },
+  };
+}
+
+function parseEventMetadataFilter(
+  value: unknown,
+): { value?: Record<string, string | number | boolean> } | { error: string } {
+  if (value === undefined) return {};
+  if (!isRecord(value)) return { error: 'Event trigger where must be a JSON object.' };
+  const entries = Object.entries(value);
+  if (entries.length > 20) return { error: 'Event trigger where supports at most 20 fields.' };
+  const filter: Record<string, string | number | boolean> = {};
+  for (const [key, item] of entries) {
+    const segments = key.split('.');
+    const safeKey = segments.length <= 4 && segments.every((segment) => (
+      /^[A-Za-z0-9][A-Za-z0-9_:-]{0,79}$/.test(segment)
+      && segment !== '__proto__'
+      && segment !== 'constructor'
+      && segment !== 'prototype'
+    ));
+    if (!safeKey) return { error: `Event trigger where field is invalid: ${key || '(empty)'}.` };
+    if (
+      typeof item !== 'boolean'
+      && !(typeof item === 'number' && Number.isFinite(item))
+      && !(typeof item === 'string' && item.length <= 500)
+    ) {
+      return { error: `Event trigger where.${key} must be a string, finite number, or boolean.` };
+    }
+    filter[key] = item;
+  }
+  return entries.length > 0 ? { value: filter } : {};
+}
+
+function eventPatterns(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.flatMap((item) => {
+    if (item === '*') return ['*'];
+    const normalized = text(item, 160);
+    return normalized && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(normalized) ? [normalized] : [];
+  }))].slice(0, 100);
+}
+
+function syncAllControlPlaneSchedules(mindRoot: string, now: Date): void {
+  for (const job of readStudioAutomationState(mindRoot).automations) syncControlPlaneSchedule(mindRoot, job, now);
+}
+
+export function syncControlPlaneSchedule(mindRoot: string, job: StudioAutomationJob, now: Date): void {
+  const existing = readRuntimeControlPlane(mindRoot).schedules.some((schedule) => schedule.id === job.controlPlaneScheduleId);
+  const schedule = {
+    id: job.controlPlaneScheduleId,
+    title: job.title,
+    runtimeId: job.runtime === 'mindos-pi' ? 'mindos' : job.runtime,
+    status: job.status === 'paused' ? 'paused' : 'enabled',
+    trigger: job.trigger?.type === 'event'
+      ? { type: 'event' as const, event: job.trigger.events.join(',').slice(0, 160) }
+      : automationTrigger(job.schedule, job.timezone),
+    target: {
+      assistantId: job.runtime,
+      command: job.prompt.slice(0, 160),
+      ...(job.projectId ? { cwdHint: job.projectId } : {}),
+    },
+    policy: {
+      permissionMode: job.permissionMode,
+      overlap: job.overlap,
+      retry: job.retry,
+      timeoutMs: job.timeoutMs,
+    },
+    inputSummary: job.prompt.slice(0, 1_000),
+    nextRunAt: job.nextRunAt ?? null,
+    ...(job.history[0] ? { lastRunId: job.history[0].id } : {}),
+  };
+  applyRuntimeControlPlaneMutation(mindRoot, existing
+    ? { action: 'update-schedule', scheduleId: job.controlPlaneScheduleId, patch: schedule }
+    : { action: 'create-schedule', schedule }, now);
+}
+
+function runtimeForModel(model: StudioAutomationDraft['model']): StudioAutomationJob['runtime'] {
+  if (model === 'codex') return 'codex';
+  if (model === 'claude-code') return 'claude';
+  return 'mindos-pi';
+}
+
+function archiveControlPlaneSchedule(mindRoot: string, job: StudioAutomationJob, now: Date): void {
+  if (!readRuntimeControlPlane(mindRoot).schedules.some((schedule) => schedule.id === job.controlPlaneScheduleId)) return;
+  applyRuntimeControlPlaneMutation(mindRoot, {
+    action: 'update-schedule',
+    scheduleId: job.controlPlaneScheduleId,
+    patch: { status: 'archived' },
+  }, now);
+}
+
+function nextId(title: string, existingIds: string[]): string {
+  const base = `studio-${slugify(title)}`;
+  if (!existingIds.includes(base)) return base;
+  for (let index = 2; index < 1_000; index += 1) {
+    if (!existingIds.includes(`${base}-${index}`)) return `${base}-${index}`;
+  }
+  return `${base}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function slugify(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'automation';
+}
+
+function titleFromPrompt(prompt: string): string {
+  return prompt.replace(/\s+/g, ' ').trim().slice(0, 56) || 'Untitled automation';
+}
+
+function safeId(value: unknown): string | undefined {
+  const id = text(value, 120);
+  return id && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(id) ? id : undefined;
+}
+
+function text(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.slice(0, max) : undefined;
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, Math.floor(value))) : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}

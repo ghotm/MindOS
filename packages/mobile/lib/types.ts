@@ -285,6 +285,28 @@ export interface AgentRuntimesResponse {
 export interface AgentRunsResponse {
   runs: AgentRunTimelineRecord[];
   events: AgentRunTimelineEvent[];
+  observatory?: {
+    traces: Array<{
+      id: string;
+      rootRunId?: string;
+      capsule?: AgentRunCapsuleProjection;
+    }>;
+  };
+}
+
+export type AgentRunCapsuleRecoveryAction = 'retry' | 'fork' | 'resume' | 'rollback';
+
+export interface AgentRunCapsuleRecoveryCapability {
+  supported: boolean;
+  mode?: 'from-start' | 'new-session';
+  sessionId?: string;
+  checkpointArtifactId?: string;
+  reason?: string;
+}
+
+export interface AgentRunCapsuleProjection {
+  id: string;
+  recovery: Record<AgentRunCapsuleRecoveryAction, AgentRunCapsuleRecoveryCapability>;
 }
 
 export interface RuntimePermissionOption {
@@ -320,6 +342,76 @@ export interface RuntimePermissionState extends RuntimePermissionRequest {
   decisionLabel?: string;
   decisionIntent?: 'allow' | 'deny' | 'cancel';
   decisionScope?: 'once' | 'session' | 'always' | 'turn';
+}
+
+export interface PendingRuntimePermission extends Omit<RuntimePermissionRequest, 'type'> {
+  kind: 'runtime-permission';
+  action: string;
+  risk: {
+    level: 'low' | 'medium' | 'high';
+    summary: string;
+    reasons?: string[];
+  };
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface AskUserQuestionOption {
+  label: string;
+  description: string;
+  preview?: string;
+}
+
+export interface AskUserQuestionQuestion {
+  question: string;
+  header: string;
+  options: AskUserQuestionOption[];
+  multiSelect?: boolean;
+}
+
+export interface AskUserQuestionAnswer {
+  questionIndex: number;
+  question: string;
+  kind: 'option' | 'custom' | 'chat' | 'multi';
+  answer: string | null;
+  selected?: string[];
+  notes?: string;
+  preview?: string;
+}
+
+export interface PendingAskUserQuestion {
+  kind: 'user-question';
+  runId: string;
+  toolCallId: string;
+  questions: AskUserQuestionQuestion[];
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface PendingAutomationApproval {
+  kind: 'automation-approval';
+  approvalId: string;
+  jobId: string;
+  runId?: string;
+  jobTitle: string;
+  runtime: 'codex' | 'claude';
+  toolName: string;
+  action?: string;
+  resource?: string;
+  inputPreview?: string;
+  risk?: {
+    level: 'low' | 'medium' | 'high';
+    summary: string;
+  };
+  createdAt: number;
+}
+
+export interface PendingAgentActionsResponse {
+  permissions: PendingRuntimePermission[];
+  questions: PendingAskUserQuestion[];
+  automationApprovals: PendingAutomationApproval[];
+  pendingCount: number;
+  generatedAt: number;
 }
 
 export interface ChatSession {
