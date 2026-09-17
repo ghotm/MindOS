@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import { execFileSync, execSync } from 'child_process';
-import { detectAgentPresence, MCP_AGENTS } from '@/lib/mcp-agents';
+import { detectAgentPresence, MCP_AGENTS, resetAgentPresenceCache } from '@/lib/mcp-agents';
 
 // Partial mock: lib/mcp-agents now imports @geminilight/mindos/server, whose
 // module graph needs the real execFile — only the lookup helpers are stubbed.
@@ -30,6 +30,7 @@ describe('detectAgentPresence', () => {
   }
 
   beforeEach(() => {
+    resetAgentPresenceCache();
     existsSyncSpy = vi.spyOn(fs, 'existsSync');
     statSyncSpy = vi.spyOn(fs, 'statSync');
     readdirSyncSpy = vi.spyOn(fs, 'readdirSync');
@@ -41,6 +42,9 @@ describe('detectAgentPresence', () => {
     statSyncSpy.mockReset();
     readdirSyncSpy.mockReset();
     readFileSyncSpy.mockReset();
+    // Since Vitest 3 mockReset() restores the real implementation, so a reset spy would
+    // consult the developer machine's ~/.claude etc. Default to "absent" explicitly.
+    existsSyncSpy.mockReturnValue(false);
     statSyncSpy.mockImplementation(() => { throw new Error('stat path not mocked'); });
     readdirSyncSpy.mockImplementation(() => { throw new Error('readdir path not mocked'); });
     readFileSyncSpy.mockImplementation(() => { throw new Error('read file not mocked'); });
@@ -229,5 +233,18 @@ describe('detectAgentPresence', () => {
       const hasDirs = Array.isArray(agent.presenceDirs) && agent.presenceDirs.length > 0;
       expect(hasCli || hasDirs, `${key} missing presenceCli and presenceDirs`).toBe(true);
     }
+  });
+
+  it('memoises presence lookups so repeated calls do not respawn which', () => {
+    mockExecFileSync.mockImplementation(() => Buffer.from('/usr/local/bin/claude\n'));
+    expect(detectAgentPresence('claude-code')).toBe(true);
+    const callsAfterFirst = mockExecFileSync.mock.calls.length;
+    expect(callsAfterFirst).toBeGreaterThan(0);
+    expect(detectAgentPresence('claude-code')).toBe(true);
+    expect(mockExecFileSync.mock.calls.length).toBe(callsAfterFirst);
+
+    resetAgentPresenceCache();
+    mockExecFileSync.mockImplementation(() => { throw new Error('not found'); });
+    expect(detectAgentPresence('claude-code')).toBe(false);
   });
 });

@@ -18,6 +18,26 @@ const IS_WIN = process.platform === 'win32';
 const execFileAsync = promisify(execFile);
 const CHILD_PROCESS_TERM_TIMEOUT_MS = 5000;
 const PID_TERM_TIMEOUT_MS = 1500;
+/** After SIGKILL, how long to wait for the kernel to report the child's exit before giving up. */
+const FORCE_KILL_CONFIRM_TIMEOUT_MS = 1500;
+
+/**
+ * Env vars that tell the MCP server (and any future child) it was launched by a
+ * daemon supervisor. The MCP server disables its stdin parent-death watchdog when
+ * either is set, so a Desktop started via systemd/GNOME autostart or launchd would
+ * inherit them and leave an orphaned MCP behind when Desktop dies.
+ */
+const DAEMON_SUPERVISOR_ENV_KEYS = ['INVOCATION_ID', 'LAUNCHED_BY_LAUNCHD'] as const;
+
+export function sanitizeChildEnv(base: Record<string, string | undefined>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (value === undefined) continue;
+    if ((DAEMON_SUPERVISOR_ENV_KEYS as readonly string[]).includes(key)) continue;
+    env[key] = value;
+  }
+  return env;
+}
 
 export function isMindosOwnedCommandLine(commandLine: string): boolean {
   const normalized = commandLine.replace(/\\/g, '/').toLowerCase();
@@ -47,24 +67,40 @@ function forceKillChildProcess(proc: ChildProcess): void {
   } catch { /* already dead */ }
 }
 
-function terminateChildProcess(proc: ChildProcess | null, timeoutMs = CHILD_PROCESS_TERM_TIMEOUT_MS): Promise<void> {
+/**
+ * SIGTERM → wait → SIGKILL → wait (bounded) for the exit event.
+ * Resolves `true` when the child confirmed exit, `false` when it may still be
+ * alive after force-kill (caller must keep its PID on record for the next boot).
+ */
+function terminateChildProcess(
+  proc: ChildProcess | null,
+  timeoutMs = CHILD_PROCESS_TERM_TIMEOUT_MS,
+  forceKillConfirmMs = FORCE_KILL_CONFIRM_TIMEOUT_MS,
+): Promise<boolean> {
   return new Promise((resolve) => {
-    if (!proc || proc.killed) { resolve(); return; }
+    if (!proc || proc.killed) { resolve(true); return; }
+    // Already exited (e.g. crashed before stop()): kill() is a no-op and 'exit'
+    // will never fire again, so waiting would only produce a false "unclean" verdict.
+    if (typeof proc.exitCode === 'number' || typeof proc.signalCode === 'string') { resolve(true); return; }
 
     let resolved = false;
-    const done = () => {
+    let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+    const done = (confirmed: boolean) => {
       if (resolved) return;
       resolved = true;
       clearTimeout(forceKillTimer);
-      resolve();
+      if (confirmTimer) clearTimeout(confirmTimer);
+      resolve(confirmed);
     };
 
     const forceKillTimer = setTimeout(() => {
       forceKillChildProcess(proc);
-      done();
+      // Resolving here without the exit event let stop() clear the PID file for a
+      // child that was still alive; give the kernel a moment to report the exit.
+      confirmTimer = setTimeout(() => done(false), forceKillConfirmMs);
     }, timeoutMs);
 
-    proc.once('exit', done);
+    proc.once('exit', () => done(true));
 
     try {
       if (IS_WIN && proc.pid) {
@@ -79,7 +115,7 @@ function terminateChildProcess(proc: ChildProcess | null, timeoutMs = CHILD_PROC
       }
       proc.kill('SIGTERM');
     } catch {
-      done();
+      done(true);
     }
   });
 }
@@ -260,8 +296,13 @@ export class ProcessManager extends EventEmitter {
     }
   }
 
-  /** Graceful shutdown: SIGTERM → 5s timeout → force kill */
-  async stop(): Promise<void> {
+  /**
+   * Graceful shutdown: SIGTERM → 5s timeout → force kill → bounded wait for exit.
+   * Resolves `true` when every managed child confirmed exit. Resolves `false` when
+   * a child may still be alive; its PID stays in desktop-children.pid so the next
+   * boot's heal path can finish the job (callers must not record a clean exit).
+   */
+  async stop(opts: { termTimeoutMs?: number; forceKillConfirmMs?: number } = {}): Promise<boolean> {
     this.stopped = true;
     this.emit('status-change', 'stopping');
 
@@ -274,16 +315,27 @@ export class ProcessManager extends EventEmitter {
     for (const t of this.respawnTimers) clearTimeout(t);
     this.respawnTimers = [];
 
-    await Promise.all([
-      terminateChildProcess(this.webProcess),
-      // Don't kill external MCP (owned by CLI)
-      this.externalMcp ? Promise.resolve() : terminateChildProcess(this.mcpProcess),
+    const webProc = this.webProcess;
+    const mcpProc = this.externalMcp ? null : this.mcpProcess; // Don't kill external MCP (owned by CLI)
+    const [webExited, mcpExited] = await Promise.all([
+      terminateChildProcess(webProc, opts.termTimeoutMs, opts.forceKillConfirmMs),
+      terminateChildProcess(mcpProc, opts.termTimeoutMs, opts.forceKillConfirmMs),
     ]);
+
+    const survivors: number[] = [];
+    if (!webExited && webProc?.pid) survivors.push(webProc.pid);
+    if (!mcpExited && mcpProc?.pid) survivors.push(mcpProc.pid);
 
     this.webProcess = null;
     this.mcpProcess = null;
-    this.clearChildPids();
+    if (survivors.length === 0) {
+      this.clearChildPids();
+    } else {
+      console.warn(`[MindOS:ProcessManager] child process(es) did not confirm exit after force-kill: ${survivors.join(', ')} — keeping PID file for next-boot cleanup`);
+      this.writePidList(survivors);
+    }
     this.emit('status-change', 'stopped');
+    return survivors.length === 0;
   }
 
   /** Restart services */
@@ -313,6 +365,86 @@ export class ProcessManager extends EventEmitter {
     this.crashCount.mcp = 0;
   }
 
+  /** Where the Web server's /api/mcp/restart leaves its managed-restart marker (also passed as `MINDOS_MCP_RESTART_INTENT`). */
+  static mcpRestartIntentFile(): string {
+    return path.join(getDesktopConfigDir(), 'mcp-restart.intent');
+  }
+
+  /**
+   * Read and delete the managed-restart marker. True only for a fresh
+   * (< 60s) intent naming our MCP port; anything stale, foreign or unparsable
+   * is removed and reported as "no intent" so the exit counts as a crash.
+   */
+  private consumeMcpRestartIntent(): boolean {
+    const file = ProcessManager.mcpRestartIntentFile();
+    let raw: string;
+    try {
+      if (!existsSync(file)) return false;
+      raw = readFileSync(file, 'utf-8');
+    } catch {
+      return false;
+    }
+    try { unlinkSync(file); } catch { /* best effort */ }
+    try {
+      const intent = JSON.parse(raw) as { port?: unknown; requestedAt?: unknown };
+      const requestedAt = typeof intent.requestedAt === 'string' ? Date.parse(intent.requestedAt) : Number.NaN;
+      if (!Number.isFinite(requestedAt) || Date.now() - requestedAt > ProcessManager.MCP_RESTART_INTENT_MAX_AGE_MS) return false;
+      return Number(intent.port) === this.opts.mcpPort;
+    } catch {
+      return false;
+    }
+  }
+
+  private static readonly MCP_RESTART_INTENT_MAX_AGE_MS = 60_000;
+  private static readonly MANAGED_RESTART_DELAY_MS = 500;
+
+  /** Respawn the MCP on its own port after a managed restart; the port is never switched. */
+  private respawnMcpAfterManagedRestart(): void {
+    const port = this.opts.mcpPort;
+    const timer = setTimeout(async () => {
+      if (this.stopped) return;
+      try {
+        const portFree = await this.waitForMcpPortFree(port, 5000);
+        if (this.stopped) return;
+        if (!portFree) {
+          if (await this.checkMcpHealth(port)) {
+            console.info(`[MindOS] External MCP now available on port ${port} — reusing`);
+            this.externalMcp = true;
+            this.mcpProcess = null;
+            return;
+          }
+          console.error(`[MindOS:mcp] port ${port} still occupied after managed restart, cannot respawn`);
+          this.emit('mcp-port-blocked', port);
+          return;
+        }
+        const proc = this.spawnMcp();
+        this.mcpProcess = proc;
+        this.externalMcp = false;
+        this.guardSpawnError(proc, 'mcp');
+        this.setupCrashHandler(proc, 'mcp');
+        this.writeChildPids();
+        console.info(`[MindOS:mcp] respawned after managed restart on port ${port}`);
+      } catch (err) {
+        console.error('[MindOS:mcp] managed restart respawn failed:', err);
+      }
+    }, ProcessManager.MANAGED_RESTART_DELAY_MS);
+    this.respawnTimers.push(timer);
+  }
+
+  /** Poll until `port` accepts a bind or `timeoutMs` passes; never falls back to another port. */
+  private async waitForMcpPortFree(port: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.stopped) return false;
+      try {
+        await this.findFreePort(port).then((free) => { if (free !== port) throw new Error('occupied'); });
+        return true;
+      } catch { /* still occupied */ }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return false;
+  }
+
   // ── Private ──
 
   private spawnMcp(): ChildProcess {
@@ -336,14 +468,15 @@ export class ProcessManager extends EventEmitter {
       } catch { /* no config */ }
     }
 
+    const baseEnv = sanitizeChildEnv(this.opts.env || process.env);
     const env: Record<string, string> = {
-      ...(this.opts.env || process.env as Record<string, string>),
+      ...baseEnv,
       MCP_TRANSPORT: 'http', // Desktop always uses HTTP transport (not stdio). MCP clients must use http://127.0.0.1:<port>/mcp
       MCP_PORT: String(mcpPort),
       // Loopback by default: AUTH_TOKEN is optional, so binding all interfaces
       // exposed an unauthenticated MCP API to the LAN. MINDOS_MCP_HOST is the
       // explicit opt-in for non-loopback setups.
-      MCP_HOST: (this.opts.env || process.env as Record<string, string>).MINDOS_MCP_HOST || '127.0.0.1',
+      MCP_HOST: baseEnv.MINDOS_MCP_HOST || '127.0.0.1',
       MINDOS_URL: `http://127.0.0.1:${webPort}`,
       ...(token ? { AUTH_TOKEN: token } : {}),
       ...(verbose ? { MCP_VERBOSE: '1' } : {}),
@@ -370,7 +503,7 @@ export class ProcessManager extends EventEmitter {
     }
 
     const env: Record<string, string> = {
-      ...(this.opts.env || process.env as Record<string, string>),
+      ...sanitizeChildEnv(this.opts.env || process.env),
       MINDOS_WEB_PORT: String(webPort),
       MINDOS_MCP_PORT: String(this.opts.mcpPort),
       MIND_ROOT: mindRoot,
@@ -378,6 +511,9 @@ export class ProcessManager extends EventEmitter {
       MINDOS_PROJECT_ROOT: projectRoot,
       MINDOS_CLI_PATH: resolveCliPath(projectRoot),
       MINDOS_MANAGED: '1',
+      // /api/mcp/restart drops a marker here before killing the MCP so the
+      // exit below is respawned as a restart instead of counted as a crash.
+      MINDOS_MCP_RESTART_INTENT: ProcessManager.mcpRestartIntentFile(),
     };
     if (authToken) env.AUTH_TOKEN = authToken;
     if (webPassword) env.WEB_PASSWORD = webPassword;
@@ -591,6 +727,16 @@ export class ProcessManager extends EventEmitter {
       if (which === 'web') this.webProcessDied = true;
       if (this.stopped) return;
 
+      // /api/mcp/restart (managed mode) leaves an intent file, then kills the
+      // MCP by port. That exit is a restart we own: respawn promptly and keep
+      // crashCount untouched so three user-driven restarts never disable respawn.
+      if (which === 'mcp' && this.consumeMcpRestartIntent()) {
+        this.mcpRestartInProgress = false;
+        this.emit('mcp-restart', this.opts.mcpPort);
+        this.respawnMcpAfterManagedRestart();
+        return;
+      }
+
       // /api/mcp/restart kills the old MCP and spawns its own replacement.
       // Don't race with it by also respawning here.
       if (which === 'mcp' && this.mcpRestartInProgress) {
@@ -745,6 +891,10 @@ export class ProcessManager extends EventEmitter {
     if (this.webProcess?.pid) pids.push(this.webProcess.pid);
     if (this.mcpProcess?.pid) pids.push(this.mcpProcess.pid);
     if (pids.length === 0) return;
+    this.writePidList(pids);
+  }
+
+  private writePidList(pids: number[]): void {
     try {
       const pidFile = ProcessManager.childPidFile();
       const dir = path.dirname(pidFile);

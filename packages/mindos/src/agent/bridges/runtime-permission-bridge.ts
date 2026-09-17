@@ -17,11 +17,17 @@ import type {
   MindosRuntimePermissionRisk,
 } from '../runtime/index.js';
 import type { MindOSSSEvent } from '../turn/index.js';
+import {
+  pauseTurnDeadlineForRun,
+  resumeTurnDeadlineForRun,
+} from '../turn/turn-deadline.js';
 import { RUNTIME_PERMISSION_BRIDGE_KEY, getProcessGlobal } from '../global-state.js';
 import {
   redactSensitiveObject,
   redactSensitiveText,
-} from '../redaction.js';
+} from '../../foundation/security/redaction.js';
+import { ensurePendingDecisionTail } from './pending-prompt-changes.js';
+import { finishPendingPrompt, pendingPromptKey, recordPendingPrompt } from './pending-prompt-store.js';
 
 export type RuntimePermissionBridgeContext = {
   runId: string;
@@ -284,6 +290,12 @@ function enqueueRuntimePermission(
       clearTimeout(pending.timeout);
       if (abort) options.signal?.removeEventListener('abort', abort);
       state.pending.delete(key);
+      // The human wait is over: give the turn clock back its budget.
+      resumeTurnDeadlineForRun(context.runId);
+      // Every exit path (decision, timeout, abort, run teardown) closes the
+      // cross-process store row too, so other hosts stop offering the prompt.
+      finishPendingPrompt(pendingPromptKey(pending.snapshot));
+      ensurePendingDecisionTail();
       resolve(result);
     };
 
@@ -333,6 +345,16 @@ function enqueueRuntimePermission(
       emitResolved,
       snapshot,
     });
+
+    // Cross-process visibility (spec-cross-process-run-events): mirror the
+    // open prompt into the shared store so other hosts can list and decide it,
+    // and start draining decisions they submit back into this promise.
+    recordPendingPrompt(snapshot);
+    ensurePendingDecisionTail();
+
+    // A pending human decision must not consume the turn timeout: pause the
+    // run's turn deadline (bounded by its total-pause cap) until finish().
+    pauseTurnDeadlineForRun(context.runId);
 
     abort = () => {
       const result = cancelResult();

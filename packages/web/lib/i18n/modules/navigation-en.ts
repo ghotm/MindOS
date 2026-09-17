@@ -2,6 +2,11 @@
 
 export const navigationEn = {
   sidebar: {
+    openMenu: 'Open menu',
+    closeMenu: 'Close menu',
+    mobileMenuTitle: 'MindOS menu',
+    countUnavailable: 'Count could not be updated',
+    countRetry: 'Retry count',
     files: 'Mind',
     home: 'Home',
     homeAgentSessions: 'Agent Sessions',
@@ -128,6 +133,9 @@ export const navigationEn = {
     emptyHint: 'Type a file name or keyword to begin',
     noResults: 'No matching files',
     noResultsHint: 'Try different keywords',
+    failed: 'Search failed',
+    failedHint: 'Your query is still here. Check the connection and try again.',
+    retry: 'Try again',
     preparing: 'Preparing search...',
     fallbackWarmHint: 'Search will prepare on first query.',
     prompt: 'Type to search across all files',

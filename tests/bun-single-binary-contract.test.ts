@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { builtinModules } from 'node:module';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createRuntimeManifest } from '../scripts/runtime-manifest.mjs';
@@ -20,6 +21,46 @@ describe('Bun single-binary runtime contract', () => {
     expect(spec).toContain('runtime.tar.gz');
     expect(spec).toContain('Next standalone');
     expect(spec).toContain('OpenCode');
+  });
+
+  it('keeps the CLI source free of static bare npm imports (the compiled binary cannot resolve them)', async () => {
+    // A Bun standalone executable extracts bin/, dist/ and node_modules/ to
+    // ~/.mindos/runtime-cache but cannot resolve bare specifiers from those
+    // files: `import x from 'pkg'`, `require('pkg')` and createRequire all fail
+    // with "Cannot find package". Only exact file paths load. CLI modules must
+    // therefore import node builtins and relative files statically, and load
+    // any npm dependency through an explicit file-path fallback (see
+    // packages/mindos/bin/lib/jsonc.js). The generated agent-config bundle is
+    // scanned too: esbuild must have inlined jsonc-parser, leaving only node:*.
+    const { ensureAgentConfigBundle } = await import('../packages/mindos/bin/lib/agent-config.js');
+    ensureAgentConfigBundle();
+    const builtins = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
+    const offenders: string[] = [];
+    const files = ['packages/mindos/bin', 'packages/mindos/bin/lib', 'packages/mindos/bin/lib/generated'].flatMap((dir) => {
+      const abs = resolve(root, dir);
+      if (!existsSync(abs)) return [];
+      return readdirSync(abs)
+        .filter((name) => /\.(c?js|mjs)$/.test(name))
+        .map((name) => `${dir}/${name}`);
+    });
+    expect(files).toContain('packages/mindos/bin/lib/generated/agent-config.mjs');
+    for (const file of files) {
+      const source = read(file);
+      const isMinifiedBundle = file.includes('bin/lib/generated/');
+      const specifiers = [
+        ...source.matchAll(/^\s*import\s[^;]*?\sfrom\s+['"]([^'"]+)['"]/gm),
+        ...source.matchAll(/^\s*import\s+['"]([^'"]+)['"]/gm),
+        // Minified esbuild output drops the whitespace: `}from"node:fs"`.
+        ...(isMinifiedBundle ? source.matchAll(/\bfrom\s*['"]([^'"]+)['"]|\bimport\s*['"]([^'"]+)['"]/g) : []),
+        ...source.matchAll(/\brequire\(\s*['"]([^'"]+)['"]\s*\)/g),
+      ].map((match) => match[1]);
+      for (const specifier of specifiers) {
+        if (!specifier) continue;
+        if (specifier.startsWith('.') || specifier.startsWith('/') || builtins.has(specifier)) continue;
+        offenders.push(`${file}: ${specifier}`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 
   it('has a Bun binary builder that embeds the runtime archive', () => {
@@ -104,6 +145,39 @@ describe('Bun single-binary runtime contract', () => {
     // Bun compiled binaries cannot resolve package.json-main requires from
     // external node_modules — the docx extractor must ship self-contained.
     expect(platformScript).toContain('bundleDocxExtractor');
+  });
+
+  it('drives the shared SQLite store through bun:sqlite under Bun and smokes it from the binary', () => {
+    // Decision 3 of spec-web-api-layer-direction: the Bun route only continues
+    // with a bun:sqlite driver behind foundation/storage/sqlite.ts, verified by
+    // the same tests under both runtimes and touched by the release smoke.
+    const driver = read('packages/mindos/src/foundation/storage/sqlite-driver.ts');
+    const store = read('packages/mindos/src/foundation/storage/sqlite.ts');
+    for (const source of [driver, store]) {
+      // Runtime specifiers must never be static: vite strips `node:` and
+      // resolves `sqlite` as an npm package, and webpack would need externals
+      // for both. Only runtime strings (getBuiltinModule / createRequire) load them.
+      expect(source).not.toMatch(/from\s+['"](?:bun|node):sqlite['"]/);
+      expect(source).not.toMatch(/import\(\s*['"](?:bun|node):sqlite['"]\s*\)/);
+      expect(source).not.toMatch(/require\(\s*['"](?:bun|node):sqlite['"]\s*\)/);
+    }
+    expect(store).not.toContain('assertNodeRuntime');
+    expect(driver).toContain('getBuiltinModule');
+    // Bun binds bare named parameters to NULL silently outside strict mode.
+    expect(driver).toContain('strict: true');
+
+    const doctor = read('packages/mindos/bin/commands/doctor.js');
+    expect(doctor).toContain("'storage'");
+    expect(doctor).toContain('dist/foundation/storage/sqlite.js');
+
+    const release = read('scripts/release.sh');
+    expect(release).toContain('doctor storage --json');
+    expect(release).toContain('"driver"[[:space:]]*:[[:space:]]*"bun:sqlite"');
+
+    expect(existsSync(resolve(root, 'wiki/specs/spec-sqlite-bun-driver.md'))).toBe(true);
+    const spec = read('wiki/specs/spec-bun-single-binary-runtime.md');
+    expect(spec).toContain('bun:sqlite');
+    expect(spec).toContain('三个前提');
   });
 
   it('never routes a packaged runtime into the source-build path', () => {

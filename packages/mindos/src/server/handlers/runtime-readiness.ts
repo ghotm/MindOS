@@ -1,7 +1,4 @@
-import {
-  isMindosPermissionMode,
-  type MindosPermissionMode,
-} from '../../agent/permission/index.js';
+import type { MindosPermissionMode } from '../../agent/permission/index.js';
 import type {
   AgentRuntimeCompatibilityAssessment,
   AgentRuntimeCompatibilityOwner,
@@ -12,8 +9,15 @@ import type {
   AgentRuntimeKind,
   AgentRuntimeStatus,
 } from '../../agent/runtime/registry.js';
+import { applyAcpHandshakeToRuntime } from '../../agent/runtime/descriptors.js';
 import type { AcpHandshakeHealthResult } from '../../protocols/acp/index.js';
 import { errorResponse, json, type MindosServerResponse } from '../response.js';
+import {
+  filterProjectionsByRuntime,
+  parsePermissionMode,
+  runtimeKey,
+  uniqSorted,
+} from './runtime-projection-shared.js';
 import {
   buildAgentRuntimeArtifactProjectionsPayload,
   type AgentRuntimeArtifactProjection,
@@ -199,10 +203,7 @@ export async function handleAgentRuntimeReadinessGet(
       mindosMcpConfig: services.readMcpConfig?.(),
       permissionMode: permissionModeResult.permissionMode,
     });
-    const runtimeFilter = searchParams.get('runtime')?.trim();
-    const projections = runtimeFilter
-      ? payload.projections.filter((projection) => projection.runtimeId === runtimeFilter || projection.runtimeKind === runtimeFilter)
-      : payload.projections;
+    const projections = filterProjectionsByRuntime(payload.projections, searchParams.get('runtime'));
     return json(
       { ...payload, projections },
       { headers: { 'Cache-Control': 'no-store' } },
@@ -221,23 +222,27 @@ export function buildAgentRuntimeReadinessPayload(input: {
   permissionMode?: MindosPermissionMode;
 }): AgentRuntimeReadinessPayload {
   const permissionMode = input.permissionMode ?? 'ask';
+  // Every projection reads the same handshake-refined descriptors, so an ACP
+  // agent that declared loadSession or failed `authenticate` is judged once.
+  const handshakeByRuntime = new Map((input.acpHandshakeHealth ?? []).map((health) => [health.agentId, health] as const));
+  const runtimes = input.runtimes.map((runtime) => applyAcpHandshakeToRuntime(runtime, handshakeByRuntime.get(runtimeKey(runtime))));
   const permissionPayload = buildAgentRuntimePermissionProjectionsPayload({
-    runtimes: input.runtimes,
+    runtimes,
     permissionMode,
   });
   const mcpPayload = buildAgentRuntimeMcpProjectionsPayload({
-    runtimes: input.runtimes,
+    runtimes,
     mcpAgents: input.mcpAgents,
     mindosMcpConfig: input.mindosMcpConfig,
   });
   const sessionPayload = buildRuntimeSessionProjectionsPayload({
-    runtimes: input.runtimes,
+    runtimes,
     acpSessions: input.acpSessions,
   });
-  const artifactPayload = buildAgentRuntimeArtifactProjectionsPayload({ runtimes: input.runtimes });
-  const automationPayload = buildAgentRuntimeAutomationProjectionsPayload({ runtimes: input.runtimes });
+  const artifactPayload = buildAgentRuntimeArtifactProjectionsPayload({ runtimes });
+  const automationPayload = buildAgentRuntimeAutomationProjectionsPayload({ runtimes });
   const adapterPayload = buildAgentRuntimeAdapterProjectionsPayload({
-    runtimes: input.runtimes,
+    runtimes,
     acpHandshakeHealth: input.acpHandshakeHealth,
   });
   const context: RuntimeProjectionContext = {
@@ -252,7 +257,7 @@ export function buildAgentRuntimeReadinessPayload(input: {
   return {
     schemaVersion: 1,
     requestedPermissionMode: permissionMode,
-    projections: input.runtimes.map((runtime) => buildRuntimeReadinessProjection(runtime, context)),
+    projections: runtimes.map((runtime) => buildRuntimeReadinessProjection(runtime, context)),
   };
 }
 
@@ -270,7 +275,7 @@ function buildRuntimeReadinessProjection(
     remoteUseCase(runtime, context.automationByRuntime.get(runtimeKey(runtime))),
     unattendedUseCase(runtime, context.automationByRuntime.get(runtimeKey(runtime))),
   ];
-  const gaps = collectReadinessGaps(useCases);
+  const gaps = withSignedOutGap(runtime, collectReadinessGaps(useCases));
   const blockers = uniqSorted(gaps
     .filter((gap) => gap.severity === 'blocking')
     .map((gap) => gap.id));
@@ -591,6 +596,34 @@ function conditionalRecommendation(id: AgentRuntimeCompatibilityScenario): boole
     || id === 'remote-control';
 }
 
+/**
+ * A signed-out runtime (native login check failed, or an ACP agent failed the
+ * `authenticate` stage) is a user-setup gap distinct from "not installed";
+ * `runtimeGate` only knows how to say "runtime-available".
+ */
+function withSignedOutGap(
+  runtime: AgentRuntimeDescriptor,
+  gaps: AgentRuntimeReadinessGap[],
+): AgentRuntimeReadinessGap[] {
+  if (runtime.status !== 'signed-out') return gaps;
+  const existing = gaps.find((gap) => gap.id === 'runtime-signed-out');
+  if (existing) {
+    existing.severity = 'blocking';
+    return gaps;
+  }
+  return [
+    {
+      id: 'runtime-signed-out',
+      category: 'user-setup',
+      severity: 'blocking',
+      summary: runtime.availability?.reason
+        ?? `${runtime.name} is installed but not signed in for the environment that starts MindOS.`,
+      useCases: ['adapter-contract'],
+    },
+    ...gaps,
+  ];
+}
+
 function collectReadinessGaps(useCases: AgentRuntimeReadinessUseCase[]): AgentRuntimeReadinessGap[] {
   const gaps = new Map<string, AgentRuntimeReadinessGap>();
   for (const useCase of useCases) {
@@ -619,7 +652,7 @@ function collectReadinessGaps(useCases: AgentRuntimeReadinessUseCase[]): AgentRu
 }
 
 function classifyGapCategory(id: string): AgentRuntimeReadinessGapCategory {
-  if (id === 'runtime-available' || id.includes('runtime-detected') || id.includes('runtime-authenticated')) return 'user-setup';
+  if (id === 'runtime-available' || id === 'runtime-signed-out' || id.includes('runtime-detected') || id.includes('runtime-authenticated')) return 'user-setup';
   if (id.startsWith('adapter-')) return 'adapter-contract';
   if (
     id === 'scheduler'
@@ -628,6 +661,7 @@ function classifyGapCategory(id: string): AgentRuntimeReadinessGapCategory {
     || id === 'artifact-index'
     || id === 'durable-approval-queue'
     || id === 'approval-timeout-recovery'
+    || id === 'approval-owner-recovery'
     || id === 'skill-runtime-routing'
     || id === 'mailbox'
     || id === 'task-board'
@@ -739,26 +773,12 @@ function byRuntime<T extends { runtimeId: string }>(projections: T[]): Map<strin
   return new Map(projections.map((projection) => [projection.runtimeId, projection]));
 }
 
-function runtimeKey(runtime: AgentRuntimeDescriptor): string {
-  return runtime.runtimeId ?? runtime.id;
-}
 
 function isCompatibilityScenario(id: AgentRuntimeReadinessUseCaseId): id is AgentRuntimeCompatibilityScenario {
   return id !== 'adapter-contract' && id !== 'session-controls';
 }
 
-function parsePermissionMode(value: string | null):
-  | { permissionMode: MindosPermissionMode }
-  | { error: string } {
-  if (!value) return { permissionMode: 'ask' };
-  if (isMindosPermissionMode(value)) return { permissionMode: value };
-  return { error: `Unsupported permissionMode: ${value}` };
-}
 
 function humanizeGap(id: string): string {
   return id.replace(/-/g, ' ');
-}
-
-function uniqSorted<T extends string>(values: T[]): T[] {
-  return [...new Set(values)].sort();
 }

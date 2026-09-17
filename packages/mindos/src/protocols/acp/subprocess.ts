@@ -4,11 +4,16 @@
  * All JSON-RPC protocol handling is delegated to @agentclientprotocol/sdk.
  */
 
-import { execFileSync, spawn, type ChildProcess } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
+import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import {
+  killSupervisedProcessTree,
+  spawnSupervisedProcess,
+} from '../../agent/runtime/process-supervisor.js';
 import {
   ClientSideConnection,
   ndJsonStream,
@@ -77,6 +82,12 @@ export interface AcpLaunchOptions {
   overrides?: Record<string, AcpAgentOverride>;
   permissionMode?: AcpPermissionMode;
   resolvePermissionRequest?: AcpClientCallbacks['resolvePermissionRequest'];
+  /**
+   * How long an `ask`-mode permission request may wait for an answer before
+   * MindOS cancels it (default 10 minutes, matching the runtime permission
+   * bridge). Without a bound an unanswered request pins the agent forever.
+   */
+  permissionWaitMs?: number;
 }
 
 export interface TerminalSpawnSpec {
@@ -106,7 +117,9 @@ export function spawnAndConnect(
     resolvePermissionRequest: options?.resolvePermissionRequest,
   };
 
-  const client = createMindosClient(proc, cwd, callbacks, options?.permissionMode ?? 'auto', options?.env);
+  const client = createMindosClient(proc, cwd, callbacks, options?.permissionMode ?? 'auto', options?.env, {
+    permissionWaitMs: options?.permissionWaitMs,
+  });
 
   const output = Writable.toWeb(proc.proc.stdin!) as WritableStream<Uint8Array>;
   const input = Readable.toWeb(proc.proc.stdout!) as ReadableStream<Uint8Array>;
@@ -141,19 +154,20 @@ export function spawnAcpAgent(
     ...(options?.env ?? {}),
   };
 
-  const isWin = process.platform === 'win32';
-
-  const proc = spawn(cmd, args, {
-    stdio: ['pipe', 'pipe', 'pipe'],
+  // Spawn through the shared supervisor: a detached process group (Windows
+  // needs shell:true for that, Unix does not), tree-kill on SIGTERM → SIGKILL,
+  // registration in the one shutdown hook, and the same lifecycle the Codex
+  // app-server uses. The ACP `processes` table below is the ACP-facing view.
+  const supervised = spawnSupervisedProcess({
+    label: `acp:${entry.id}`,
+    command: cmd,
+    args,
     env: mergedEnv,
-    // Windows: detached requires shell:true to create new process group
-    // Unix: detached with shell:false creates new process group
-    shell: isWin,
-    detached: true,
     ...(options?.cwd ? { cwd: options.cwd } : {}),
   });
+  const proc = supervised.child;
 
-  const id = `acp-${entry.id}-${Date.now()}`;
+  const id = `acp-${entry.id}-${randomUUID()}`;
   const acpProc: AcpProcess = { id, agentId: entry.id, proc, alive: true };
 
   processes.set(id, acpProc);
@@ -171,6 +185,9 @@ export function spawnAcpAgent(
       acpProc.spawnError = stderrBuf.trim().slice(0, 500) || `Process exited with code ${code}`;
       console.error(`[ACP] ${entry.id} exited with code ${code}: ${acpProc.spawnError}`);
     }
+    // The agent is gone on its own: drop it from the table and reap any
+    // terminal it left running, otherwise both leak until the host exits.
+    releaseProcess(acpProc);
   });
 
   proc.on('error', (err) => {
@@ -201,43 +218,15 @@ export function killAgent(acpProc: AcpProcess): void {
   const timers: NodeJS.Timeout[] = [];
 
   // Step 1: Kill all terminals first to prevent orphaned processes
-  const terms = terminalMaps.get(acpProc.id);
-  if (terms) {
-    for (const entry of terms.values()) {
-      if (entry.child.exitCode === null) {
-        try {
-          entry.child.kill('SIGTERM');
-          // Force kill after 1 second if still alive
-          const timer = setTimeout(() => {
-            if (entry.child.exitCode === null) {
-              try { entry.child.kill('SIGKILL'); } catch { /* already dead */ }
-            }
-          }, 1000);
-          timers.push(timer);
-        } catch { /* already dead */ }
-      }
-    }
-    terminalMaps.delete(acpProc.id);
-  }
+  timers.push(...killTerminalsOf(acpProc.id));
 
-  // Step 2: Kill the parent ACP agent process
-  const isWin = process.platform === 'win32';
-
-  if (isWin) {
-    // Windows: Use taskkill /T to kill process tree
-    try {
-      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
-    } catch {
-      // Process already dead or taskkill unavailable
-    }
-  } else {
-    // Unix: Use negative PID to kill process group
-    try { process.kill(-pid, 'SIGTERM'); } catch { /* already dead */ }
+  // Step 2: Tree-kill the agent process via the supervisor (SIGTERM, then
+  // SIGKILL after a grace period on Unix; taskkill /T /F is already a forced
+  // tree-kill on Windows).
+  killSupervisedProcessTree(acpProc.proc, 'SIGTERM');
+  if (process.platform !== 'win32') {
     const timer = setTimeout(() => {
-      try {
-        process.kill(-pid, 0);
-        process.kill(-pid, 'SIGKILL');
-      } catch { /* already dead */ }
+      killSupervisedProcessTree(acpProc.proc, 'SIGKILL');
     }, 3000);
     timers.push(timer);
   }
@@ -263,6 +252,35 @@ function clearCleanupTimers(processId: string): void {
   }
 }
 
+/** Forget a process that exited by itself and reap the terminals it owned. */
+function releaseProcess(acpProc: AcpProcess): void {
+  processes.delete(acpProc.id);
+  clearCleanupTimers(acpProc.id);
+  const timers = killTerminalsOf(acpProc.id);
+  if (timers.length > 0) cleanupTimers.set(acpProc.id, timers);
+}
+
+/**
+ * SIGTERM every live terminal of an ACP process (SIGKILL a second later) and
+ * drop the terminal map. Returns the escalation timers so the caller can
+ * track them.
+ */
+function killTerminalsOf(processId: string): NodeJS.Timeout[] {
+  const timers: NodeJS.Timeout[] = [];
+  const terms = terminalMaps.get(processId);
+  if (!terms) return timers;
+  for (const entry of terms.values()) {
+    if (entry.child.exitCode !== null) continue;
+    killSupervisedProcessTree(entry.child, 'SIGTERM');
+    const timer = setTimeout(() => {
+      if (entry.child.exitCode === null) killSupervisedProcessTree(entry.child, 'SIGKILL');
+    }, 1000);
+    timers.push(timer);
+  }
+  terminalMaps.delete(processId);
+  return timers;
+}
+
 export function getProcess(id: string): AcpProcess | undefined {
   return processes.get(id);
 }
@@ -281,10 +299,11 @@ export function killAllAgents(): void {
 function createPermissionRequestId(
   proc: AcpProcess,
   params: RequestPermissionRequest,
-  requestedAt: string,
 ): string {
   const toolCallId = params.toolCall?.toolCallId ?? 'tool';
-  return `${proc.id}:${params.sessionId}:${toolCallId}:${Date.parse(requestedAt) || Date.now()}`;
+  // Random suffix: two requests for the same tool in one millisecond must not
+  // collapse into one permission event.
+  return `${proc.id}:${params.sessionId}:${toolCallId}:${randomUUID()}`;
 }
 
 function buildPermissionEvent(input: {
@@ -325,6 +344,7 @@ function permissionToolName(toolCall: RequestPermissionRequest['toolCall'] | und
 function resolvePermissionEvent(
   pending: AcpPermissionEvent,
   response: RequestPermissionResponse,
+  reason?: string,
 ): AcpPermissionEvent {
   const selectedOptionId = response.outcome.outcome === 'selected'
     ? response.outcome.optionId
@@ -340,6 +360,7 @@ function resolvePermissionEvent(
       ? 'cancelled'
       : selectedOption?.kind ?? 'allow_once',
     resolvedAt: new Date().toISOString(),
+    ...(reason ? { reason } : {}),
   };
 }
 
@@ -386,15 +407,45 @@ function permissionResponseAllows(
   return selected?.kind.startsWith('allow') === true;
 }
 
+const DEFAULT_PERMISSION_WAIT_MS = 10 * 60 * 1000;
+
+type AskAnswer =
+  | { kind: 'answered'; response: RequestPermissionResponse | undefined }
+  | { kind: 'timeout' }
+  | { kind: 'error'; error: unknown };
+
+/** Race the host resolver against the permission wait; a late answer is ignored. */
+async function raceAskAnswer(
+  resolve: () => Promise<RequestPermissionResponse | undefined> | RequestPermissionResponse | undefined,
+  waitMs: number,
+): Promise<AskAnswer> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<AskAnswer>((settle) => {
+    timer = setTimeout(() => settle({ kind: 'timeout' }), waitMs);
+  });
+  const answered: Promise<AskAnswer> = Promise.resolve()
+    .then(resolve)
+    .then(
+      (response) => ({ kind: 'answered', response }),
+      (error) => ({ kind: 'error', error }),
+    );
+  try {
+    return await Promise.race([answered, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function resolveAcpPermissionRequest(input: {
   proc: AcpProcess;
   params: RequestPermissionRequest;
   callbacks: AcpClientCallbacks;
   permissionMode: AcpPermissionMode;
   reason: string;
+  permissionWaitMs?: number;
 }): Promise<RequestPermissionResponse> {
   const requestedAt = new Date().toISOString();
-  const requestId = createPermissionRequestId(input.proc, input.params, requestedAt);
+  const requestId = createPermissionRequestId(input.proc, input.params);
   const pendingEvent = buildPermissionEvent({
     requestId,
     params: input.params,
@@ -405,6 +456,7 @@ async function resolveAcpPermissionRequest(input: {
 
   const mode = normalizeAcpPermissionMode(input.permissionMode);
   let response: RequestPermissionResponse;
+  let resolutionReason: string | undefined;
   if (mode === 'readonly') {
     console.log(`[ACP] Reject permission in readonly mode: agent=${input.proc.agentId} ${input.reason}`);
     response = rejectPermissionResponse(input.params);
@@ -416,19 +468,24 @@ async function resolveAcpPermissionRequest(input: {
     response = allowPermissionResponse(input.params, ['allow_once', 'allow_always']);
   } else {
     console.log(`[ACP] Ask permission via MindOS bridge: agent=${input.proc.agentId} ${input.reason}`);
-    try {
-      response = await input.callbacks.resolvePermissionRequest?.({
-        event: pendingEvent,
-        params: input.params,
-        mode,
-      }) ?? rejectPermissionResponse(input.params);
-    } catch (error) {
-      console.warn(`[ACP] Permission resolver failed for ${input.proc.agentId}:`, error);
+    const waitMs = input.permissionWaitMs ?? DEFAULT_PERMISSION_WAIT_MS;
+    const answer = await raceAskAnswer(
+      () => input.callbacks.resolvePermissionRequest?.({ event: pendingEvent, params: input.params, mode }),
+      waitMs,
+    );
+    if (answer.kind === 'timeout') {
+      resolutionReason = `No answer within ${waitMs / 1000}s; MindOS cancelled the permission request.`;
+      console.warn(`[ACP] Permission request ${requestId} for ${input.proc.agentId}: ${resolutionReason}`);
+      response = { outcome: { outcome: 'cancelled' } };
+    } else if (answer.kind === 'error') {
+      console.warn(`[ACP] Permission resolver failed for ${input.proc.agentId}:`, answer.error);
       response = rejectPermissionResponse(input.params);
+    } else {
+      response = answer.response ?? rejectPermissionResponse(input.params);
     }
   }
 
-  input.callbacks.onPermissionResolved?.(resolvePermissionEvent(pendingEvent, response));
+  input.callbacks.onPermissionResolved?.(resolvePermissionEvent(pendingEvent, response, resolutionReason));
   return response;
 }
 
@@ -475,8 +532,10 @@ export function createMindosClient(
   callbacks: AcpClientCallbacks,
   permissionMode: AcpPermissionMode = 'auto',
   runtimeEnv: Record<string, string> = {},
+  options: { permissionWaitMs?: number } = {},
 ): Client {
   const concretePermissionMode = normalizeAcpPermissionMode(permissionMode);
+  const permissionWaitMs = options.permissionWaitMs;
 
   const ensureAskPermissionForHostAction = async (input: {
     toolCallId: string;
@@ -500,6 +559,7 @@ export function createMindosClient(
       callbacks,
       permissionMode: concretePermissionMode,
       reason: JSON.stringify(input.params).slice(0, 200),
+      permissionWaitMs,
     });
     if (!permissionResponseAllows(params, response)) {
       throw new RequestError(-32001, input.deniedMessage);
@@ -514,6 +574,7 @@ export function createMindosClient(
         callbacks,
         permissionMode: concretePermissionMode,
         reason: JSON.stringify(params.toolCall ?? params).slice(0, 200),
+        permissionWaitMs,
       });
     },
 
@@ -632,6 +693,9 @@ export function createMindosClient(
           env: { ...process.env, ...runtimeEnv, ...envObj },
           shell: terminalSpawn.shell,
           stdio: ['pipe', 'pipe', 'pipe'],
+          // Own process group on Unix so killAgent / shutdown can reap the
+          // whole tree the command forks (mirrors the ACP agent spawn).
+          detached: process.platform !== 'win32',
         });
 
         let output = '';
@@ -679,12 +743,15 @@ export function createMindosClient(
         return { exitCode: terminal.child.exitCode, signal: terminal.child.signalCode };
       }
       return new Promise((resolve) => {
-        terminal.child.on('exit', (code: number | null, signal: string | null) => {
+        const onExit = (code: number | null, signal: string | null) => {
           resolve({ exitCode: code, signal });
-        });
-        // Re-check after attaching listener to avoid race condition:
-        // if child exited between the check above and .on('exit'), the event already fired.
+        };
+        terminal.child.once('exit', onExit);
+        // Re-check after attaching the listener to avoid a race: if the child
+        // exited between the check above and once('exit'), the event already
+        // fired, so drop the listener instead of leaking it.
         if (terminal.child.exitCode !== null) {
+          terminal.child.off('exit', onExit);
           resolve({ exitCode: terminal.child.exitCode, signal: terminal.child.signalCode });
         }
       });

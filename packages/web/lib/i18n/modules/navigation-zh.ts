@@ -2,6 +2,11 @@
 
 export const navigationZh = {
   sidebar: {
+    openMenu: '打开菜单',
+    closeMenu: '关闭菜单',
+    mobileMenuTitle: 'MindOS 菜单',
+    countUnavailable: '数量未能更新',
+    countRetry: '重新获取数量',
     files: '心智',
     home: '首页',
     homeAgentSessions: 'Agent 对话',
@@ -128,6 +133,9 @@ export const navigationZh = {
     emptyHint: '输入文件名或内容关键词',
     noResults: '未找到匹配的文件',
     noResultsHint: '尝试其他关键词',
+    failed: '搜索失败',
+    failedHint: '已保留你的关键词，请检查连接后重试。',
+    retry: '重试',
     preparing: '正在准备搜索...',
     fallbackWarmHint: '搜索将在首次查询时完成准备。',
     prompt: '输入关键词搜索所有文件',

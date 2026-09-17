@@ -9,14 +9,22 @@ import { Component } from '../component';
 import { Events } from '../events';
 import { Plugin } from './plugin';
 import { Notice, Modal } from './ui';
-import { ButtonComponent, DropdownComponent, PluginSettingTab, Setting, TextAreaComponent, TextComponent, ToggleComponent } from './settings';
+import { AbstractTextComponent, BaseComponent, ButtonComponent, ColorComponent, DropdownComponent, ExtraButtonComponent, PluginSettingTab, SearchComponent, Setting, SliderComponent, TextAreaComponent, TextComponent, ToggleComponent, ValueComponent } from './settings';
 import { TAbstractFileImpl, TFileImpl, TFolderImpl, Vault } from './vault';
 import { createObsidianElement } from './dom';
-import { MarkdownRenderer } from './markdown-renderer';
+import { MarkdownPreviewRenderer, MarkdownRenderer } from './markdown-renderer';
+import { sortSearchResults } from './search-helpers';
 import { getActiveObsidianRuntimeHost } from '../runtime';
 import { normalizeObsidianTag, parseFrontMatterTagValues } from './tags';
-import type { CachedMetadata, RequestUrlParam, RequestUrlResponse, RequestUrlResponsePromise, SecretStorage, TFile, WorkspaceLeaf } from '../types';
+import type { CachedMetadata, Point, RequestUrlParam, RequestUrlResponse, RequestUrlResponsePromise, SecretStorage, TFile, WorkspaceLeaf } from '../types';
 import { moment } from './moment';
+import { getFrontMatterInfo, parseFrontMatterEntry, parseFrontMatterStringArray } from './frontmatter';
+import { editorEditorField, editorInfoField, editorLivePreviewField } from './editor-fields';
+import { resolveSubpath } from './subpath';
+import { sanitizeHTMLToDom } from './sanitize-html';
+import { WorkspaceShim } from './app';
+import { debounce } from '../debounce';
+export { debounce } from '../debounce';
 
 const REQUEST_URL_TIMEOUT_MS = 15_000;
 const REQUEST_URL_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
@@ -156,53 +164,6 @@ function htmlToTurndownInput(html: string | HTMLElement | Document | DocumentFra
 
 export function htmlToMarkdown(html: string | HTMLElement | Document | DocumentFragment): string {
   return htmlToMarkdownConverter.turndown(htmlToTurndownInput(html)).trim();
-}
-
-type DebouncedFunction<T extends unknown[]> = ((...args: T) => void) & { cancel: () => void; run: () => void };
-
-export function debounce<T extends unknown[]>(
-  callback: (...args: T) => unknown,
-  timeout = 0,
-  resetTimer = true,
-): DebouncedFunction<T> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let lastArgs: T | null = null;
-
-  const clearPending = () => {
-    if (timer !== null) {
-      clearTimeout(timer);
-      timer = null;
-    }
-  };
-
-  const run = () => {
-    const args = lastArgs;
-    timer = null;
-    lastArgs = null;
-    if (args) {
-      callback(...args);
-    }
-  };
-
-  const debounced = ((...args: T) => {
-    lastArgs = args;
-    if (timer !== null && !resetTimer) {
-      return;
-    }
-    clearPending();
-    timer = setTimeout(run, Math.max(0, timeout));
-  }) as DebouncedFunction<T>;
-
-  debounced.cancel = () => {
-    clearPending();
-    lastArgs = null;
-  };
-  debounced.run = () => {
-    clearPending();
-    run();
-  };
-
-  return debounced;
 }
 
 const coreIconIds = [
@@ -667,6 +628,106 @@ export class FileView extends ItemView {
   file: TFile | null = null;
 }
 
+/**
+ * Official workspace DOM chain: Events → WorkspaceItem → WorkspaceParent →
+ * WorkspaceSplit → WorkspaceContainer → WorkspaceWindow. `parent` is nullable
+ * here because the shim constructs standalone items without a live workspace.
+ */
+export abstract class WorkspaceItem extends Events {
+  abstract parent: WorkspaceParent | null;
+
+  getRoot(): WorkspaceItem {
+    let root: WorkspaceItem = this;
+    while (root.parent) root = root.parent;
+    return root;
+  }
+
+  getContainer(): WorkspaceContainer {
+    let item: WorkspaceItem | null = this;
+    while (item) {
+      if (item instanceof WorkspaceContainer) return item;
+      item = item.parent;
+    }
+    return undefined as unknown as WorkspaceContainer;
+  }
+}
+
+export abstract class WorkspaceParent extends WorkspaceItem {}
+
+export class WorkspaceSplit extends WorkspaceParent {
+  parent: WorkspaceParent | null;
+
+  constructor(parent: WorkspaceParent | null = null) {
+    super();
+    this.parent = parent;
+  }
+}
+
+export abstract class WorkspaceContainer extends WorkspaceSplit {}
+
+export class WorkspaceWindow extends WorkspaceContainer {
+  /** No real window exists in the server tier; the handles stay null. */
+  win: Window | null = null;
+  doc: Document | null = null;
+}
+
+export interface HoverParent {
+  hoverPopover: HoverPopover | null;
+}
+
+/**
+ * The official 1.13.2 declaration ships this enum empty; the shim follows
+ * instead of guessing lifecycle numeric values.
+ */
+export enum PopoverState {}
+
+export class HoverPopover extends Component {
+  hoverEl: HTMLElement;
+  state: PopoverState = undefined as unknown as PopoverState;
+
+  constructor(
+    parent: HoverParent,
+    _targetEl: HTMLElement | null,
+    _waitTime?: number,
+    _staticPos?: Point | null,
+  ) {
+    super();
+    this.hoverEl = createObsidianElement('div');
+    parent.hoverPopover = this;
+  }
+}
+
+export class EditableFileView extends FileView {}
+
+/**
+ * Plaintext-based editable file view. Saving keeps the editor content in the
+ * in-memory `data` field only; persisting to the vault is the host's job.
+ */
+export abstract class TextFileView extends EditableFileView {
+  data = '';
+  /** Debounced save in 2 seconds, mirroring the upstream default. */
+  requestSave: () => void = debounce(() => void this.save(), 2000);
+
+  onLoadFile(_file: TFile): Promise<void> {
+    void _file;
+    return Promise.resolve();
+  }
+
+  onUnloadFile(_file: TFile): Promise<void> {
+    void _file;
+    return Promise.resolve();
+  }
+
+  async save(clear = false): Promise<void> {
+    this.data = this.getViewData();
+    if (clear) this.clear();
+  }
+
+  abstract getViewData(): string;
+  abstract setViewData(data: string, clear: boolean): void;
+  abstract clear(): void;
+}
+
 export class AbstractInputSuggest<T> extends Component {
   app: unknown;
   inputEl: HTMLInputElement;
@@ -757,7 +818,9 @@ export class SecretComponent extends TextComponent {
 
 export type { SecretStorage };
 
-export class WorkspaceLeafShimExport {
+export class WorkspaceLeafShimExport extends WorkspaceItem {
+  parent: WorkspaceParent | null = null;
+
   getViewState() {
     return { type: 'empty' };
   }
@@ -1106,17 +1169,25 @@ export function createObsidianModule() {
     Modal,
     PluginSettingTab,
     Setting,
+    BaseComponent,
+    ValueComponent,
+    AbstractTextComponent,
     ButtonComponent,
+    ExtraButtonComponent,
     TextComponent,
     TextAreaComponent,
     ToggleComponent,
     DropdownComponent,
+    SliderComponent,
+    ColorComponent,
+    SearchComponent,
     TAbstractFile: TAbstractFileImpl,
     TFile: TFileImpl,
     TFolder: TFolderImpl,
     Vault,
     normalizePath,
     parseYaml,
+    getFrontMatterInfo,
     stringifyYaml,
     parseLinktext,
     getLinkpath,
@@ -1134,16 +1205,28 @@ export function createObsidianModule() {
     Platform,
     moment,
     MarkdownRenderer,
+    MarkdownPreviewRenderer,
+    sortSearchResults,
     MarkdownRenderChild,
     ItemView,
     View,
     MarkdownView,
     FileView,
+    EditableFileView,
+    TextFileView,
     AbstractInputSuggest,
     EditorSuggest,
     SettingGroup,
     SecretComponent,
     WorkspaceLeaf: WorkspaceLeafShimExport,
+    Workspace: WorkspaceShim,
+    WorkspaceItem,
+    WorkspaceParent,
+    WorkspaceSplit,
+    WorkspaceContainer,
+    WorkspaceWindow,
+    HoverPopover,
+    PopoverState,
     FileSystemAdapter,
     Menu,
     MenuItem,
@@ -1153,6 +1236,13 @@ export function createObsidianModule() {
     Scope,
     parseFrontMatterAliases,
     parseFrontMatterTags,
+    parseFrontMatterEntry,
+    parseFrontMatterStringArray,
+    resolveSubpath,
+    sanitizeHTMLToDom,
+    editorInfoField,
+    editorEditorField,
+    editorLivePreviewField,
     getAllTags,
     getLanguage,
     apiVersion,

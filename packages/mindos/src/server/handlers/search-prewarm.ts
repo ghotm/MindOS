@@ -1,10 +1,5 @@
 import { json, privateCacheHeaders, type MindosServerResponse } from '../response.js';
 
-export type SearchPrewarmHandlerServices = {
-  collectAllFiles(): string[];
-  prewarmSearch?: () => SearchPrewarmPayload;
-};
-
 export type SearchPrewarmPayload = {
   warmed: true;
   cacheState: 'hit' | 'built';
@@ -12,14 +7,37 @@ export type SearchPrewarmPayload = {
   core: {
     cacheState: string;
     fileCount: number;
+    /** Text documents actually held by the search index (md/csv/json). */
+    indexedDocuments?: number;
   };
 };
 
-export function handleSearchPrewarm(services: SearchPrewarmHandlerServices): MindosServerResponse<SearchPrewarmPayload> {
+export type SearchPrewarmHandlerServices = {
+  collectAllFiles(): string[];
+  prewarmSearch?: () => SearchPrewarmPayload;
+};
+
+/** Hosts whose warm-up is asynchronous (e.g. a worker-built core index) resolve the payload. */
+export type SearchPrewarmHandlerServicesWithAsyncWarmup = {
+  collectAllFiles(): string[];
+  prewarmSearch?: () => SearchPrewarmPayload | Promise<SearchPrewarmPayload>;
+};
+
+const PREWARM_HEADERS = () => privateCacheHeaders(60);
+
+export function handleSearchPrewarm(services: SearchPrewarmHandlerServices): MindosServerResponse<SearchPrewarmPayload>;
+export function handleSearchPrewarm(
+  services: SearchPrewarmHandlerServicesWithAsyncWarmup,
+): MindosServerResponse<SearchPrewarmPayload> | Promise<MindosServerResponse<SearchPrewarmPayload>>;
+export function handleSearchPrewarm(
+  services: SearchPrewarmHandlerServicesWithAsyncWarmup,
+): MindosServerResponse<SearchPrewarmPayload> | Promise<MindosServerResponse<SearchPrewarmPayload>> {
   if (services.prewarmSearch) {
-    return json(services.prewarmSearch(), {
-      headers: privateCacheHeaders(60),
-    });
+    const payload = services.prewarmSearch();
+    if (payload instanceof Promise) {
+      return payload.then((resolved) => json(resolved, { headers: PREWARM_HEADERS() }));
+    }
+    return json(payload, { headers: PREWARM_HEADERS() });
   }
 
   const files = services.collectAllFiles();
@@ -32,6 +50,6 @@ export function handleSearchPrewarm(services: SearchPrewarmHandlerServices): Min
       fileCount: files.length,
     },
   }, {
-    headers: privateCacheHeaders(60),
+    headers: PREWARM_HEADERS(),
   });
 }

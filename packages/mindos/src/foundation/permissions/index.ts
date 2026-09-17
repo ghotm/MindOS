@@ -1,3 +1,6 @@
+import { canonicalizeRelativePath } from '../security/index.js';
+import { createGlobMatcher, type GlobMatcher } from '../shared/utils/glob.js';
+
 export type PermissionEffect = 'allow' | 'deny' | 'ask';
 
 export type PermissionActorType = 'user' | 'agent' | 'system';
@@ -49,7 +52,9 @@ const EFFECT_PRIORITY: Record<PermissionEffect, number> = {
 };
 
 function normalizePath(filePath: string): string {
-  return filePath.replace(/\\/g, '/').replace(/^\/+/, '');
+  // Rules and the protected-root check match by name, so `./Templates/x.md`
+  // and `Templates/x.md/` must compare equal to `Templates/x.md`.
+  return canonicalizeRelativePath(filePath);
 }
 
 function isRootLevel(filePath: string): boolean {
@@ -62,32 +67,22 @@ function basename(filePath: string): string {
   return idx === -1 ? normalized : normalized.slice(idx + 1);
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
-}
-
-function globToRegExp(pattern: string): RegExp {
-  const normalized = normalizePath(pattern || '**');
-  let source = '';
-
-  for (let i = 0; i < normalized.length; i++) {
-    const char = normalized[i] ?? '';
-    const next = normalized[i + 1];
-    if (char === '*' && next === '*') {
-      source += '.*';
-      i++;
-    } else if (char === '*') {
-      source += '[^/]*';
-    } else {
-      source += escapeRegExp(char);
-    }
-  }
-
-  return new RegExp(`^${source}$`);
-}
-
 function matchesPath(pattern: string, filePath: string): boolean {
-  return globToRegExp(pattern).test(normalizePath(filePath));
+  return globMatcherFor(pattern)(normalizePath(filePath));
+}
+
+// Rules are evaluated for every permission check; compile each pattern once.
+const globMatcherCache = new Map<string, GlobMatcher>();
+
+function globMatcherFor(pattern: string): GlobMatcher {
+  const normalized = normalizePath(pattern || '**');
+  let matcher = globMatcherCache.get(normalized);
+  if (!matcher) {
+    matcher = createGlobMatcher(normalized);
+    if (globMatcherCache.size > 500) globMatcherCache.clear();
+    globMatcherCache.set(normalized, matcher);
+  }
+  return matcher;
 }
 
 function pathSpecificity(pattern: string): number {
@@ -197,7 +192,13 @@ export function parsePermissionRules(raw: string | undefined): PermissionRule[] 
     return parsed
       .map(normalizeRule)
       .filter((rule): rule is PermissionRule => rule !== null);
-  } catch {
+  } catch (error) {
+    // A typo in MINDOS_PERMISSION_RULES silently dropping every deny/ask rule
+    // is fail-open; keep the lenient return value but make the failure visible.
+    console.warn(
+      '[mindos/permissions] MINDOS_PERMISSION_RULES is not valid JSON; no permission rules are applied:',
+      error instanceof Error ? error.message : String(error),
+    );
     return [];
   }
 }

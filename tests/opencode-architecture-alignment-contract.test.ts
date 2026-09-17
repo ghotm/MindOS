@@ -84,6 +84,7 @@ describe('OpenCode architecture alignment', () => {
       types: './dist/tool.d.ts',
       import: './dist/tool.js',
     });
+    expect(Object.keys(pkg.exports ?? {}).filter(key => key.startsWith('./agent/') && key.includes('*'))).toEqual([]);
     expect(pkg.exports?.['./session']).toBeUndefined();
     expect(pkg.exports?.['./session/pi-coding-agent']).toBeUndefined();
     expect(pkg.exports?.['./agent']).toEqual({
@@ -181,12 +182,16 @@ describe('OpenCode architecture alignment', () => {
     expect(server).toContain('handleRawFile');
     expect(server).toContain('handleSettingsGet');
     expect(server).toContain('handleMcpStatus');
-    expect(healthRoute).toContain("from '@geminilight/mindos/server'");
-    expect(filesRoute).toContain("from '@geminilight/mindos/server'");
-    expect(rawRoute).toContain("from '@geminilight/mindos/server'");
-    expect(searchRoute).toContain("from '@geminilight/mindos/server'");
-    expect(settingsRoute).toContain("from '@geminilight/mindos/server'");
-    expect(mcpStatusRoute).toContain("from '@geminilight/mindos/server'");
+    // health/files/search hand the request to the shared Hono route table via
+    // the Web adapter, which is itself a thin @geminilight/mindos/server client.
+    const adapter = readText('packages/web/app/api/_mindos-adapter.ts');
+    expect(adapter).toContain("from '@geminilight/mindos/server'");
+    expect(healthRoute).toContain("delegateToMindos('GET', '/api/health')");
+    expect(filesRoute).toContain("delegateToMindos('GET', '/api/files')");
+    expect(searchRoute).toContain("delegateToMindos('GET', '/api/search')");
+    expect(rawRoute).toContain("delegateToMindos('GET', '/api/file/raw')");
+    expect(settingsRoute).toContain("delegateToMindos('GET', '/api/settings')");
+    expect(mcpStatusRoute).toContain("delegateToMindos('GET', '/api/mcp/status')");
     expect(healthRoute).not.toContain('function readVersion');
     expect(healthRoute).not.toContain("service: 'mindos'");
   });
@@ -207,7 +212,7 @@ describe('OpenCode architecture alignment', () => {
     const mindosRuntimeAdapter = readText('packages/mindos/src/agent/runtime/adapters/mindos.ts');
     const turnIndex = readText('packages/mindos/src/agent/turn/index.ts');
     const mindosPiSession = readText('packages/mindos/src/agent/mindos-pi/session.ts');
-    const openAiCompatFallback = readText('packages/mindos/src/agent/turn/openai-compat-fallback.ts');
+    const proxyTransport = readText('packages/mindos/src/agent/mindos-pi/proxy-transport.ts');
     const streamConsumer = readText('packages/web/lib/agent/stream-consumer.ts');
     const toAgentMessages = readText('packages/web/lib/agent/to-agent-messages.ts');
 
@@ -229,16 +234,12 @@ describe('OpenCode architecture alignment', () => {
     expect(turnIndex).not.toContain('runMindosPiAgentTurnProxyFallback');
     expect(turnIndex).toContain('createMindosAgentEventReducer');
     expect(turnIndex).toContain('resolveMindosAgentTimeoutMs');
-    expect(turnIndex).toContain('runMindosNonStreamingFallback');
-    expect(turnIndex).toContain('buildMindosCompatEndpointCandidates');
+    expect(turnIndex).not.toContain('runMindosNonStreamingFallback');
+    expect(proxyTransport).toContain('registerProvider');
     expect(turnIndex).not.toContain('createMindosPiAgentRuntime');
     expect(mindosPiSession).toContain('runMindosPiAgentTurnSession');
-    expect(mindosPiSession).toContain('runMindosPiAgentTurnProxyFallback');
+    expect(mindosPiSession).not.toContain('runMindosPiAgentTurnProxyFallback');
     expect(mindosPiSession).toContain('createMindosPiAgentRuntime');
-    expect(openAiCompatFallback).toContain('runMindosOpenAICompatFallback');
-    expect(openAiCompatFallback).toContain('requestStream ?? false');
-    expect(openAiCompatFallback).toContain('parseMindosOpenAICompatResponse');
-    expect(openAiCompatFallback).toContain('reassembleMindosOpenAISse');
     expect(readText('packages/mindos/src/agent/index.ts')).toContain('defineMindosAgent');
     expect(readText('packages/mindos/src/agent/index.ts')).toContain('MINDOS_SYSTEM_PROMPT');
     expect(readText('packages/mindos/src/agent/index.ts')).toContain('MINDOS_AGENT_MANIFEST');
@@ -284,7 +285,7 @@ describe('OpenCode architecture alignment', () => {
     expect(sharedTurnLane).toContain('AcpRuntimeLaneTurnInput');
     expect(mindosPiTurnRunner).toContain('runMindosPiAgentTurnSession');
     expect(mindosPiTurnRunner).toContain('resolveMindosAgentTimeoutMs');
-    expect(mindosPiTurnRunner).toContain('runMindosNonStreamingFallback');
+    expect(mindosPiTurnRunner).not.toContain('runMindosNonStreamingFallback');
     expect(agentTurnRunner).not.toContain('const MAX_RETRIES = 3');
     expect(agentTurnRunner).not.toContain('const ACP_MAX_RETRIES = 3');
     expect(agentTurnRunner).not.toContain('lastModelError ? t.proxyCompatDetecting : t.proxyCompatMode');
@@ -355,10 +356,10 @@ describe('OpenCode architecture alignment', () => {
     expect(streamConsumer).toContain("from '@geminilight/mindos/agent/stream/stream-consumer'");
 
     expect(readText('packages/web/lib/agent/prompt.ts')).toContain("from '@geminilight/mindos/agent'");
-    expect(readText('packages/web/lib/agent/retry.ts')).toContain("from '@geminilight/mindos/agent/turn'");
-    expect(readText('packages/web/lib/agent/reconnect.ts')).toContain("from '@geminilight/mindos/agent/turn'");
+    expect(readText('packages/web/lib/agent/retry.ts')).toContain("from '@geminilight/mindos/agent/turn/retry-policy'");
+    expect(readText('packages/web/lib/agent/reconnect.ts')).toContain("from '@geminilight/mindos/agent/turn/retry-policy'");
     expect(readText('packages/web/lib/agent/loop-detection.ts')).toContain("from '@geminilight/mindos/agent/turn'");
-    expect(readText('packages/web/lib/agent/non-streaming.ts')).toContain("from '@geminilight/mindos/agent/turn'");
-    expect(toAgentMessages).toContain("from '@geminilight/mindos/agent/turn'");
+    expect(existsSync(resolve(root, 'packages/web/lib/agent/non-streaming.ts'))).toBe(false);
+    expect(toAgentMessages).toContain("from '@geminilight/mindos/agent/turn/ui-messages'");
   });
 });

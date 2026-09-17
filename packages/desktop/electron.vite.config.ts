@@ -1,5 +1,5 @@
 import { builtinModules } from 'node:module';
-import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
+import { defineConfig } from 'electron-vite';
 import { resolve } from 'node:path';
 
 const nodeBuiltins = [...builtinModules, ...builtinModules.map((name) => `node:${name}`)];
@@ -7,8 +7,9 @@ const electronMainExternal = ['electron', ...nodeBuiltins];
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ include: ['electron'] })],
     build: {
+      // electron-vite 5 moved dependency externalization from a plugin to this option.
+      externalizeDeps: { include: ['electron'] },
       outDir: 'dist-electron/main',
       rollupOptions: {
         external: electronMainExternal,
@@ -18,6 +19,10 @@ export default defineConfig({
         output: {
           entryFileNames: 'main.js',
           format: 'cjs',
+          // Externalized deps are require()d from the CJS bundle. ESM-only ones
+          // (electron-store 10) come back as a namespace with __esModule, so
+          // let Rollup pick `.default` at runtime instead of assuming CJS.
+          interop: 'auto',
         },
       },
     },
@@ -28,8 +33,8 @@ export default defineConfig({
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin({ include: ['electron'] })],
     build: {
+      externalizeDeps: { include: ['electron'] },
       outDir: 'dist-electron/preload',
       rollupOptions: {
         external: electronMainExternal,
@@ -41,6 +46,10 @@ export default defineConfig({
         output: {
           entryFileNames: '[name].js',
           format: 'cjs',
+          // Externalized deps are require()d from the CJS bundle. ESM-only ones
+          // (electron-store 10) come back as a namespace with __esModule, so
+          // let Rollup pick `.default` at runtime instead of assuming CJS.
+          interop: 'auto',
         },
       },
     },

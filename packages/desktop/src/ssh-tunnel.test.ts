@@ -24,11 +24,19 @@ import fs from 'fs';
 import { execFileSync } from 'child_process';
 
 describe('SSH Tunnel', () => {
+  let testHome: string;
+  beforeEach(() => {
+    testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-home-'));
+    vi.stubEnv('MINDOS_DESKTOP_HOME_DIR', testHome);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(testHome, { recursive: true, force: true });
+  });
   describe('parseSshConfig', () => {
     it('returns empty array when ~/.ssh/config does not exist', () => {
       const result = parseSshConfig();
-      // May be empty if file doesn't exist, which is valid
-      expect(Array.isArray(result)).toBe(true);
+      expect(result).toEqual([]);
     });
 
     it('parses basic SSH config correctly', () => {
@@ -260,7 +268,7 @@ Host tilde-test
       expect(tunnel.isAlive()).toBe(false);
     });
 
-    it('rejects start() if SSH is not available', async () => {
+    it('rejects start() if SSH is not available', { timeout: 10000 }, async () => {
       // Since start() will try to find SSH, and most test environments have SSH installed,
       // we can only verify that start() doesn't throw during initialization
       const tunnel = new SshTunnel('nonexistent.invalid', 9999, 9999);
@@ -268,7 +276,7 @@ Host tilde-test
 
       // Clean up any potential tunnel process
       await tunnel.stop();
-    }, { timeout: 10000 });
+    });
 
     it('calls onDeath callback when tunnel dies after successful start', async () => {
       const onDeathMock = vi.fn();

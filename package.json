@@ -1,6 +1,6 @@
 {
   "name": "mindos-dev",
-  "version": "1.1.66",
+  "version": "1.1.67",
   "private": true,
   "description": "MindOS — Human-Agent Collaborative Mind System. Local-first knowledge base that syncs your mind to all AI Agents via MCP.",
   "keywords": [
@@ -41,8 +41,11 @@
     "lint": "turbo run lint",
     "type-check": "turbo run type-check",
     "verify:standalone": "node scripts/verify-standalone.mjs",
-    "obsidian:matrix": "pnpm --dir packages/web exec node --conditions=import --import tsx scripts/generate-obsidian-real-plugin-matrix.ts",
+    "obsidian:matrix": "NODE_USE_ENV_PROXY=1 pnpm --dir packages/web exec node --conditions=import --import tsx scripts/generate-obsidian-real-plugin-matrix.ts",
     "obsidian:workflow-probe": "pnpm run obsidian:matrix -- --run-workflow-probes",
+    "obsidian:corpus": "pnpm run obsidian:matrix -- --skip-smoke --concurrency 4 --main-js-max-mb 24 --styles-css-max-kb 4096",
+    "obsidian:api-surface": "NODE_USE_ENV_PROXY=1 pnpm --dir packages/web exec node --conditions=import --import tsx scripts/generate-obsidian-api-surface.ts",
+    "obsidian:api-coverage": "pnpm --dir packages/web exec node --conditions=import --import tsx scripts/report-obsidian-api-surface-coverage.ts",
     "clean:product-stage": "node scripts/clean-product-stage.mjs --include-package-docs",
     "release": "bash scripts/release.sh",
     "clean": "turbo run clean && node scripts/remove-node-modules.mjs",
@@ -61,6 +64,7 @@
     }
   },
   "devDependencies": {
+    "esbuild": "^0.27.7",
     "@eslint/js": "^9.39.4",
     "@playwright/test": "1.60.0",
     "@types/node": "^22.10.5",
@@ -71,6 +75,7 @@
     "turbo": "^2.3.3",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.59.0",
-    "vitest": "^2.1.8"
+    "vitest": "^5.0.0",
+    "yaml": "2.9.0"
   }
 }

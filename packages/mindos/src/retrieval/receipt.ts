@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
-import { redactSensitiveText } from '../agent/redaction.js';
+import { redactSensitiveText } from '../foundation/security/redaction.js';
 import { resolveExistingSafe } from '../foundation/security/index.js';
 
 export type RetrievalReceiptOutcome = 'selected' | 'empty' | 'timeout' | 'error' | 'skipped';
@@ -32,6 +32,11 @@ export type RetrievalReceiptCandidate = {
 
 export type RetrievalReceiptSelection = {
   assetId: string;
+  /** Fingerprint of the exact selected excerpt; no body content is stored. */
+  contentHash?: string;
+  /** Hash of the source file read during chunking, when available. */
+  sourceContentHash?: string;
+  assetVersion?: number;
   path: string;
   score: number;
   startLine?: number;
@@ -134,9 +139,14 @@ export function writeRetrievalReceipt(mindRoot: string, input: WriteRetrievalRec
 
 export function getRetrievalReceipt(mindRoot: string, receiptId: string): RetrievalReceipt | null {
   if (!SAFE_ID.test(receiptId)) return null;
-  return listReceiptFiles(mindRoot)
-    .map(readReceiptFile)
-    .find((receipt): receipt is RetrievalReceipt => receipt?.id === receiptId) ?? null;
+  // Receipts live at <root>/YYYY/MM/<id>.json, so a lookup only needs the
+  // directory listing; parsing every receipt on each lookup scaled with the
+  // full history and blocked the server thread.
+  const fileName = `${receiptId}.json`;
+  const file = listReceiptFiles(mindRoot).find((candidate) => path.basename(candidate) === fileName);
+  if (!file) return null;
+  const receipt = readReceiptFile(file);
+  return receipt?.id === receiptId ? receipt : null;
 }
 
 export function listRetrievalReceipts(
@@ -281,6 +291,9 @@ function normalizeSelection(value: unknown): RetrievalReceiptSelection | null {
   return {
     assetId,
     path: filePath,
+    ...(typeof value.contentHash === 'string' && SHA256.test(value.contentHash) ? { contentHash: value.contentHash } : {}),
+    ...(typeof value.sourceContentHash === 'string' && SHA256.test(value.sourceContentHash) ? { sourceContentHash: value.sourceContentHash } : {}),
+    ...(Number.isSafeInteger(value.assetVersion) && Number(value.assetVersion) > 0 ? { assetVersion: Number(value.assetVersion) } : {}),
     score: normalizeScore(value.score),
     ...(startLine ? { startLine } : {}),
     ...(endLine ? { endLine } : {}),

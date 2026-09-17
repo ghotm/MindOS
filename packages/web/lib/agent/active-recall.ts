@@ -20,9 +20,10 @@ import { estimateStringTokens } from './context';
 import { getFileContent } from '@/lib/fs';
 import {
   calculateContextFeedbackProfile,
-  listContextAssets,
+  readContextAssetRegistry,
   readContextFeedbackLedger,
   registerContextFileAsset,
+  type ContextAsset,
 } from '@geminilight/mindos/knowledge';
 import {
   writeRetrievalReceipt,
@@ -37,6 +38,7 @@ import {
 export interface RecallResult {
   /** Relative file path within the knowledge base. */
   path: string;
+  sourceContentHash?: string;
   /** Recalled Markdown excerpt. Long files contribute chunks, not whole files. */
   content: string;
   /** Search relevance score. */
@@ -123,6 +125,7 @@ export type ActiveRecallWithReceiptResult = {
   receipt: RetrievalReceipt | null;
   metadata: {
     retrievalReceiptId?: string;
+    retrievalReceiptIds?: string[];
     retrievalSelectedAssetIds: string[];
     retrievalOutcome: RetrievalReceiptOutcome;
   };
@@ -156,11 +159,18 @@ export async function performActiveRecallWithReceipt(
   const completedAt = new Date();
   const resolvedOptions = resolveRecallOptions(options);
   const assetIdsByPath = new Map<string, string>();
+  const selectedAssets = new Map<string, ContextAsset>();
+  const registeredAssets = readContextAssetRegistry(mindRoot).assets;
 
   for (const item of execution.items) {
     if (assetIdsByPath.has(item.path)) continue;
     try {
-      const asset = registerContextFileAsset(mindRoot, {
+      // A promoted method already owns its provenance. Reuse it only when the
+      // file read for this excerpt still matches the approved content exactly.
+      const approved = registeredAssets.find((asset) => asset.path === item.path
+        && asset.status === 'active' && asset.source.kind === 'echo-card'
+        && item.sourceContentHash === asset.contentHash);
+      const asset = approved ?? registerContextFileAsset(mindRoot, {
         path: item.path,
         kind: 'knowledge',
         status: 'active',
@@ -168,13 +178,14 @@ export async function performActiveRecallWithReceipt(
         metadata: { registeredBy: 'active-recall' },
       }, completedAt);
       assetIdsByPath.set(item.path, asset.id);
+      selectedAssets.set(item.path, asset);
     } catch {
       // Observability must never make the retrieval path unavailable.
     }
   }
 
   const receiptCandidates = receiptCandidatesFromTrace(execution.trace.candidates, execution.items, assetIdsByPath);
-  const selections = receiptSelections(execution.items, execution.trace.candidates, assetIdsByPath);
+  const selections = receiptSelections(execution.items, execution.trace.candidates, assetIdsByPath, selectedAssets);
   const receiptId = context.receiptId ?? `retrieval-${completedAt.getTime().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
   let receipt: RetrievalReceipt | null = null;
   try {
@@ -307,14 +318,19 @@ function receiptSelections(
   items: RecallResult[],
   candidates: RecallCandidate[],
   assetIdsByPath: Map<string, string>,
+  selectedAssets: Map<string, ContextAsset>,
 ): RetrievalReceiptSelection[] {
   const candidatesByKey = new Map(candidates.map((candidate) => [recallResultKey(candidate.result), candidate]));
   return items.flatMap((item) => {
     const assetId = assetIdsByPath.get(item.path);
     if (!assetId) return [];
     const candidate = candidatesByKey.get(recallResultKey(item));
+    const asset = selectedAssets.get(item.path);
     return [{
       assetId,
+      contentHash: crypto.createHash('sha256').update(item.content).digest('hex'),
+      ...(item.sourceContentHash ? { sourceContentHash: item.sourceContentHash } : {}),
+      ...(asset && asset.contentHash === item.sourceContentHash ? { assetVersion: asset.version } : {}),
       path: item.path,
       score: item.score,
       ...(item.startLine ? { startLine: item.startLine } : {}),
@@ -332,15 +348,18 @@ function recallResultKey(result: RecallResult): string {
 }
 
 function applyContextFeedbackHints(mindRoot: string, candidates: RecallCandidate[]): RecallCandidate[] {
+  // Eligibility is independent of optional learning hints and UI pagination.
+  const paths = new Set(candidates.map((candidate) => candidate.result.path));
+  const assets = readContextAssetRegistry(mindRoot).assets.filter((asset) => paths.has(asset.path));
+  const deprecated = new Set(assets.filter((asset) => asset.status === 'deprecated').map((asset) => asset.path));
+  const eligible = candidates.filter((candidate) => !deprecated.has(candidate.result.path));
   try {
-    const assets = listContextAssets(mindRoot, { limit: 1_000 });
-    if (assets.length === 0) return candidates;
+    if (assets.length === 0) return eligible;
     const ledger = readContextFeedbackLedger(mindRoot);
     const assetsByPath = new Map(assets.map((asset) => [asset.path, asset]));
-    return candidates.flatMap((candidate) => {
+    return eligible.flatMap((candidate) => {
       const asset = assetsByPath.get(candidate.result.path);
       if (!asset) return [candidate];
-      if (asset.status === 'deprecated') return [];
       const profile = calculateContextFeedbackProfile(asset.id, asset.version, ledger.feedback);
       if (!profile.eligible || profile.adjustment === 0) return [candidate];
       const score = roundScore(candidate.score + profile.adjustment);
@@ -353,7 +372,7 @@ function applyContextFeedbackHints(mindRoot: string, candidates: RecallCandidate
     });
   } catch {
     // Learning hints are optional; a damaged ledger must never break recall.
-    return candidates;
+    return eligible;
   }
 }
 
@@ -416,6 +435,7 @@ function buildChunkCandidates(
     }];
   }
 
+  const sourceContentHash = crypto.createHash('sha256').update(content).digest('hex');
   const chunks = buildMarkdownRecallChunks(hit.path, content);
   if (chunks.length === 0) return [];
 
@@ -425,6 +445,7 @@ function buildChunkCandidates(
       return {
         result: {
           path: chunk.path,
+          sourceContentHash,
           content: chunk.content,
           score: hit.score + chunkScore,
           startLine: chunk.startLine,

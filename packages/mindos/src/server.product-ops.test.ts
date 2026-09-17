@@ -3,6 +3,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync
 } from 'node:fs';
@@ -544,7 +545,34 @@ describe('MindOS server contract: product operations', () => {
     });
   });
 
+  it('asks for target_dir files by their vault path on every platform', () => {
+    // Regression: path.join() emitted "Workflows\\README.md" on Windows, so any
+    // service keyed by vault paths (which always use "/") returned nothing.
+    const requested: string[] = [];
+    const services = {
+      collectAllFiles: () => ['Workflows/README.md'],
+      readTextFile: (filePath: string) => {
+        requested.push(filePath);
+        if (filePath === 'Workflows/README.md') return '# Workflows';
+        throw new Error('missing');
+      },
+    };
+
+    const result = handleBootstrapGet(new URLSearchParams('target_dir=Workflows'), services);
+
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ target_readme: '# Workflows' });
+    expect(requested).toContain('Workflows/README.md');
+    expect(requested.every((filePath) => !filePath.includes('\\'))).toBe(true);
+  });
+
   it('handles local connection metadata without Web dependencies', () => {
+    const first = handleConnectGet({ mindRoot: '/mind/one' }).body!;
+    expect(first.rootId).toMatch(/^[a-f0-9]{24}$/);
+    expect(handleConnectGet({ mindRoot: '/mind/one' }).body!.rootId).toBe(first.rootId);
+    expect(handleConnectGet({ mindRoot: '/mind/one/' }).body!.rootId).toBe(first.rootId);
+    expect(handleConnectGet({ mindRoot: '/mind/two' }).body!.rootId).not.toBe(first.rootId);
+    expect(JSON.stringify(first)).not.toContain('/mind/one');
     expect(handleConnectGet({
       port: '4567',
       hostname: () => 'test-host',
@@ -622,6 +650,22 @@ describe('MindOS server contract: product operations', () => {
       status: 200,
       body: { current: '1.1.53', latest: '1.1.55', hasUpdate: true },
     });
+  });
+
+  it('does not spawn a second supervisor when restarted under Desktop ProcessManager', () => {
+    const spawned: string[] = [];
+    const scheduledExit: number[] = [];
+    const res = handleRestartPost({
+      cliPath: '/opt/mindos/bin/cli.js',
+      nodeBin: '/usr/local/bin/node',
+      env: { PATH: '/usr/bin', MINDOS_MANAGED: '1', MINDOS_WEB_PORT: '3011' },
+      spawn: (command: string) => { spawned.push(command); return { unref: () => {} }; },
+      scheduleExit: (delayMs) => { scheduledExit.push(delayMs); },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, note: 'ProcessManager will respawn' });
+    expect(spawned).toEqual([]);
+    expect(scheduledExit).toHaveLength(1);
   });
 
   it('runs restart and update process controls with sanitized child environments', () => {
@@ -756,7 +800,9 @@ describe('MindOS server contract: product operations', () => {
     expect(writes).toEqual(['Y\nN\nN\n']);
   });
 
-  it('removes local configuration only when removeConfig is explicitly true', () => {
+  it('removes local configuration only when removeConfig is explicitly true', ({ onTestFinished }) => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'mindos-uninstall-contract-'));
+    onTestFinished(() => rmSync(homeDir, { recursive: true, force: true }));
     const writes: string[] = [];
     const spawned: Array<{ command: string; args: string[]; options: Record<string, unknown>; unrefCalled: boolean; stdinEnded: boolean }> = [];
     const spawn = (command: string, args: string[], options: Record<string, unknown>) => {
@@ -772,6 +818,7 @@ describe('MindOS server contract: product operations', () => {
     };
 
     const response = handleUninstallPost({ removeConfig: true }, {
+      homeDir,
       cliPath: '/opt/mindos/bin/cli.js',
       nodeBin: '/usr/local/bin/node',
       env: { PATH: '/usr/bin' },

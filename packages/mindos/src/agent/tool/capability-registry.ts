@@ -2,27 +2,53 @@
 // spec-agent-core-consolidation). Maps the host's agent surface (KB tools,
 // pi-subagents on disk, native/ACP runtimes, MCP tool cache, A2A registry)
 // into AgentCapabilityInput records for the /api/agent/capabilities handler.
-// ACP/A2A/MCP probing and settings IO stay services-injected — only the
-// mapping rules and pi-subagent frontmatter discovery live here.
+// ACP/A2A/MCP probing, settings IO and the runtime descriptor list stay
+// services-injected — only the mapping rules and pi-subagent frontmatter
+// discovery live here. The descriptor port keeps this tool off the HTTP
+// handler layer (spec-runtime-lane-contract): hosts list descriptors through
+// their own detection wiring (which shares the runtime detection cache).
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  handleAgentRuntimesGet,
-  type AgentRuntimeDescriptor,
-  type AgentRuntimesPayload,
-  type AgentRuntimesServices,
-} from '../../server/handlers/agent-runtimes.js';
-import type {
-  AgentCapabilitiesServices,
-  AgentCapabilityInput,
-} from '../../server/handlers/agent-capabilities.js';
+import type { AgentRuntimeDescriptor } from '../runtime/registry.js';
 import {
   MINDOS_READONLY_KB_TOOL_NAMES,
   MINDOS_KNOWLEDGE_WRITE_TOOL_NAMES,
 } from '../mindos-pi/permission/index.js';
 import type { MindosAgentTool } from './kb-tools.js';
+
+/**
+ * Capability-source contract owned by the registry (the port declarer) so the
+ * agent layer never imports server types; `server/handlers/agent-capabilities.ts`
+ * imports and re-exports them for the HTTP surface
+ * (spec-knowledge-layering-and-export-surface).
+ */
+export type AgentCapabilityInput = {
+  id?: unknown;
+  kind?: unknown;
+  name?: unknown;
+  description?: unknown;
+  source?: unknown;
+  status?: unknown;
+  permissionRequired?: unknown;
+  inputKinds?: unknown;
+  outputKinds?: unknown;
+  supportsStreaming?: unknown;
+  supportsCancel?: unknown;
+  supportsBackgroundRuns?: unknown;
+  supportsApprovals?: unknown;
+  supportsUserInput?: unknown;
+  defaultTimeoutMs?: unknown;
+  metadata?: unknown;
+};
+
+export type AgentCapabilitySourceKey = 'kb' | 'subagents' | 'acp' | 'native' | 'mcp' | 'a2a';
+
+export type AgentCapabilitiesServices = Partial<Record<
+  AgentCapabilitySourceKey,
+  () => AgentCapabilityInput[] | Promise<AgentCapabilityInput[]>
+>>;
 
 type PiSubagentModule = {
   name: string;
@@ -94,11 +120,12 @@ export interface MindosAgentCapabilityRegistryServices {
   /** The host's full KB tool array (MindosKbToolkit.knowledgeBaseTools). */
   knowledgeBaseTools: MindosAgentTool[];
   effectiveMindRoot(): string;
-  readSettings: AgentRuntimesServices['readSettings'];
-  detectLocalAcpAgents: AgentRuntimesServices['detectLocalAcpAgents'];
-  resolveRuntimeCommand: AgentRuntimesServices['resolveRuntimeCommand'];
-  resolveRuntimeCommandCandidates?: AgentRuntimesServices['resolveRuntimeCommandCandidates'];
-  checkNativeRuntimeHealth: AgentRuntimesServices['checkNativeRuntimeHealth'];
+  /**
+   * Runtime descriptors (mindos/codex/claude/acp) as the host lists them,
+   * typically via `handleAgentRuntimesGet` so the shared detection cache is
+   * reused. Injected so this tool never depends on an HTTP handler.
+   */
+  listRuntimeDescriptors(): Promise<AgentRuntimeDescriptor[]>;
   readMcpConfig(): MindosMcpConfigLike;
   readMcpToolCache(): MindosMcpToolCacheLike;
   getDiscoveredAgents(): MindosA2aDiscoveredAgentLike[];
@@ -310,20 +337,7 @@ function listA2aAgentCapabilities(services: MindosAgentCapabilityRegistryService
 }
 
 async function loadRuntimeDescriptors(services: MindosAgentCapabilityRegistryServices): Promise<AgentRuntimeDescriptor[]> {
-  const runtimeServices: AgentRuntimesServices = {
-    readSettings: services.readSettings,
-    detectLocalAcpAgents: services.detectLocalAcpAgents,
-    resolveRuntimeCommand: services.resolveRuntimeCommand,
-    resolveRuntimeCommandCandidates: services.resolveRuntimeCommandCandidates,
-    checkNativeRuntimeHealth: services.checkNativeRuntimeHealth,
-  };
-  const response = await handleAgentRuntimesGet(new URLSearchParams(), {
-    ...runtimeServices,
-  });
-  if (response.status !== 200 || !response.body || !('runtimes' in response.body)) {
-    throw new Error('Could not load agent runtime descriptors.');
-  }
-  return (response.body as AgentRuntimesPayload).runtimes;
+  return services.listRuntimeDescriptors();
 }
 
 function runtimeToCapability(runtime: AgentRuntimeDescriptor): AgentCapabilityInput {

@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { Brain, ChevronDown, FolderOpen, Plus, Sparkles, Search, FilePlus, ArrowRight, Clock, FileText, Table, Star, X, History } from 'lucide-react';
 import { usePinnedFiles } from '@/lib/hooks/usePinnedFiles';
+import { useHydratedNow } from '@/hooks/useHydratedNow';
 import { useLocale } from '@/lib/stores/locale-store';
 import { encodePath, relativeTime, extractEmoji, stripEmoji } from '@/lib/utils';
 import { InboxSection } from '@/components/home/InboxSection';
@@ -83,7 +84,10 @@ export default function WikiHomeContent({ spaces, recent, mindSystemSpaces }: Wi
   }, [spaces, recent, sortBy]);
 
   const visibleSpaces = showAllSpaces ? sortedSpaces : sortedSpaces.slice(0, SPACES_COLLAPSED);
-  const formatTime = (mtime: number) => relativeTime(mtime, t.home.relativeTime);
+  // `now` is null on the server and during hydration so the HTML never depends
+  // on when the request was served; relative labels appear right after hydration.
+  const now = useHydratedNow();
+  const formatTime = (mtime: number) => (now === null ? '' : relativeTime(mtime, t.home.relativeTime, now));
   const lastFile = recent[0];
 
   return (
@@ -145,13 +149,25 @@ export default function WikiHomeContent({ spaces, recent, mindSystemSpaces }: Wi
             >
               <ArrowRight size={14} className="text-[var(--amber)]/60" />
               <span>{t.home.continueEditing}</span>
-              <span className="text-xs opacity-40 truncate max-w-32" suppressHydrationWarning>
+              <span className="text-xs text-muted-foreground truncate max-w-32" suppressHydrationWarning>
                 {lastFile.path.split('/').pop()}
               </span>
             </Link>
           )}
         </div>
       </header>
+
+      {/* ══════════ Pinned Files ══════════ */}
+      <PinnedFilesSection />
+
+      {/* ── Visual divider ── */}
+      <div className="border-t border-border/30 mb-8" />
+
+      {/* ══════════ Recently Edited (flat list) ══════════ */}
+      {recent.length > 0 && (
+        <RecentlyEditedSection recent={recent} formatTime={formatTime} />
+      )}
+
 
       {/* ══════════ Built-in Mind Spaces ══════════ */}
       <BuiltInMindSpacesSection spaces={mindSystemSpaces} />
@@ -218,6 +234,7 @@ export default function WikiHomeContent({ spaces, recent, mindSystemSpaces }: Wi
                 const emoji = extractEmoji(space.name);
                 const label = stripEmoji(space.name);
                 const latestMtime = getSpaceLatestMtime(space.name, recent);
+                const latestLabel = latestMtime > 0 ? formatTime(latestMtime) : '';
                 const isEmpty = space.fileCount === 0;
 
                 return (
@@ -242,9 +259,9 @@ export default function WikiHomeContent({ spaces, recent, mindSystemSpaces }: Wi
                           {space.description}
                         </span>
                       )}
-                      <span className="text-xs text-muted-foreground/50 mt-0.5 block tabular-nums">
+                      <span className="text-xs text-muted-foreground mt-0.5 block tabular-nums">
                         {t.home.nFiles(space.fileCount)}
-                        {latestMtime > 0 && ` · ${formatTime(latestMtime)}`}
+                        {latestLabel && ` · ${latestLabel}`}
                       </span>
                     </div>
                   </Link>
@@ -268,17 +285,6 @@ export default function WikiHomeContent({ spaces, recent, mindSystemSpaces }: Wi
 
       {/* ══════════ Inbox ══════════ */}
       <InboxSection />
-
-      {/* ══════════ Pinned Files ══════════ */}
-      <PinnedFilesSection />
-
-      {/* ── Visual divider ── */}
-      <div className="border-t border-border/30 mb-8" />
-
-      {/* ══════════ Recently Edited (flat list) ══════════ */}
-      {recent.length > 0 && (
-        <RecentlyEditedSection recent={recent} formatTime={formatTime} />
-      )}
 
       {/* Footer */}
       <div className="py-6 border-t border-border/20 flex items-center gap-1.5 text-xs font-display text-muted-foreground/30">
@@ -487,7 +493,7 @@ function RecentlyEditedSection({ recent, formatTime }: { recent: RecentFile[]; f
                 <span className="text-sm truncate block text-foreground" suppressHydrationWarning>{name}</span>
                 {dir && <span className="text-xs truncate block text-muted-foreground opacity-50" suppressHydrationWarning>{dir}</span>}
               </div>
-              <span className="text-xs shrink-0 tabular-nums text-muted-foreground/40" suppressHydrationWarning>
+              <span className="text-xs shrink-0 tabular-nums text-muted-foreground/40">
                 {formatTime(mtime)}
               </span>
             </Link>

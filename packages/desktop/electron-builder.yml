@@ -36,6 +36,7 @@ asarUnpack:
   - "**/src/connect.html"
   - "**/src/splash.html"
   - "**/dist-electron/preload/**"
+  - "**/dist-electron/obsidian/preload.js"
   - "**/dist-electron/renderer/connect-renderer.js"
 # Bundled MindOS: populate `resources/mindos-runtime` via `npm run prepare-mindos-runtime` before dist.
 
@@ -58,6 +59,10 @@ nsis:
 
 linux:
   icon: src/icons/icon.png
+  # electron-builder 26 derives the default from the lower-cased package name
+  # ("@mindosdesktop") and then rejects the "@"; keep the binary named like
+  # the product so /opt/MindOS/MindOS and the .desktop Exec stay stable.
+  executableName: MindOS
   target:
     - AppImage
     - deb

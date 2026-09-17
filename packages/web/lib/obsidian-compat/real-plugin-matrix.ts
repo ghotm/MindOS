@@ -8,7 +8,7 @@ import type {
   ObsidianCommunityPreflightSupportLevel,
   ObsidianCommunitySurfacePreview,
 } from './community-support';
-import type { CompatibilityLevel } from './compatibility-report';
+import { classifyPluginRuntimeTier, type CompatibilityLevel, type PluginRuntimeTierRequirement } from './compatibility-report';
 import {
   buildObsidianSurfacePolicyDecision,
   type ObsidianSurfacePolicyAction,
@@ -81,6 +81,7 @@ export interface ObsidianRealPluginSmokeResult {
     statusBarItems: number;
     styleSheets: number;
     editorExtensions: number;
+    apiSurfaceMisses?: number;
   };
   workflowProbes?: ObsidianRealPluginWorkflowProbeSummary;
 }
@@ -139,8 +140,13 @@ export interface ObsidianRealPluginMatrixRow {
     supportedApis: number;
     partialApis: number;
     unsupportedApis: number;
+    partialApiList: string[];
+    unsupportedApiList: string[];
     blockers: string[];
     unsupportedModules: string[];
+    /** Third-party bundler leftovers the host never provides; not a capability gap. */
+    bundledModules?: string[];
+    runtimeTier: PluginRuntimeTierRequirement;
   };
   capabilityGate: {
     status: ObsidianCapabilityGateReport['status'];
@@ -413,8 +419,12 @@ function toMatrixRow(input: ObsidianRealPluginMatrixInputItem): ObsidianRealPlug
       supportedApis: report.supportedApis.length,
       partialApis: report.partialApis.length,
       unsupportedApis: report.unsupportedApis.length,
+      partialApiList: [...report.partialApis],
+      unsupportedApiList: [...report.unsupportedApis],
       blockers: report.blockers,
       unsupportedModules: report.unsupportedModules,
+      bundledModules: report.bundledModules ?? [],
+      runtimeTier: report.runtimeTier ?? classifyPluginRuntimeTier(report),
     },
     capabilityGate: {
       status: input.capabilityGate.status,

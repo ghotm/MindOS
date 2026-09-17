@@ -5,11 +5,17 @@
  * This implementation uses XMLHttpRequest with onprogress, which is
  * the only reliable way to get streaming data in React Native.
  *
- * MindOS agent turn SSE format:
+ * MindOS agent turn SSE format (one JSON object per `data:` block):
  *   data:{"type":"text_delta","delta":"hello"}\n\n
  *   data:{"type":"done"}\n\n
+ *
+ * Wire framing (line splitting, CRLF, multi-line `data:`, comment lines,
+ * chunk boundaries) is handled by the spec-compliant parser in
+ * `./sse-parser`; this file only turns each frame's payload into an
+ * `SSEEvent`.
  */
 
+import { createSseParser, type SseFrame } from './sse-parser';
 import type {
   Message,
   MessagePart,
@@ -89,13 +95,12 @@ export function streamChat(
   if (!sessionId) {
     callbacks.onError(new Error('sessionId is required for agent turns'));
     callbacks.onComplete();
-    return () => {};
+    return () => { };
   }
   const { sessionId: _sessionId, ...turnBody } = body;
   let isClosed = false;
   let completed = false;
   let processedLength = 0;
-  let buffer = '';
 
   const xhr = new XMLHttpRequest();
   xhr.open('POST', `${baseUrl}/api/agent/sessions/${encodeURIComponent(sessionId)}/turns`);
@@ -105,9 +110,22 @@ export function streamChat(
     xhr.setRequestHeader('Authorization', `Bearer ${options.authToken}`);
   }
 
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearIdleTimer = () => { if (idleTimer) clearTimeout(idleTimer); idleTimer = undefined; };
+  const resetIdleTimer = () => {
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      if (isClosed) return;
+      isClosed = true;
+      xhr.abort();
+      callbacks.onError(new Error('No response for five minutes. Check Agent Runs before retrying a task.'));
+    }, 300_000);
+  };
+
   const completeOnce = () => {
     if (completed) return;
     completed = true;
+    clearIdleTimer();
     callbacks.onComplete();
   };
 
@@ -116,27 +134,24 @@ export function streamChat(
     if (event.type === 'done' || event.type === 'error') {
       isClosed = true;
       completeOnce();
-      return true;
     }
-    return false;
   };
 
-  const processBuffer = (text: string) => {
-    for (const line of text.split('\n')) {
-      if (!line.startsWith('data:')) continue;
-
-      const dataStr = line.slice(5).trim();
-      if (!dataStr) continue;
-
-      try {
-        const event = JSON.parse(dataStr) as SSEEvent;
-        if (processEvent(event)) return true;
-      } catch {
-        // Skip unparseable lines (e.g. partial JSON)
-      }
+  const onFrame = (frame: SseFrame) => {
+    // A single push() can dispatch several frames; anything after done/error
+    // (or after cancel) must be dropped.
+    if (isClosed) return;
+    let event: SSEEvent;
+    try {
+      event = JSON.parse(frame.data) as SSEEvent;
+    } catch {
+      // Skip frames whose payload is not JSON.
+      return;
     }
-    return false;
+    processEvent(event);
   };
+
+  const parser = createSseParser(onFrame);
 
   const responseErrorMessage = () => {
     const status = xhr.status || 0;
@@ -155,23 +170,16 @@ export function streamChat(
   xhr.onprogress = () => {
     if (isClosed) return;
 
-    // Get only the new data since last progress event
+    // Feed only the bytes that arrived since the last progress event; the
+    // parser keeps partial lines / blocks across calls.
     const newData = xhr.responseText.slice(processedLength);
     processedLength = xhr.responseText.length;
-
-    buffer += newData;
-
-    // SSE events are separated by \n\n
-    const chunks = buffer.split('\n\n');
-    buffer = chunks.pop() || '';
-
-    for (const chunk of chunks) {
-      if (!chunk.trim()) continue;
-      if (processBuffer(chunk)) return;
-    }
+    if (newData) resetIdleTimer();
+    parser.push(newData);
   };
 
   xhr.onload = () => {
+    clearIdleTimer();
     if (!completed && xhr.status !== 0 && (xhr.status < 200 || xhr.status >= 300)) {
       isClosed = true;
       callbacks.onError(new Error(responseErrorMessage()));
@@ -179,13 +187,20 @@ export function streamChat(
     }
 
     if (!completed) {
-      if (!isClosed && buffer.trim()) processBuffer(buffer);
+      if (!isClosed) {
+        // The final bytes can land without a trailing onprogress; drain them
+        // before flushing so a truncated last frame is still delivered.
+        parser.push(xhr.responseText.slice(processedLength));
+        processedLength = xhr.responseText.length;
+        parser.flush();
+      }
       completeOnce();
     }
     isClosed = true;
   };
 
   xhr.onerror = () => {
+    clearIdleTimer();
     if (!isClosed) {
       callbacks.onError(new Error('Network error — check your connection'));
     }
@@ -193,23 +208,27 @@ export function streamChat(
   };
 
   xhr.ontimeout = () => {
+    clearIdleTimer();
     if (!isClosed) {
       callbacks.onError(new Error('Request timed out'));
     }
     isClosed = true;
   };
 
-  // 5 minute timeout for long-running agent tasks
-  xhr.timeout = 300_000;
+  // Limit silence, not the total duration of an active agent task.
+  xhr.timeout = 0;
+  resetIdleTimer();
 
   try {
     xhr.send(JSON.stringify(turnBody));
   } catch (e) {
+    clearIdleTimer();
     callbacks.onError(e instanceof Error ? e : new Error(String(e)));
     isClosed = true;
   }
 
   return () => {
+    clearIdleTimer();
     if (!isClosed) {
       isClosed = true;
       xhr.abort();

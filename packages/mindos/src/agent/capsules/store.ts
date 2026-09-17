@@ -1,18 +1,25 @@
 import crypto from 'node:crypto';
-import {
-  existsSync,
-  linkSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+// Namespace import (not named bindings) so the fs calls stay observable to
+// tests that spy on `fs.readFileSync` to prove the capsule cache skips reads.
+import fs from 'node:fs';
 import path from 'node:path';
 import { resolveExistingSafe } from '../../foundation/security/index.js';
-import { redactSensitiveText } from '../redaction.js';
+import type { MindosDatabase } from '../../foundation/storage/sqlite.js';
+import { installKnowledgeAgentRunCapsuleReader } from '../../knowledge/agent-run-data.js';
+import { redactSensitiveText } from '../../foundation/security/redaction.js';
+import {
+  deleteCapsuleRow,
+  forgetDir,
+  getCapsuleRow,
+  listCapsuleRows,
+  listCapsuleRowsUnder,
+  listIndexedDirs,
+  openCapsuleIndex,
+  readDirMtime,
+  upsertCapsuleRow,
+  writeDirMtime,
+  type CapsuleIndexRow,
+} from './capsule-index.js';
 import type {
   AgentRunCapsule,
   AgentRunCapsuleProjection,
@@ -21,6 +28,24 @@ import type {
   CreateAgentRunCapsuleInput,
   CreateAgentRunCapsuleRecoveryPlanInput,
 } from './types.js';
+import {
+  cancelQueuedCapsuleWrite,
+  clearCapsuleWriteCancel,
+  clearPendingCapsule,
+  enqueueCapsuleWrite,
+  getPendingCapsule,
+  isCapsuleWriteCancelled,
+  pendingCapsuleEntries,
+  setCapsuleWriteSyncFallback,
+  setPendingCapsule,
+} from './write-queue.js';
+
+export { CAPSULES_DB_RELATIVE_PATH } from './capsule-index.js';
+export {
+  flushAllCapsuleWrites,
+  flushCapsuleWrites,
+  writePendingCapsuleWritesSync,
+} from './write-queue.js';
 
 const CAPSULES_DIR = '.mindos/agent-run-capsules';
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/;
@@ -29,6 +54,65 @@ const MAX_INPUT_SUMMARY = 500;
 const MAX_IDEMPOTENCY_KEY = 200;
 const MAX_CAPSULE_BYTES = 8 * 1024 * 1024;
 const MAX_OUTPUT_TEXT = 64 * 1024;
+
+type CapsuleFileCacheEntry = {
+  /** `resolveExistingSafe()` result for this file; re-validated whenever its stat changes. */
+  safePath: string;
+  mtimeMs: number;
+  size: number;
+  /** Parsed capsule, or null when the file failed validation (see `corruptMessage`). */
+  capsule: AgentRunCapsule | null;
+  corruptMessage?: string;
+};
+
+type CapsuleStoreCache = {
+  files: Map<string, CapsuleFileCacheEntry>;
+};
+
+/**
+ * Per-mind-root parsed-file cache. `GET /api/agent-runs` polls roughly every
+ * 900ms; files are revalidated by mtime + size so unchanged capsules are never
+ * re-read or re-parsed. Cached capsules are handed out by reference; callers
+ * must treat them as immutable.
+ *
+ * Where each capsule lives is remembered in the sqlite index
+ * (`capsule-index.ts`): month directories are re-listed only when their mtime
+ * changed, and lookups by id go straight to the indexed path.
+ */
+const capsuleCaches = new Map<string, CapsuleStoreCache>();
+const MAX_CACHED_ROOTS = 16;
+
+// ── Async write queue (implementation in ./write-queue.ts) ─────────────────
+//
+// Capsule persistence used to run structuredClone + JSON.stringify +
+// writeFileSync + link synchronously inside `createAgentRunCapsule`, before the
+// lane could emit the first SSE byte (10-25ms for a ~6MB chat). The public
+// store functions stay synchronous — lane callers do not await them — but the
+// disk work is queued on a per-capsule promise chain, and an in-memory overlay
+// serves same-process reads while a write is pending. See write-queue.ts for
+// the queue/overlay/flush/exit-fallback machinery.
+
+setCapsuleWriteSyncFallback((pending) => {
+  fs.mkdirSync(path.dirname(pending.file), { recursive: true, mode: 0o700 });
+  writeJsonAtomic(pending.file, pending.capsule);
+});
+
+function rootKeyOf(mindRoot: string): string {
+  return path.resolve(mindRoot);
+}
+
+/** Cache/index reconciliation after a write landed; keeps the newest state. */
+function settlePendingCapsule(
+  id: string,
+  capsule: AgentRunCapsule,
+  mindRoot: string,
+  file: string,
+): void {
+  const current = getPendingCapsule(id);
+  if (current && current.capsule !== capsule) return; // a newer finalize owns reconciliation
+  rememberCapsuleFile(mindRoot, file, capsule);
+  clearPendingCapsule(id, capsule);
+}
 
 export function createAgentRunCapsule(
   mindRoot: string,
@@ -49,7 +133,11 @@ export function createAgentRunCapsule(
     ...(input.chatSessionId ? { chatSessionId: input.chatSessionId } : {}),
     source: input.source,
     status: input.status ?? 'running',
-    request: structuredClone(input.request),
+    // No structuredClone here: the turn lane builds this request with its own
+    // fresh clone (web `_lib/turn-runner.ts` capsuleSeed), so cloning again was
+    // a pure double copy on the pre-first-byte critical path. Ownership of the
+    // request transfers to the store; callers must not mutate it afterwards.
+    request: input.request,
     provenance: structuredClone(input.provenance ?? {}),
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
@@ -57,22 +145,103 @@ export function createAgentRunCapsule(
   assertCapsuleShape(capsule);
 
   const file = capsuleFile(mindRoot, capsule);
-  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  if (!writeJsonExclusive(file, capsule)) {
+  const pending = getPendingCapsule(id);
+  if ((pending && pending.mindRootKey === rootKeyOf(mindRoot)) || fs.existsSync(file)) {
     throw new Error(`Agent run capsule already exists: ${id}`);
   }
+  // Synchronous, tiny, exclusive STUB write. Keeps the two failure contracts
+  // callers rely on before the lane starts — an unwritable mind root throws
+  // (mkdir) and a duplicate id throws (exclusive link), across processes — at
+  // microsecond cost independent of chat size. The stub is a schema-valid
+  // capsule with an empty transcript; the full payload replaces it from the
+  // write queue. The in-memory overlay serves the full state until it lands.
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  if (!writeJsonExclusive(file, capsuleStub(capsule))) {
+    throw new Error(`Agent run capsule already exists: ${id}`);
+  }
+  clearCapsuleWriteCancel(id);
+  setPendingCapsule(id, { mindRootKey: rootKeyOf(mindRoot), file, capsule, landed: false });
+  enqueueCapsuleWrite(id, async () => {
+    const current = getPendingCapsule(id);
+    if (!current || current.file !== file) return;
+    if (current.landed) {
+      settlePendingCapsule(id, capsule, mindRoot, file);
+      return;
+    }
+    const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    try {
+      if (isCapsuleWriteCancelled(id)) throw new Error('cancelled');
+      // Serialize first so an oversized payload fails before touching disk.
+      const serialized = serializeJson(capsule);
+      await fs.promises.writeFile(temp, serialized, { encoding: 'utf-8', mode: 0o600 });
+      if (isCapsuleWriteCancelled(id)) throw new Error('cancelled');
+      await fs.promises.rename(temp, file);
+    } catch (error) {
+      await fs.promises.unlink(temp).catch(() => { /* best-effort cleanup */ });
+      // Never leave a stub behind pretending to be a durable capsule when the
+      // full write failed (oversized payload, disk error, cancellation).
+      removeCapsuleFileQuietly(file);
+      if (String((error as Error)?.message) === 'cancelled') return;
+      throw error;
+    }
+    settlePendingCapsule(id, capsule, mindRoot, file);
+  });
   return capsule;
+}
+
+/** Schema-valid capsule skeleton written synchronously at capture time. */
+function capsuleStub(capsule: AgentRunCapsule): AgentRunCapsule {
+  return {
+    ...capsule,
+    request: {
+      ...capsule.request,
+      messages: [],
+      context: { ...capsule.request.context, uploadedFiles: [] },
+    },
+  };
+}
+
+function removeCapsuleFileQuietly(file: string): void {
+  try {
+    fs.rmSync(file, { force: true });
+  } catch {
+    // Best effort: a leftover stub is revalidated by stat on the next read.
+  }
 }
 
 export function getAgentRunCapsule(mindRoot: string, id: string): AgentRunCapsule | null {
   requireSafeId(id, 'capsule id');
-  const file = listCapsuleFiles(mindRoot).find((candidate) => path.basename(candidate) === `${id}.json`);
-  return file ? readCapsule(file) : null;
+  const pending = getPendingCapsule(id);
+  if (pending && pending.mindRootKey === rootKeyOf(mindRoot)) return pending.capsule;
+  const entry = locateCapsuleEntry(mindRoot, id);
+  return entry ? requireCachedCapsule(entry) : null;
 }
 
-export function listAgentRunCapsules(mindRoot: string): AgentRunCapsule[] {
-  return listCapsuleFiles(mindRoot)
-    .map(readCapsule)
+export function listAgentRunCapsules(
+  mindRoot: string,
+  options: { onCorrupt?(message: string): void } = {},
+): AgentRunCapsule[] {
+  const rootKey = rootKeyOf(mindRoot);
+  const byId = new Map<string, AgentRunCapsule>();
+  const db = syncCapsuleIndex(mindRoot);
+  if (db) {
+    for (const row of listCapsuleRows(db)) {
+      const entry = readIndexedEntry(mindRoot, db, row);
+      if (!entry) continue;
+      if (entry.capsule) {
+        byId.set(entry.capsule.id, entry.capsule);
+      } else {
+        options.onCorrupt?.(entry.corruptMessage ?? 'Unreadable capsule.');
+      }
+    }
+  }
+  // Overlay pending writes not yet on disk (newest state wins), so a same-process
+  // list right after create/finalize still reflects the run.
+  for (const [id, pending] of pendingCapsuleEntries()) {
+    if (pending.mindRootKey !== rootKey) continue;
+    byId.set(id, pending.capsule);
+  }
+  return [...byId.values()]
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
     .slice(0, MAX_CAPSULES);
 }
@@ -89,9 +258,23 @@ export function finalizeAgentRunCapsule(
   },
 ): AgentRunCapsule {
   requireSafeId(id, 'capsule id');
-  const file = findCapsuleFile(mindRoot, id);
-  if (!file) throw new Error(`Agent run capsule not found: ${id}`);
-  const current = readCapsule(file);
+  const rootKey = rootKeyOf(mindRoot);
+  // Disk anchors existence: a capsule deleted behind the store's back must
+  // still fail finalize (the lane degrades to CAPSULE_FINALIZE_FAILED). The
+  // overlay supplies the freshest state while the full write is queued.
+  const entry = locateCapsuleEntry(mindRoot, id);
+  const pending = getPendingCapsule(id);
+  const pendingHere = pending && pending.mindRootKey === rootKey ? pending : undefined;
+  if (!entry) {
+    if (pendingHere) {
+      // The queued write is no longer grounded on disk; cancel it so an
+      // in-flight job cannot resurrect the deleted capsule after this failure.
+      cancelQueuedCapsuleWrite(id);
+    }
+    throw new Error(`Agent run capsule not found: ${id}`);
+  }
+  const current = pendingHere ? pendingHere.capsule : requireCachedCapsule(entry);
+  const file = pendingHere ? pendingHere.file : entry.safePath;
   const now = input.now ?? new Date();
   if (Number.isNaN(now.getTime())) throw new Error('Capsule timestamp must be a valid date.');
   const next: AgentRunCapsule = {
@@ -108,7 +291,19 @@ export function finalizeAgentRunCapsule(
       : current.result ? { result: current.result } : {}),
     updatedAt: now.toISOString(),
   };
-  writeJsonAtomic(file, next);
+  // Update the overlay synchronously so same-process reads see the finalized
+  // state, then queue the atomic rewrite behind any pending create on the chain.
+  setPendingCapsule(id, { mindRootKey: rootKey, file, capsule: next, landed: false });
+  enqueueCapsuleWrite(id, async () => {
+    const queued = getPendingCapsule(id);
+    if (!queued || queued.file !== file) return;
+    if (!queued.landed) {
+      const serialized = serializeJson(next);
+      await fs.promises.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+      await writeJsonAtomicAsync(file, serialized);
+    }
+    settlePendingCapsule(id, next, mindRoot, file);
+  });
   return next;
 }
 
@@ -125,7 +320,7 @@ export function createAgentRunCapsuleRecoveryPlan(
   }
   const planId = recoveryPlanId(idempotencyKey);
   const planFile = recoveryPlanFile(mindRoot, planId);
-  if (existsSync(planFile)) {
+  if (fs.existsSync(planFile)) {
     const existing = readRecoveryPlan(planFile);
     if (existing.sourceCapsuleId !== capsule.id || existing.action !== input.action) {
       throw new Error('Recovery idempotency key was already used for a different action.');
@@ -156,7 +351,7 @@ export function createAgentRunCapsuleRecoveryPlan(
       : {}),
     createdAt: now.toISOString(),
   };
-  mkdirSync(path.dirname(planFile), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.dirname(planFile), { recursive: true, mode: 0o700 });
   if (writeJsonExclusive(planFile, plan)) return plan;
   const winner = readRecoveryPlan(planFile);
   if (winner.sourceCapsuleId !== capsule.id || winner.action !== input.action) {
@@ -171,7 +366,7 @@ export function getAgentRunCapsuleRecoveryPlan(
 ): AgentRunCapsuleRecoveryPlan | null {
   requireSafeId(planId, 'recovery plan id');
   const file = recoveryPlanFile(mindRoot, planId);
-  return existsSync(file) ? readRecoveryPlan(file) : null;
+  return fs.existsSync(file) ? readRecoveryPlan(file) : null;
 }
 
 export function claimAgentRunCapsuleRecoveryPlan(
@@ -191,14 +386,23 @@ export function claimAgentRunCapsuleRecoveryPlan(
     claimedAt: now.toISOString(),
   };
   const file = recoveryClaimFile(mindRoot, plan.id);
-  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   if (writeJsonExclusive(file, claim)) return claim;
   const existing = readRecoveryClaim(file);
   throw new Error(`Recovery plan was already claimed by run ${existing.runId}.`);
 }
 
 export function projectAgentRunCapsule(capsule: AgentRunCapsule): AgentRunCapsuleProjection {
+  const active = ['queued', 'running', 'streaming'].includes(capsule.status);
+  const activeReason = 'The source run is still active; stop it before starting recovery.';
+  const binding = capsule.request.runtimeBinding;
   const resumeSessionId = capsule.request.runtimeBinding?.externalSessionId?.trim();
+  const expectedBinding = { mindos: 'mindos-pi-session', codex: 'codex-thread', claude: 'claude-session', acp: 'acp-session' };
+  const canResume = capsule.request.runtime.kind !== 'acp'
+    && binding?.runtime === capsule.request.runtime.kind
+    && binding.runtimeId === capsule.request.runtime.id
+    && binding.type === expectedBinding[capsule.request.runtime.kind]
+    && (!binding.status || binding.status === 'active');
   const checkpointArtifactId = capsule.provenance.checkpointArtifactId?.trim();
   return {
     schemaVersion: 1,
@@ -222,9 +426,9 @@ export function projectAgentRunCapsule(capsule: AgentRunCapsule): AgentRunCapsul
       assetIds: [...capsule.request.context.assetIds],
     },
     recovery: {
-      retry: { supported: true, mode: 'from-start' },
-      fork: { supported: true, mode: 'new-session' },
-      resume: resumeSessionId
+      retry: { supported: !active, mode: 'from-start', ...(active ? { reason: activeReason } : {}) },
+      fork: { supported: !active, mode: 'new-session', ...(active ? { reason: activeReason } : {}) },
+      resume: active ? { supported: false, reason: activeReason } : resumeSessionId && canResume
         ? { supported: true, sessionId: resumeSessionId }
         : { supported: false, reason: 'This run has no reusable runtime session.' },
       rollback: checkpointArtifactId
@@ -240,15 +444,20 @@ export function projectAgentRunCapsule(capsule: AgentRunCapsule): AgentRunCapsul
   };
 }
 
-function capsuleFile(mindRoot: string, capsule: AgentRunCapsule): string {
+// --- paths ---
+
+function capsuleRelativePath(capsule: Pick<AgentRunCapsule, 'id' | 'createdAt'>): string {
   const createdAt = new Date(capsule.createdAt);
-  const relative = path.posix.join(
+  return path.posix.join(
     CAPSULES_DIR,
     String(createdAt.getUTCFullYear()),
     String(createdAt.getUTCMonth() + 1).padStart(2, '0'),
     `${capsule.id}.json`,
   );
-  return resolveExistingSafe(mindRoot, relative);
+}
+
+function capsuleFile(mindRoot: string, capsule: AgentRunCapsule): string {
+  return resolveExistingSafe(mindRoot, capsuleRelativePath(capsule));
 }
 
 function recoveryPlanId(idempotencyKey: string): string {
@@ -270,32 +479,266 @@ function recoveryClaimFile(mindRoot: string, planId: string): string {
   );
 }
 
-function findCapsuleFile(mindRoot: string, id: string): string | undefined {
-  return listCapsuleFiles(mindRoot).find((candidate) => path.basename(candidate) === `${id}.json`);
+function capsulesRoot(mindRoot: string): string {
+  return resolveExistingSafe(mindRoot, CAPSULES_DIR);
 }
 
-function listCapsuleFiles(mindRoot: string): string[] {
-  const root = resolveExistingSafe(mindRoot, CAPSULES_DIR);
-  if (!existsSync(root)) return [];
-  const files: string[] = [];
-  for (const year of safeDirectories(root)) {
-    for (const month of safeDirectories(year)) {
-      for (const entry of readdirSync(month, { withFileTypes: true })) {
-        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-        const candidate = path.join(month, entry.name);
-        const relative = path.relative(mindRoot, candidate).split(path.sep).join('/');
-        files.push(resolveExistingSafe(mindRoot, relative));
-      }
+/** Relative posix path of `absolute` inside `mindRoot`, as stored in the index. */
+function relativeTo(mindRoot: string, absolute: string): string {
+  return path.relative(mindRoot, absolute).split(path.sep).join('/');
+}
+
+function absoluteFrom(mindRoot: string, relative: string): string {
+  return path.join(mindRoot, ...relative.split('/'));
+}
+
+// --- parsed-file cache ---
+
+function cacheFor(mindRoot: string): CapsuleStoreCache {
+  const key = path.resolve(mindRoot);
+  let cache = capsuleCaches.get(key);
+  if (!cache) {
+    cache = { files: new Map() };
+    capsuleCaches.set(key, cache);
+    while (capsuleCaches.size > MAX_CACHED_ROOTS) {
+      const oldest = capsuleCaches.keys().next().value;
+      if (oldest === undefined) break;
+      capsuleCaches.delete(oldest);
     }
   }
-  return files;
+  return cache;
+}
+
+/**
+ * Stat-validated read of one capsule file. Returns null when the file is gone.
+ * The symlink / root-containment check runs again whenever the file changed,
+ * and a corrupt file is cached as corrupt so the poller does not re-parse it.
+ */
+function readCapsuleEntry(mindRoot: string, candidate: string): CapsuleFileCacheEntry | null {
+  const cache = cacheFor(mindRoot);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(candidate);
+  } catch {
+    cache.files.delete(candidate);
+    return null;
+  }
+  const cached = cache.files.get(candidate);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached;
+
+  const safePath = resolveExistingSafe(mindRoot, relativeTo(mindRoot, candidate));
+  const entry: CapsuleFileCacheEntry = { safePath, mtimeMs: stat.mtimeMs, size: stat.size, capsule: null };
+  try {
+    entry.capsule = readCapsule(safePath);
+  } catch (error) {
+    entry.corruptMessage = error instanceof Error ? error.message : 'Unreadable capsule.';
+  }
+  cache.files.set(candidate, entry);
+  return entry;
+}
+
+/** Seed the cache and the index from a write this process just performed, so the next poll does not re-read it. */
+function rememberCapsuleFile(mindRoot: string, file: string, capsule: AgentRunCapsule): void {
+  const cache = cacheFor(mindRoot);
+  let entry: CapsuleFileCacheEntry;
+  try {
+    const stat = fs.statSync(file);
+    entry = { safePath: file, mtimeMs: stat.mtimeMs, size: stat.size, capsule };
+    cache.files.set(file, entry);
+  } catch {
+    cache.files.delete(file);
+    return;
+  }
+  try {
+    const db = openCapsuleIndex(mindRoot, { create: true });
+    if (db) upsertCapsuleRow(db, indexRowFor(mindRoot, file, entry));
+  } catch {
+    // The file is the source of truth; a missing index row is rebuilt on the next scan.
+  }
+}
+
+function requireCachedCapsule(entry: CapsuleFileCacheEntry): AgentRunCapsule {
+  if (entry.capsule) return entry.capsule;
+  throw new Error(
+    entry.corruptMessage
+      ?? `Agent run capsule is corrupt; the original file was preserved: ${path.basename(entry.safePath)}`,
+  );
+}
+
+// --- sqlite index maintenance ---
+
+function indexRowFor(mindRoot: string, file: string, entry: CapsuleFileCacheEntry): CapsuleIndexRow {
+  const capsule = entry.capsule;
+  return {
+    id: path.basename(file, '.json'),
+    run_id: capsule?.runId ?? null,
+    root_run_id: capsule?.rootRunId ?? null,
+    chat_session_id: capsule?.chatSessionId ?? null,
+    status: capsule?.status ?? null,
+    created_at: capsule?.createdAt ?? null,
+    updated_at: capsule?.updatedAt ?? null,
+    path: relativeTo(mindRoot, file),
+    size: entry.size,
+    mtime_ms: entry.mtimeMs,
+    corrupt_message: entry.corruptMessage ?? null,
+  };
+}
+
+/** A row is only trusted when its path is a capsule file for its own id inside the capsules tree. */
+function isPlausibleRow(row: CapsuleIndexRow): boolean {
+  return SAFE_ID.test(row.id)
+    && row.path.startsWith(`${CAPSULES_DIR}/`)
+    && !row.path.includes('..')
+    && path.posix.basename(row.path) === `${row.id}.json`;
+}
+
+/**
+ * Reads the capsule an index row points at, refreshing the row when the file
+ * changed underneath it and dropping the row when the file is gone.
+ */
+function readIndexedEntry(mindRoot: string, db: MindosDatabase, row: CapsuleIndexRow): CapsuleFileCacheEntry | null {
+  if (!isPlausibleRow(row)) {
+    deleteCapsuleRow(db, row.id);
+    return null;
+  }
+  const candidate = absoluteFrom(mindRoot, row.path);
+  let entry: CapsuleFileCacheEntry | null;
+  try {
+    entry = readCapsuleEntry(mindRoot, candidate);
+  } catch {
+    entry = null;
+  }
+  if (!entry) {
+    deleteCapsuleRow(db, row.id);
+    return null;
+  }
+  if (entry.mtimeMs !== Number(row.mtime_ms) || entry.size !== Number(row.size)) {
+    upsertCapsuleRow(db, indexRowFor(mindRoot, candidate, entry));
+  }
+  return entry;
 }
 
 function safeDirectories(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true })
+  return fs.readdirSync(directory, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && /^\d{2,4}$/.test(entry.name))
     .map((entry) => path.join(directory, entry.name));
 }
+
+/**
+ * Re-lists one month directory and reconciles its rows: new or changed files
+ * are (re)indexed, rows for vanished files are dropped.
+ */
+function reindexMonth(mindRoot: string, db: MindosDatabase, month: string, mtimeMs: number): void {
+  const relativeDir = relativeTo(mindRoot, month);
+  const present = new Set<string>();
+  for (const dirent of fs.readdirSync(month, { withFileTypes: true })) {
+    if (!dirent.isFile() || !dirent.name.endsWith('.json')) continue;
+    const id = path.basename(dirent.name, '.json');
+    if (!SAFE_ID.test(id)) continue;
+    const candidate = path.join(month, dirent.name);
+    present.add(id);
+    let entry: CapsuleFileCacheEntry | null;
+    try {
+      entry = readCapsuleEntry(mindRoot, candidate);
+    } catch {
+      continue;
+    }
+    if (entry) upsertCapsuleRow(db, indexRowFor(mindRoot, candidate, entry));
+  }
+  for (const row of listCapsuleRowsUnder(db, relativeDir)) {
+    if (!present.has(row.id)) deleteCapsuleRow(db, row.id);
+  }
+  writeDirMtime(db, relativeDir, mtimeMs);
+}
+
+/**
+ * Brings the index in line with the directory tree. Year and month
+ * directories are tiny and always re-listed; a month's files are re-listed
+ * only when its directory mtime differs from the recorded one (creates,
+ * atomic rewrites and deletes all touch it). Returns null when there are no
+ * capsules at all, without creating a database.
+ */
+function syncCapsuleIndex(mindRoot: string): MindosDatabase | null {
+  const root = capsulesRoot(mindRoot);
+  if (!fs.existsSync(root)) {
+    cacheFor(mindRoot).files.clear();
+    const stale = openCapsuleIndex(mindRoot, { create: false });
+    if (stale) for (const dir of listIndexedDirs(stale)) forgetDir(stale, dir);
+    return stale;
+  }
+  const db = openCapsuleIndex(mindRoot, { create: true });
+  if (!db) return null;
+  const seen = new Set<string>();
+  db.transaction(() => {
+    for (const year of safeDirectories(root)) {
+      for (const month of safeDirectories(year)) {
+        const relativeDir = relativeTo(mindRoot, month);
+        seen.add(relativeDir);
+        let mtimeMs: number;
+        try {
+          mtimeMs = fs.statSync(month).mtimeMs;
+        } catch {
+          continue;
+        }
+        if (readDirMtime(db, relativeDir) !== mtimeMs) reindexMonth(mindRoot, db, month, mtimeMs);
+      }
+    }
+    for (const dir of listIndexedDirs(db)) {
+      if (!seen.has(dir)) forgetDir(db, dir);
+    }
+  });
+  return db;
+}
+
+/**
+ * Find a capsule by id without scanning when possible: the indexed path
+ * first, then the current and previous month directories (capsules are filed
+ * by createdAt and finalized shortly after), and only then a full index sync
+ * for capsules another process filed elsewhere.
+ */
+function locateCapsuleEntry(mindRoot: string, id: string): CapsuleFileCacheEntry | null {
+  const indexed = openCapsuleIndex(mindRoot, { create: false });
+  if (indexed) {
+    const row = getCapsuleRow(indexed, id);
+    if (row) {
+      const entry = readIndexedEntry(mindRoot, indexed, row);
+      if (entry) return entry;
+    }
+  }
+  for (const candidate of recentMonthCandidates(mindRoot, id)) {
+    if (!fs.existsSync(candidate)) continue;
+    const entry = readCapsuleEntry(mindRoot, candidate);
+    if (entry) {
+      try {
+        const db = openCapsuleIndex(mindRoot, { create: true });
+        if (db) upsertCapsuleRow(db, indexRowFor(mindRoot, candidate, entry));
+      } catch {
+        // Index is best-effort; the file was found and validated.
+      }
+      return entry;
+    }
+  }
+  const db = syncCapsuleIndex(mindRoot);
+  if (!db) return null;
+  const row = getCapsuleRow(db, id);
+  return row ? readIndexedEntry(mindRoot, db, row) : null;
+}
+
+function recentMonthCandidates(mindRoot: string, id: string): string[] {
+  const root = capsulesRoot(mindRoot);
+  const now = new Date();
+  return [0, -1].map((offset) => {
+    const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + offset, 1));
+    return path.join(
+      root,
+      String(month.getUTCFullYear()),
+      String(month.getUTCMonth() + 1).padStart(2, '0'),
+      `${id}.json`,
+    );
+  });
+}
+
+// --- validation ---
 
 function readCapsule(file: string): AgentRunCapsule {
   try {
@@ -443,20 +886,22 @@ function readRecoveryClaim(file: string): AgentRunCapsuleRecoveryClaim {
   }
 }
 
+// --- bounded JSON I/O ---
+
 function readBoundedJson(file: string): unknown {
-  if (statSync(file).size > MAX_CAPSULE_BYTES) {
+  if (fs.statSync(file).size > MAX_CAPSULE_BYTES) {
     throw new Error(`stored payload exceeds ${MAX_CAPSULE_BYTES} bytes`);
   }
-  return JSON.parse(readFileSync(file, 'utf-8')) as unknown;
+  return JSON.parse(fs.readFileSync(file, 'utf-8')) as unknown;
 }
 
 function writeJsonAtomic(file: string, value: AgentRunCapsule | AgentRunCapsuleRecoveryPlan): void {
   const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
-    writeFileSync(temp, serializeJson(value), { encoding: 'utf-8', mode: 0o600 });
-    renameSync(temp, file);
+    fs.writeFileSync(temp, serializeJson(value), { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(temp, file);
   } catch (error) {
-    try { unlinkSync(temp); } catch { /* best-effort cleanup */ }
+    try { fs.unlinkSync(temp); } catch { /* best-effort cleanup */ }
     throw error;
   }
 }
@@ -467,16 +912,29 @@ function writeJsonExclusive(
 ): boolean {
   const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
-    writeFileSync(temp, serializeJson(value), { encoding: 'utf-8', mode: 0o600 });
+    fs.writeFileSync(temp, serializeJson(value), { encoding: 'utf-8', mode: 0o600 });
     try {
-      linkSync(temp, file);
+      fs.linkSync(temp, file);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
       throw error;
     }
     return true;
   } finally {
-    try { unlinkSync(temp); } catch { /* best-effort cleanup */ }
+    try { fs.unlinkSync(temp); } catch { /* best-effort cleanup */ }
+  }
+}
+
+// ── async variants used by the queued capsule writes ──
+
+async function writeJsonAtomicAsync(file: string, serialized: string): Promise<void> {
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.promises.writeFile(temp, serialized, { encoding: 'utf-8', mode: 0o600 });
+    await fs.promises.rename(temp, file);
+  } catch (error) {
+    await fs.promises.unlink(temp).catch(() => { /* best-effort cleanup */ });
+    throw error;
   }
 }
 
@@ -508,3 +966,9 @@ function redactForProjection(value: string): string {
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[redacted]')
     .replaceAll('[redacted]', '[REDACTED]');
 }
+
+// Knowledge-layer capsule port (spec-knowledge-layering-and-export-surface):
+// `knowledge/context-feedback` reads capsules through
+// `knowledge/agent-run-data.ts`; loading the capsule store installs the
+// implementation. Agent → knowledge is the legal direction.
+installKnowledgeAgentRunCapsuleReader((mindRoot, id) => getAgentRunCapsule(mindRoot, id));

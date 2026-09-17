@@ -1,49 +1,18 @@
-import path from 'path';
 import {
   MINDOS_SSE_HEADERS,
   encodeMindosSseEvent,
   startMindosAgentTurnSseHeartbeat,
   type MindOSSSEvent,
 } from '@geminilight/mindos/agent/turn';
-import type { AgentRunRecord } from '@geminilight/mindos/agent/ledger/run-ledger';
-import { isAbortLikeError } from '@geminilight/mindos/agent/ledger/run-cancellation';
+import { classifyLaneTerminalStatus } from '@geminilight/mindos/agent/runtime';
 import { metrics } from '@/lib/metrics';
 
-export function agentRunErrorStatus(error: unknown, signal?: AbortSignal): 'failed' | 'canceled' | 'timed_out' {
-  if (signal?.aborted || isAbortLikeError(error)) return 'canceled';
-  return (error as { code?: unknown })?.code === 'TIMEOUT' ? 'timed_out' : 'failed';
-}
-
-export function sendAgentRunContext(
-  send: (event: MindOSSSEvent) => void,
-  run: AgentRunRecord,
-): void {
-  send({
-    type: 'agent_run_context',
-    rootRunId: run.rootRunId ?? run.id,
-    ...(run.chatSessionId ? { chatSessionId: run.chatSessionId } : {}),
-    startedAt: run.startedAt,
-  } as unknown as MindOSSSEvent);
-}
-
-export function formatMindosPiExtensionLoadStatus(errors: Array<{ path: string; error: string }> | undefined): string | null {
-  if (!errors?.length) return null;
-  const names = [...new Set(errors.map((entry) => path.basename(entry.path || 'extension')).filter(Boolean))].slice(0, 5);
-  const hasWebAccessError = errors.some((entry) => entry.path.includes('pi-web-access'));
-  const suffix = hasWebAccessError
-    ? ' pi-web-access is unavailable or incomplete, so web_search/fetch_content may be unavailable.'
-    : ' Some extension tools may be unavailable.';
-  return `MindOS detected ${errors.length} extension issue${errors.length === 1 ? '' : 's'}${names.length ? ` (${names.join(', ')})` : ''}.${suffix}`;
-}
-
-export function compactStringEnv(env: Record<string, string | undefined> | undefined): Record<string, string> | undefined {
-  if (!env) return undefined;
-  const compact: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (typeof value === 'string') compact[key] = value;
-  }
-  return Object.keys(compact).length > 0 ? compact : undefined;
-}
+/**
+ * SSE shell utilities for the agent turn lanes. Terminal classification moved
+ * to the core lane runner; this alias keeps the historical web name
+ * (spec-runtime-lane-contract 方案 2).
+ */
+export const agentRunErrorStatus = classifyLaneTerminalStatus;
 
 export function omitEnvKeys(
   env: Record<string, string>,
@@ -113,5 +82,44 @@ export function createAgentTurnSseResponse(
 
   return new Response(stream, {
     headers: MINDOS_SSE_HEADERS,
+  });
+}
+
+/**
+ * Prepend one visible `status` SSE frame (e.g. the reasoning-effort fallback
+ * notice produced by `agent/turn/request.ts` normalisation) to a lane's SSE
+ * response so the client sees it before any lane output. Non-SSE responses
+ * (JSON error replies) and empty notices pass through untouched.
+ */
+export function prependMindosSseStatusEvent(response: Response, message: string | undefined): Response {
+  if (!message || !response.body) return response;
+  if (!(response.headers.get('content-type') ?? '').includes('text/event-stream')) return response;
+  const prefix = new TextEncoder().encode(encodeMindosSseEvent({ type: 'status', message, visible: true }));
+  const original = response.body;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(prefix);
+      const reader = original.getReader();
+      void (async () => {
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+          controller.close();
+        } catch (error) {
+          try { controller.error(error); } catch { /* already errored/closed */ }
+        }
+      })();
+    },
+    cancel(reason) {
+      return original.cancel(reason);
+    },
+  });
+  return new Response(stream, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
   });
 }

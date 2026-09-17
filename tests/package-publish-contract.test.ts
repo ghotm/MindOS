@@ -131,7 +131,7 @@ describe('product npm publish contract', () => {
     expect(pkg.scripts?.prepack).not.toContain('packages/mindos/node_modules');
     expect(pkg.scripts?.prepack).not.toContain('packages/protocols/mcp-server/node_modules');
     expect(pkg.scripts?.prepack).not.toContain('packages/web/node_modules');
-    expect(pkg.scripts?.build).toBe('tsc && node ../../scripts/copy-mindos-agent-assets.mjs && pnpm run build:protocols');
+    expect(pkg.scripts?.build).toBe('tsc && node ../../scripts/copy-mindos-agent-assets.mjs && node ../../scripts/build-cli-bundles.mjs && pnpm run build:protocols');
     expect(pkg.scripts?.['build:protocols']).toBe('node ../../scripts/build-product-protocols.mjs');
     expect(pkg.scripts?.['type-check']).toBe('tsc --noEmit');
     // The published CLI owns the resident automation executor, so native
@@ -154,18 +154,36 @@ describe('product npm publish contract', () => {
       types: './dist/agent.d.ts',
       import: './dist/agent.js',
     });
-    expect(pkg.exports?.['./agent/*']).toEqual({
-      types: './dist/agent/*.d.ts',
-      import: './dist/agent/*.js',
+    // The `./agent/*` wildcard is gone (spec-knowledge-layering-and-export-
+    // surface): the published surface is the explicit subpath list below,
+    // derived from the actual importers in web/desktop/mobile/tests.
+    expect(pkg.exports?.['./agent/*']).toBeUndefined();
+    expect(pkg.exports?.['./agent/agent-run-context']).toEqual({
+      types: './dist/agent/agent-run-context.d.ts',
+      import: './dist/agent/agent-run-context.js',
+    });
+    expect(pkg.exports?.['./agent/global-state']).toEqual({
+      types: './dist/agent/global-state.d.ts',
+      import: './dist/agent/global-state.js',
+    });
+    expect(pkg.exports?.['./agent/mode']).toEqual({
+      types: './dist/agent/mode.d.ts',
+      import: './dist/agent/mode.js',
+    });
+    expect(pkg.exports?.['./agent/capsules']).toEqual({
+      types: './dist/agent/capsules/index.d.ts',
+      import: './dist/agent/capsules/index.js',
+    });
+    expect(pkg.exports?.['./agent/capsules/*']).toBeUndefined();
+    expect(pkg.exports?.['./agent/capsules/store']).toEqual({
+      types: './dist/agent/capsules/store.d.ts',
+      import: './dist/agent/capsules/store.js',
     });
     expect(pkg.exports?.['./agent/prompt']).toEqual({
       types: './dist/agent/prompt/index.d.ts',
       import: './dist/agent/prompt/index.js',
     });
-    expect(pkg.exports?.['./agent/prompt/*']).toEqual({
-      types: './dist/agent/prompt/*.d.ts',
-      import: './dist/agent/prompt/*.js',
-    });
+    expect(pkg.exports?.['./agent/prompt/*']).toBeUndefined();
     expect(pkg.exports?.['./agent/mindos-pi']).toEqual({
       types: './dist/agent/mindos-pi/index.d.ts',
       import: './dist/agent/mindos-pi/index.js',
@@ -174,18 +192,12 @@ describe('product npm publish contract', () => {
       types: './dist/agent/mindos-pi/extension/index.d.ts',
       import: './dist/agent/mindos-pi/extension/index.js',
     });
-    expect(pkg.exports?.['./agent/mindos-pi/extension/*']).toEqual({
-      types: './dist/agent/mindos-pi/extension/*.d.ts',
-      import: './dist/agent/mindos-pi/extension/*.js',
-    });
+    expect(pkg.exports?.['./agent/mindos-pi/extension/*']).toBeUndefined();
     expect(pkg.exports?.['./agent/tool']).toEqual({
       types: './dist/agent/tool/index.d.ts',
       import: './dist/agent/tool/index.js',
     });
-    expect(pkg.exports?.['./agent/tool/*']).toEqual({
-      types: './dist/agent/tool/*.d.ts',
-      import: './dist/agent/tool/*.js',
-    });
+    expect(pkg.exports?.['./agent/tool/*']).toBeUndefined();
 
     // Modules sunk from packages/web/lib/agent (spec-agent-core-consolidation).
     // A missing source file here means the web shim re-exports a dangling
@@ -195,7 +207,6 @@ describe('product npm publish contract', () => {
       'agent-run-context',
       'result-reducer',
       'global-state',
-      'redaction',
       'run-ledger',
       'run-timeline-events',
       'run-cancellation',

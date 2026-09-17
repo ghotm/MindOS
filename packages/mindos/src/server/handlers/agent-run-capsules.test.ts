@@ -1,8 +1,9 @@
+import { closeAllMindosDatabases } from '../../foundation/storage/sqlite.js';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createAgentRunCapsule } from '../../agent/capsules/store.js';
+import { createAgentRunCapsule, finalizeAgentRunCapsule } from '../../agent/capsules/store.js';
 import {
   handleAgentRunCapsuleRecoveryPost,
   handleAgentRunCapsulesGet,
@@ -33,7 +34,10 @@ describe('agent run capsule handlers', () => {
     });
   });
 
-  afterEach(() => rmSync(mindRoot, { recursive: true, force: true }));
+  afterEach(() => {
+    closeAllMindosDatabases();
+    rmSync(mindRoot, { recursive: true, force: true });
+  });
 
   it('lists only public redacted projections and supports filtering by run', () => {
     const response = handleAgentRunCapsulesGet(new URLSearchParams('runId=run-1'), { mindRoot });
@@ -50,6 +54,7 @@ describe('agent run capsule handlers', () => {
   });
 
   it('creates an idempotent recovery plan and rejects invalid or unavailable actions', () => {
+    finalizeAgentRunCapsule(mindRoot, 'capsule-1', { status: 'completed' });
     const first = handleAgentRunCapsuleRecoveryPost('capsule-1', {
       action: 'resume', idempotencyKey: 'resume-1',
     }, { mindRoot, now: () => new Date('2026-09-03T10:01:00.000Z') });
@@ -75,5 +80,11 @@ describe('agent run capsule handlers', () => {
     expect(handleAgentRunCapsuleRecoveryPost('missing', {
       action: 'retry', idempotencyKey: 'missing-1',
     }, { mindRoot }).status).toBe(404);
+  });
+
+  it('returns a conflict rather than a server error when the source is active', () => {
+    expect(handleAgentRunCapsuleRecoveryPost('capsule-1', {
+      action: 'retry', idempotencyKey: 'active',
+    }, { mindRoot }).status).toBe(409);
   });
 });

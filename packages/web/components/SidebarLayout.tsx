@@ -6,17 +6,17 @@ import {
   useCallback,
   useRef,
   useMemo,
-  startTransition,
   type ComponentType,
 } from 'react';
 import { flushSync } from 'react-dom';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { Search, Settings, Menu, X, FolderInput } from 'lucide-react';
+import { Search, Settings, Menu, FolderInput } from 'lucide-react';
 import ActivityBar from './ActivityBar';
 import TitlebarRow from './TitlebarRow';
 import Panel from './Panel';
 import MindFileTreeSections from './file-tree/MindFileTreeSections';
+import MobileNavigationDrawer, { MOBILE_DRAWER_BREAKPOINT_PX } from './MobileNavigationDrawer';
 import Logo from './Logo';
 import AskFab from './AskFab';
 import PluginEntriesDock from './plugins/PluginEntriesDock';
@@ -24,6 +24,7 @@ import PluginHotkeyHost from './plugins/PluginHotkeyHost';
 import SyncPopover from './panels/SyncPopover';
 import KeyboardShortcuts from './KeyboardShortcuts';
 import ChangesBanner from './changes/ChangesBanner';
+import SettingsSaveNotice from './settings/SettingsSaveNotice';
 import SpaceInitToast from './SpaceInitToast';
 import OrganizeToast from './OrganizeToast';
 import PanelLoadingFallback from './panels/PanelLoadingFallback';
@@ -33,8 +34,7 @@ import { FileNode } from '@/lib/types';
 import type { MindSystemSlot } from '@/lib/mind-system';
 import { useLocale } from '@/lib/stores/locale-store';
 import { telemetry } from '@/lib/telemetry';
-import { notifyFilesChanged } from '@/lib/files-changed';
-import { refreshPreservingDocumentScroll } from '@/lib/scroll-preservation';
+import { useTreeVersionSync } from '@/hooks/useTreeVersionSync';
 import dynamic from 'next/dynamic';
 
 const SearchModal = dynamic(() => import('./SearchModal'), { ssr: false });
@@ -92,7 +92,7 @@ import {
   type RoutePanelId,
 } from '@/lib/navigation-panel';
 import type { Tab } from './settings/types';
-import { MOBILE_SIDEBAR, RIGHT_AGENT_DETAIL_PANEL, getLeftPanelWidth } from '@/lib/config/panel-sizes';
+import { RIGHT_AGENT_DETAIL_PANEL, getLeftPanelWidth } from '@/lib/config/panel-sizes';
 import {
   MAIN_BODY_CONTENT_WIDTH_EVENT,
   parseContentWidthRatio,
@@ -288,8 +288,6 @@ export default function SidebarLayout({ fileTree, mindSystemSlots, children }: S
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const [mobileAskOpen, setMobileAskOpen] = useState(false);
   const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
-  const mobileDrawerCloseRef = useRef<HTMLButtonElement>(null);
-  const lastMobileDrawerTriggerRef = useRef<HTMLElement | null>(null);
 
   const { t } = useLocale();
   const inboxOrganize = useInboxOrganizeController({ aiOrganize, labels: t.inbox });
@@ -344,6 +342,12 @@ export default function SidebarLayout({ fileTree, mindSystemSlots, children }: S
   // navigation transition animate through 2-4 widths — the flicker.
   const effectivePanelWidth = getLeftPanelWidth(activeLeftPanel, lp.panelWidth);
   const viewportWidth = useViewportWidth();
+  // The drawer is `md:hidden`, but a hidden React tree still costs a full
+  // second file tree (hooks, polling, DOM) on every desktop render. Mount its
+  // contents only on small viewports (or while open); the outer <aside> stays
+  // so the slide transition is unchanged. viewportWidth is 0 until the first
+  // effect, which keeps SSR and the first client render identical.
+  const mountMobileDrawerTree = mobileOpen || (viewportWidth > 0 && viewportWidth < MOBILE_DRAWER_BREAKPOINT_PX);
   const [contentWidthRatio, setContentWidthRatio] = useState(() => parseContentWidthRatio(undefined));
   useEffect(() => {
     const updateFromValue = (value: string | null | undefined) => {
@@ -644,23 +648,6 @@ export default function SidebarLayout({ fileTree, mindSystemSlots, children }: S
     return () => cancelAnimationFrame(id);
   }, [pathname]);
 
-  useEffect(() => {
-    if (!mobileOpen) {
-      lastMobileDrawerTriggerRef.current?.focus();
-      lastMobileDrawerTriggerRef.current = null;
-      return;
-    }
-    const focusFrame = requestAnimationFrame(() => mobileDrawerCloseRef.current?.focus());
-    const closeOnEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMobileOpen(false);
-    };
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      cancelAnimationFrame(focusFrame);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [mobileOpen]);
-
   // Deep-link workbench routes keep their matching left panel aligned with URL.
   // Files/Mind routes are intentionally excluded so users can close that panel
   // while still staying on /wiki or /view/* content.
@@ -695,87 +682,9 @@ export default function SidebarLayout({ fileTree, mindSystemSlots, children }: S
 
   const closeAgentDetailPanel = useCallback(() => setAgentDetailKey(null), []);
 
-  // Refresh file tree when server-side tree version changes.
-  // Polls a lightweight version counter every 5s — only calls router.refresh()
-  // (which rebuilds the full tree) when the version actually changes.
-  // A 2-second cooldown prevents rapid-fire refreshes during bulk file operations.
-  useEffect(() => {
-    let lastVersion = -1;
-    let stopped = false;
-    let lastRefreshTime = 0;
-    let pendingRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const doRefresh = (version: number, previousVersion: number) => {
-      lastRefreshTime = Date.now();
-      const stopRefresh = telemetry.startTimer('tree.refresh.trigger');
-      startTransition(() => {
-        refreshPreservingDocumentScroll(() => router.refresh());
-      });
-      stopRefresh({ previousVersion, version, reason: 'tree_version_changed' });
-      notifyFilesChanged();
-    };
-
-    const REFRESH_COOLDOWN_MS = 2000;
-    // Idle-polling budget contract (idle-polling-budget.test): own writes
-    // arrive via mindos:files-changed events, so the fallback poll can be slow.
-    const POLL_INTERVAL_MS = 15000;
-
-    const checkVersion = async () => {
-      if (stopped || document.visibilityState === 'hidden') return;
-      const stop = telemetry.startTimer('tree.version.poll');
-      try {
-        const res = await fetch('/api/tree-version');
-        if (!res.ok) {
-          stop({ ok: false, changed: false });
-          return;
-        }
-        const { v } = (await res.json()) as { v: number };
-        if (lastVersion === -1) {
-          lastVersion = v;
-          stop({ ok: true, changed: false, version: v, initial: true });
-          return;
-        }
-        if (v !== lastVersion) {
-          const previousVersion = lastVersion;
-          lastVersion = v;
-
-          // Cooldown: if we refreshed recently, delay this one
-          const elapsed = Date.now() - lastRefreshTime;
-          if (elapsed < REFRESH_COOLDOWN_MS) {
-            if (pendingRefreshTimer) clearTimeout(pendingRefreshTimer);
-            pendingRefreshTimer = setTimeout(() => {
-              pendingRefreshTimer = null;
-              if (!stopped) doRefresh(v, previousVersion);
-            }, REFRESH_COOLDOWN_MS - elapsed);
-            stop({ ok: true, changed: true, previousVersion, version: v, deferred: true });
-          } else {
-            doRefresh(v, previousVersion);
-            stop({ ok: true, changed: true, previousVersion, version: v });
-          }
-          return;
-        }
-        stop({ ok: true, changed: false, version: v });
-      } catch (err) {
-        stop({ ok: false, changed: false });
-        console.debug('[tree-version] poll failed', err);
-      }
-    };
-
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') void checkVersion();
-    };
-
-    void checkVersion();
-    const interval = setInterval(() => void checkVersion(), POLL_INTERVAL_MS);
-    document.addEventListener('visibilitychange', onVisible);
-
-    return () => {
-      stopped = true;
-      clearInterval(interval);
-      if (pendingRefreshTimer) clearTimeout(pendingRefreshTimer);
-      document.removeEventListener('visibilitychange', onVisible);
-    };
-  }, [router]);
+  // Refresh the server-rendered file tree when the mind root changes. Driven
+  // by the /api/events stream; the tree-version endpoint is polled only while disconnected.
+  useTreeVersionSync(router);
 
   // Unified keyboard shortcuts
   useEffect(() => {
@@ -1115,15 +1024,12 @@ export default function SidebarLayout({ fileTree, mindSystemSlots, children }: S
 
       {/* ── Mobile ── */}
       {/* top: var(--app-titlebar-h) — when the mac shell viewport drops below md, the header sits below the titlebar drag row */}
-      <header className="md:hidden fixed top-[var(--app-titlebar-h)] left-0 right-0 z-30 bg-card border-b border-border flex items-center justify-between px-3 py-2" style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}>
+      <header className="mobile-app-header md:hidden fixed top-[var(--app-titlebar-h)] left-0 right-0 z-30 bg-card border-b border-border flex items-center justify-between px-3">
         <button
           ref={mobileMenuButtonRef}
-          onClick={() => {
-            lastMobileDrawerTriggerRef.current = mobileMenuButtonRef.current;
-            setMobileOpen(true);
-          }}
+          onClick={() => setMobileOpen(true)}
           className="p-3 -ml-1 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors active:bg-accent"
-          aria-label="Open menu"
+          aria-label={t.sidebar.openMenu}
           aria-haspopup="dialog"
           aria-expanded={mobileOpen}
         >
@@ -1150,32 +1056,21 @@ export default function SidebarLayout({ fileTree, mindSystemSlots, children }: S
         </div>
       </header>
 
-      {mobileOpen && <div className="md:hidden fixed inset-0 z-40 overlay-backdrop" onClick={() => setMobileOpen(false)} aria-hidden />}
-      <aside
-        role="dialog"
-        aria-modal="true"
-        aria-label="MindOS menu"
-        className={`md:hidden fixed top-0 left-0 h-screen z-50 bg-card border-r border-border flex flex-col transition-transform duration-300 ease-in-out ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}
-        style={{ width: MOBILE_SIDEBAR.WIDTH, maxWidth: MOBILE_SIDEBAR.MAX_WIDTH }}
+      <MobileNavigationDrawer
+        open={mobileOpen}
+        viewportWidth={viewportWidth}
+        onClose={handleMobileNavigate}
+        triggerRef={mobileMenuButtonRef}
       >
-        <div className="flex items-center justify-between px-4 py-4 border-b border-border shrink-0">
-          <Link href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
-            <Logo id="drawer" />
-            <span className="text-foreground text-sm font-brand">MindOS</span>
-          </Link>
-          <button ref={mobileDrawerCloseRef} onClick={() => setMobileOpen(false)} className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors" aria-label="Close menu">
-            <X size={16} />
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto min-h-0 px-2 py-2">
-          <MindFileTreeSections
-            fileTree={fileTree}
-            mindSystemSlots={mindSystemSlots}
-            onNavigate={handleMobileNavigate}
-            onImport={handleOpenImport}
-          />
-        </div>
-      </aside>
+          {mountMobileDrawerTree && (
+            <MindFileTreeSections
+              fileTree={fileTree}
+              mindSystemSlots={mindSystemSlots}
+              onNavigate={handleMobileNavigate}
+              onImport={handleOpenImport}
+            />
+          )}
+      </MobileNavigationDrawer>
 
       {mobileSearchMounted && <SearchModal open={mobileSearchOpen} onClose={() => setMobileSearchOpen(false)} />}
       {mobileAskMounted && <AskModal open={effectiveMobileAskOpen} onClose={() => setMobileAskOpen(false)} currentFile={currentFile} />}
@@ -1183,9 +1078,7 @@ export default function SidebarLayout({ fileTree, mindSystemSlots, children }: S
       <main
         id="main-content"
         tabIndex={-1}
-        aria-hidden={mobileOpen || undefined}
-        inert={mobileOpen ? true : undefined}
-        className="app-main-scrollport fixed inset-x-0 bottom-0 top-[var(--app-titlebar-h)] overflow-y-auto overflow-x-hidden transition-[padding-left,padding-right] duration-200 pt-[52px] md:pt-0"
+        className="app-main-scrollport fixed inset-x-0 bottom-0 top-[var(--app-titlebar-h)] overflow-y-auto overflow-x-hidden transition-[padding-left,padding-right] duration-200 md:pt-0"
         onDragEnter={(e) => {
           if (!e.dataTransfer.types.includes('Files')) return;
           e.preventDefault();
@@ -1212,6 +1105,7 @@ export default function SidebarLayout({ fileTree, mindSystemSlots, children }: S
         {/* The app scrollport starts below the titlebar row, so the scrollbar gutter
             is reserved only in the content area and the tab header stays full width. */}
         <div className="min-h-full bg-background">
+          <SettingsSaveNotice editing={settingsOpen || pathname === '/settings'} onOpen={tab => { setSettingsTab(tab); setSettingsOpen(true); }} />
           <ChangesBanner />
           {children}
         </div>

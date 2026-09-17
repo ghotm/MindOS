@@ -1,3 +1,4 @@
+import { closeAllMindosDatabases } from '../../foundation/storage/sqlite.js';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,10 +19,16 @@ const base = new Date('2026-09-03T12:00:00.000Z');
 
 describe('event-driven studio automations', () => {
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(base);
     mindRoot = mkdtempSync(join(tmpdir(), 'mindos-event-automation-'));
     mkdirSync(join(mindRoot, '.mindos'), { recursive: true });
   });
-  afterEach(() => rmSync(mindRoot, { recursive: true, force: true }));
+  afterEach(() => {
+    vi.useRealTimers();
+    closeAllMindosDatabases();
+    rmSync(mindRoot, { recursive: true, force: true });
+  });
 
   it('deduplicates by source + key and creates one matching delivery', () => {
     seed(job());

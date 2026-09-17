@@ -8,7 +8,14 @@
 
 import fs from 'fs';
 import path from 'path';
-import { expandHome, MCP_AGENTS, parseJsonc } from './mcp-agents';
+import {
+  customAgentToConfigDef,
+  listInstalledSkillNames,
+  listMcpServerNamesFromText,
+  resolveAgentConfigProbes,
+  type CustomAgentConfigDef,
+} from '@geminilight/mindos/server';
+import { expandHome, MCP_AGENTS } from './mcp-agents';
 import type { AgentDef } from './mcp-agents';
 import { readSettings, writeSettings } from './settings';
 
@@ -229,23 +236,14 @@ export function detectBaseDir(baseDir: string): DetectResult {
 
 /**
  * Convert a CustomAgentDef into the standard AgentDef that all downstream
- * code (detectInstalled, generateSnippet, etc.) expects.
+ * code (detectInstalled, generateSnippet, etc.) expects. Delegates to the core
+ * `customAgentToConfigDef` so custom agents and built-ins share one mapping.
  *
  * Note: AgentDef.key is the *config key* (e.g. "mcpServers"), not the agent identifier.
  * The agent identifier is the key in the MCP_AGENTS record, which comes from CustomAgentDef.key.
  */
 export function toAgentDef(custom: CustomAgentDef): AgentDef {
-  return {
-    name: custom.name,
-    project: custom.project ?? null,
-    global: custom.global,
-    key: custom.configKey,
-    preferredTransport: custom.preferredTransport,
-    format: custom.format,
-    globalNestedKey: custom.globalNestedKey,
-    presenceCli: custom.presenceCli,
-    presenceDirs: custom.presenceDirs,
-  };
+  return customAgentToConfigDef(custom as CustomAgentConfigDef);
 }
 
 /* ─── Persistence ─── */
@@ -295,63 +293,30 @@ export function getAllAgents(): Record<string, AgentDef> {
 /* ─── Skill Scanning ─── */
 
 /**
- * Scan skills installed in a custom agent's skill directory.
- * Returns the same shape as detectAgentInstalledSkills.
+ * Scan skills installed in a custom agent's skill directory. Delegates to the
+ * core `listInstalledSkillNames` (visible dirs/symlinks, sorted) so the rule is
+ * shared with built-in agents; fs probes route through THIS module so Web test
+ * spies keep intercepting. Returns the same shape as detectAgentInstalledSkills.
  */
 export function scanCustomAgentSkills(custom: CustomAgentDef): { skills: string[]; sourcePath: string } {
   const skillDir = custom.skillDir || appendPathSegment(custom.baseDir, 'skills/');
   const expanded = expandHome(skillDir);
-  if (!fs.existsSync(expanded)) return { skills: [], sourcePath: expanded };
-  try {
-    const entries = fs.readdirSync(expanded, { withFileTypes: true });
-    const skills = entries
-      .filter(e => (e.isDirectory() || e.isSymbolicLink()) && !e.name.startsWith('.'))
-      .map(e => e.name)
-      .sort((a, b) => a.localeCompare(b));
-    return { skills, sourcePath: expanded };
-  } catch {
-    return { skills: [], sourcePath: expanded };
-  }
+  const skills = listInstalledSkillNames(expanded, resolveAgentConfigProbes({
+    pathExists: (p: string) => fs.existsSync(p),
+    readDir: (p: string) => fs.readdirSync(p, { withFileTypes: true }),
+  }));
+  return { skills, sourcePath: expanded };
 }
 
 /* ─── Enhanced Skill & MCP Detection ─── */
 
 /**
- * Parse JSON config to extract MCP server names from a config key.
+ * MCP server names configured under `key` in `content`, through the shared
+ * per-format readers (`@geminilight/mindos/server`). An unparsable config
+ * configures nothing.
  */
-function parseJsonMcpServers(content: string, key: string): string[] {
-  try {
-    const config = parseJsonc(content);
-    const servers = config[key];
-    if (servers && typeof servers === 'object') {
-      return Object.keys(servers).sort();
-    }
-  } catch {
-    return [];
-  }
-  return [];
-}
-
-/**
- * Parse TOML config to extract MCP server names from a section key.
- */
-function parseTomlMcpServers(content: string, sectionKey: string): string[] {
-  const names = new Set<string>();
-  const lines = content.split('\n');
-  const sectionPrefix = `${sectionKey}.`;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-      const section = trimmed.slice(1, -1).trim();
-      if (section.startsWith(sectionPrefix)) {
-        const name = section.slice(sectionPrefix.length).split('.')[0];
-        if (name) names.add(name);
-      }
-    }
-  }
-
-  return [...names].sort();
+function listConfiguredMcpServers(content: string, key: string, format: 'json' | 'toml'): string[] {
+  return listMcpServerNamesFromText(content, { format, sectionKey: key });
 }
 
 /**
@@ -391,10 +356,7 @@ export function detectCustomAgentProfile(
   if (fs.existsSync(configAbsPath)) {
     try {
       const content = fs.readFileSync(configAbsPath, 'utf-8');
-      result.mcpServers =
-        result.configFormat === 'json'
-          ? parseJsonMcpServers(content, configKey)
-          : parseTomlMcpServers(content, configKey);
+      result.mcpServers = listConfiguredMcpServers(content, configKey, result.configFormat);
     } catch (err) {
       result.parseError = `Failed to parse MCP config: ${err instanceof Error ? err.message : 'Unknown error'}`;
     }

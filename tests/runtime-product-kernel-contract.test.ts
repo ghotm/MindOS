@@ -53,7 +53,7 @@ describe('MindOS runtime product kernel contract', () => {
     };
 
     expect(manifest.name).toBe('@geminilight/mindos');
-    expect(manifest.scripts?.build).toBe('tsc && node ../../scripts/copy-mindos-agent-assets.mjs && pnpm run build:protocols');
+    expect(manifest.scripts?.build).toBe('tsc && node ../../scripts/copy-mindos-agent-assets.mjs && node ../../scripts/build-cli-bundles.mjs && pnpm run build:protocols');
     expect(manifest.scripts?.['build:protocols']).toBe('node ../../scripts/build-product-protocols.mjs');
     expect(Object.keys(manifest.dependencies ?? {}).sort()).toEqual([
       '@anthropic-ai/claude-agent-sdk',
@@ -61,12 +61,21 @@ describe('MindOS runtime product kernel contract', () => {
       '@earendil-works/pi-agent-core',
       '@earendil-works/pi-ai',
       '@earendil-works/pi-coding-agent',
+      // Product Server and MCP HTTP transport run on Hono over node:http
+      '@hono/node-server',
       '@modelcontextprotocol/sdk',
       // kb-tools value-imports TypeBox at runtime (Wave 3, agent-core consolidation)
       '@sinclair/typebox',
+      // bin/lib/sync.js (sync daemon) imports it dynamically; the platform-package
+      // closure resolves dependencies from packages/mindos, so it stays declared here.
       'chokidar',
-      'pino',
-      'pino-pretty',
+      // Shared bounded line diff for tools and browser change previews.
+      'diff',
+      'hono',
+      // JSONC agent configs (spec-core-consolidation): comment-preserving reads/writes
+      'jsonc-parser',
+      // .mindosignore / permission globs (spec-core-consolidation)
+      'picomatch',
       'zod',
     ]);
     expect(manifest.dependencies).toHaveProperty('@anthropic-ai/claude-agent-sdk', '0.3.170');
@@ -74,39 +83,49 @@ describe('MindOS runtime product kernel contract', () => {
     expect(Object.keys(manifest.exports ?? {}).sort()).toEqual([
       '.',
       './agent',
-      './agent/*',
+      './agent/agent-run-context',
       './agent/bridges',
-      './agent/bridges/*',
+      './agent/bridges/runtime-permission-bridge',
+      './agent/bridges/user-question-bridge',
+      './agent/capsules',
+      './agent/capsules/store',
+      './agent/config/preview',
+      './agent/global-state',
       './agent/ledger',
-      './agent/ledger/*',
+      './agent/ledger/run-cancellation',
+      './agent/ledger/run-ledger',
       './agent/mindos-pi',
-      './agent/mindos-pi/*',
       './agent/mindos-pi/extension',
-      './agent/mindos-pi/extension/*',
+      './agent/mindos-pi/extension/kb-extension',
       './agent/mindos-pi/permission',
-      './agent/mindos-pi/permission/*',
+      './agent/mode',
       './agent/permission',
-      './agent/permission/*',
       './agent/prompt',
-      './agent/prompt/*',
       './agent/runtime',
-      './agent/runtime/*',
       './agent/runtime/adapters',
-      './agent/runtime/adapters/*',
+      './agent/runtime/adapters/mindos',
       './agent/runtime/adapters/session-transcripts',
-      './agent/runtime/adapters/session-transcripts/*',
+      './agent/runtime/runtime-env',
+      './agent/runtime/runtime-errors',
       './agent/stream',
-      './agent/stream/*',
+      './agent/stream/stream-consumer',
       './agent/subagent',
-      './agent/subagent/*',
+      './agent/subagent/subagent-ledger-extension',
       './agent/tool',
-      './agent/tool/*',
+      './agent/tool/capability-registry',
+      './agent/tool/kb-tools',
+      './agent/tool/line-diff',
       './agent/turn',
-      './agent/turn/*',
+      './agent/turn/attachment-limits',
+      './agent/turn/retry-policy',
+      './agent/turn/ui-events',
+      './agent/turn/ui-messages',
       './capabilities',
       './cli',
       './client',
+      './client-types',
       './foundation',
+      './foundation/security/redaction',
       './intelligence',
       './knowledge',
       './plugin',
@@ -114,6 +133,7 @@ describe('MindOS runtime product kernel contract', () => {
       './protocols/acp',
       './retrieval',
       './server',
+      './server/projections/*',
       './tool',
     ]);
   });
@@ -135,10 +155,11 @@ describe('MindOS runtime product kernel contract', () => {
 
   it('makes Web file routes use the product server facade without duplicate local kernels', () => {
     const fileRoute = read('packages/web/app/api/file/route.ts');
+    const fileRouteTable = read('packages/mindos/src/server/routes/files.ts');
     const webSecurity = read('packages/web/lib/core/security.ts');
 
-    expect(fileRoute).toContain("from '@geminilight/mindos/server'");
-    expect(fileRoute).toContain('handleFilePost');
+    expect(fileRoute).toContain("delegateToMindos('POST', '/api/file')");
+    expect(fileRouteTable).toContain('handleFilePost');
     expect(existsSync(resolve(root, 'packages/web/app/api/file/operation-kernel.ts'))).toBe(false);
     expect(existsSync(resolve(root, 'packages/web/app/api/file/handlers.ts'))).toBe(false);
 

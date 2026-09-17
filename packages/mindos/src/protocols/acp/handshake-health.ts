@@ -1,10 +1,12 @@
-import { redactSensitiveText } from '../../agent/redaction.js';
+import { redactSensitiveText } from '../../foundation/security/redaction.js';
 import { isAcpCapabilitySupported, type AcpAgentCapabilities, type AcpSession } from './types.js';
 
 export type AcpHandshakeHealthStatus = 'ready' | 'failed';
 
 export type AcpHandshakeHealthStage =
   | 'initialize'
+  /** The agent demanded sign-in and MindOS could not satisfy it (readiness shows it as signed out). */
+  | 'authenticate'
   | 'session-new'
   | 'session-load'
   | 'session-list';

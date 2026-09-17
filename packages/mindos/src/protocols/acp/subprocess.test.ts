@@ -1,11 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawn } from 'child_process';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createMindosClient, killAgent, resolveTerminalSpawn, spawnAcpAgent } from './subprocess';
+import type { AcpPermissionEvent } from './types';
+import {
+  createMindosClient,
+  getActiveProcesses,
+  getProcess,
+  killAgent,
+  resolveTerminalSpawn,
+  spawnAcpAgent,
+} from './subprocess';
 
 vi.mock('child_process', () => ({
   spawn: vi.fn(),
@@ -13,8 +22,31 @@ vi.mock('child_process', () => ({
   execFileSync: vi.fn(),
 }));
 
+// Command resolution consults the real PATH and well-known install directories
+// before any login shell, so spawn tests pin the resolver instead of relying
+// on whatever happens to be installed on the machine running the suite.
+const detectLocalMock = vi.hoisted(() => ({
+  resolveCommandPathSync: vi.fn<(command: string | undefined) => string | null>(),
+  actual: null as ((command: string | undefined) => string | null) | null,
+}));
+
+vi.mock('./detect-local.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./detect-local.js')>();
+  detectLocalMock.actual = actual.resolveCommandPathSync;
+  return { ...actual, resolveCommandPathSync: detectLocalMock.resolveCommandPathSync };
+});
+
 const mockSpawn = vi.mocked(spawn);
 const mockExecFileSync = vi.mocked(execFileSync);
+
+beforeEach(() => {
+  detectLocalMock.resolveCommandPathSync.mockReset();
+  detectLocalMock.resolveCommandPathSync.mockImplementation((command) => detectLocalMock.actual!(command));
+});
+
+function pinResolvedCommands(paths: Record<string, string>) {
+  detectLocalMock.resolveCommandPathSync.mockImplementation((command) => (command ? paths[command] ?? null : null));
+}
 
 function makeChildProcess() {
   return {
@@ -23,6 +55,8 @@ function makeChildProcess() {
     stdout: {},
     stderr: { on: vi.fn() },
     on: vi.fn(),
+    once: vi.fn(),
+    kill: vi.fn(),
   } as any;
 }
 
@@ -41,17 +75,10 @@ describe('spawnAcpAgent', () => {
     process.env.SHELL = originalShell;
   });
 
-  it('spawns with the absolute executable resolved from the login shell on macOS', () => {
+  it('spawns with the absolute executable resolved for the agent command on macOS', () => {
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     process.env.SHELL = '/bin/zsh';
-
-    mockExecFileSync.mockImplementation((command, args) => {
-      if (command === 'which') throw new Error('not found');
-      if (command === '/bin/zsh' && Array.isArray(args) && String(args[1]).includes("command -v -- 'gemini'")) {
-        return '/Users/test/bin/gemini\n' as any;
-      }
-      throw new Error(`unexpected command: ${String(command)}`);
-    });
+    pinResolvedCommands({ gemini: '/Users/test/bin/gemini' });
 
     spawnAcpAgent({ id: 'gemini' } as any);
 
@@ -65,14 +92,7 @@ describe('spawnAcpAgent', () => {
   it('spawns Claude via the resolved npx executable instead of a bare command', () => {
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     process.env.SHELL = '/bin/zsh';
-
-    mockExecFileSync.mockImplementation((command, args) => {
-      if (command === 'which') throw new Error('not found');
-      if (command === '/bin/zsh' && Array.isArray(args) && String(args[1]).includes("command -v -- 'npx'")) {
-        return '/Users/test/bin/npx\n' as any;
-      }
-      throw new Error(`unexpected command: ${String(command)}`);
-    });
+    pinResolvedCommands({ npx: '/Users/test/bin/npx' });
 
     spawnAcpAgent({ id: 'claude' } as any);
 
@@ -115,7 +135,13 @@ describe('killAgent', () => {
 
     expect(source).not.toContain('execSync(');
     expect(source).not.toContain('taskkill /PID ${pid}');
-    expect(source).toContain("execFileSync('taskkill', ['/PID', String(pid), '/T', '/F']");
+    // Tree-kill moved into the shared supervisor; assert the argv-safe form there.
+    const supervisor = fs.readFileSync(
+      path.join(__dirname, '../../agent/runtime/process-supervisor.ts'),
+      'utf-8',
+    );
+    expect(supervisor).not.toContain('execSync(');
+    expect(supervisor).toContain("execFileSync('taskkill', ['/PID', String(pid), '/T', '/F']");
   });
 
   it('keeps ACP terminal commands out of unconditional shell execution', () => {
@@ -143,14 +169,7 @@ describe('resolveTerminalSpawn', () => {
   it('resolves terminal commands without enabling a shell on Unix', () => {
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     process.env.SHELL = '/bin/zsh';
-
-    mockExecFileSync.mockImplementation((command, args) => {
-      if (command === 'which') throw new Error('not found');
-      if (command === '/bin/zsh' && Array.isArray(args) && String(args[1]).includes("command -v -- 'node'")) {
-        return '/usr/local/bin/node\n' as any;
-      }
-      throw new Error(`unexpected command: ${String(command)}`);
-    });
+    pinResolvedCommands({ node: '/usr/local/bin/node' });
 
     expect(resolveTerminalSpawn('node')).toEqual({
       command: '/usr/local/bin/node',
@@ -385,5 +404,211 @@ describe('createMindosClient permission policy', () => {
 
     await expect(client.readTextFile({ path: join(outside, 'secret.md') }))
       .rejects.toThrow('outside the working directory');
+  });
+});
+
+/** A terminal child that behaves like a ChildProcess for exit/kill purposes (no real pid: nothing gets signalled). */
+function makeTerminalChild() {
+  const child = Object.assign(new EventEmitter(), {
+    pid: undefined as number | undefined,
+    exitCode: null as number | null,
+    signalCode: null as string | null,
+    kill: vi.fn(),
+    stdin: {},
+    stdout: new EventEmitter(),
+    stderr: new EventEmitter(),
+  });
+  return child;
+}
+
+function pinNodeCommand() {
+  mockExecFileSync.mockImplementation((command, args) => {
+    if (command === 'which' && Array.isArray(args) && args[0] === 'node') {
+      return '/usr/bin/node\n' as any;
+    }
+    throw new Error(`unexpected command: ${String(command)}`);
+  });
+}
+
+describe('process bookkeeping', () => {
+  const entry = { id: 'test-agent', name: 'Test', description: 'test', transport: 'stdio' as const, command: 'test-agent' };
+
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+    mockSpawn.mockReset();
+    mockSpawn.mockReturnValue(makeChildProcess());
+    pinResolvedCommands({ 'test-agent': '/usr/local/bin/test-agent' });
+  });
+
+  it('gives two spawns in the same millisecond distinct process ids', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    let a: ReturnType<typeof spawnAcpAgent> | undefined;
+    let b: ReturnType<typeof spawnAcpAgent> | undefined;
+    try {
+      a = spawnAcpAgent(entry);
+      b = spawnAcpAgent(entry);
+      expect(a.id).not.toBe(b.id);
+      expect(a.id).toMatch(/^acp-test-agent-[0-9a-f-]{36}$/);
+    } finally {
+      vi.useRealTimers();
+      if (a) killAgent(a);
+      if (b) killAgent(b);
+    }
+  });
+
+  it('forgets a process that exits on its own and kills its leftover terminals', async () => {
+    const agentChild = makeChildProcess();
+    mockSpawn.mockReturnValueOnce(agentChild);
+    const proc = spawnAcpAgent(entry);
+    expect(getProcess(proc.id)).toBe(proc);
+
+    pinNodeCommand();
+    const terminal = makeTerminalChild();
+    mockSpawn.mockReturnValueOnce(terminal as any);
+    const client = createMindosClient(proc, mkdtempSync(join(tmpdir(), 'mindos-acp-close-')), {}, 'auto');
+    await client.createTerminal({ command: 'node' });
+
+    const closeHandler = agentChild.on.mock.calls.find(([event]: [string]) => event === 'close')?.[1];
+    expect(closeHandler).toBeTypeOf('function');
+    closeHandler(0, null);
+
+    expect(proc.alive).toBe(false);
+    expect(getProcess(proc.id)).toBeUndefined();
+    expect(getActiveProcesses()).not.toContain(proc);
+    expect(terminal.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+});
+
+describe('terminal lifecycle', () => {
+  function makeAcpProcess() {
+    return { id: `acp-terminal-${Math.random().toString(36).slice(2)}`, agentId: 'test-agent', proc: makeChildProcess(), alive: true };
+  }
+
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+    mockSpawn.mockReset();
+    pinNodeCommand();
+  });
+
+  it('spawns terminals in their own process group so the whole tree can be killed', async () => {
+    const terminal = makeTerminalChild();
+    mockSpawn.mockReturnValue(terminal as any);
+    const client = createMindosClient(makeAcpProcess(), mkdtempSync(join(tmpdir(), 'mindos-acp-term-group-')), {}, 'auto');
+
+    await client.createTerminal({ command: 'node', args: ['-v'] });
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      '/usr/bin/node',
+      ['-v'],
+      expect.objectContaining({ detached: process.platform !== 'win32' }),
+    );
+  });
+
+  it('removes its exit listener when waitForTerminalExit settles', async () => {
+    const terminal = makeTerminalChild();
+    mockSpawn.mockReturnValue(terminal as any);
+    const client = createMindosClient(makeAcpProcess(), mkdtempSync(join(tmpdir(), 'mindos-acp-term-wait-')), {}, 'auto');
+    const { terminalId } = await client.createTerminal({ command: 'node' });
+
+    const waiting = client.waitForTerminalExit({ terminalId });
+    expect(terminal.listenerCount('exit')).toBe(1);
+    terminal.exitCode = 0;
+    terminal.emit('exit', 0, null);
+    await expect(waiting).resolves.toEqual({ exitCode: 0, signal: null });
+    expect(terminal.listenerCount('exit')).toBe(0);
+
+    await expect(client.waitForTerminalExit({ terminalId })).resolves.toEqual({ exitCode: 0, signal: null });
+    expect(terminal.listenerCount('exit')).toBe(0);
+  });
+});
+
+describe('permission request ids and ask-mode waiting', () => {
+  function makeAcpProcess() {
+    return { id: 'acp-test-permission', agentId: 'test-agent', proc: makeChildProcess(), alive: true };
+  }
+  const options = [
+    { optionId: 'allow', kind: 'allow_once' as const, name: 'Allow' },
+    { optionId: 'reject', kind: 'reject_once' as const, name: 'Reject' },
+  ];
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('gives two requests for the same tool in the same millisecond distinct request ids', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    const ids: string[] = [];
+    const client = createMindosClient(
+      makeAcpProcess(),
+      '/tmp/mind',
+      { onPermissionRequest: (event) => ids.push(event.requestId) },
+      'auto',
+    );
+    const params = { sessionId: 'ses-1', toolCall: { toolCallId: 'tc-1', status: 'pending' as const }, options };
+
+    await client.requestPermission(params);
+    await client.requestPermission(params);
+
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it('cancels an ask-mode request that receives no answer within permissionWaitMs and records the reason', async () => {
+    vi.useFakeTimers();
+    const resolved: AcpPermissionEvent[] = [];
+    const client = createMindosClient(
+      makeAcpProcess(),
+      '/tmp/mind',
+      {
+        onPermissionResolved: (event) => resolved.push(event),
+        resolvePermissionRequest: () => new Promise(() => {}),
+      },
+      'ask',
+      {},
+      { permissionWaitMs: 1_000 },
+    );
+
+    const pending = client.requestPermission({
+      sessionId: 'ses-1',
+      toolCall: { toolCallId: 'tc-slow', status: 'pending' },
+      options,
+    });
+    await vi.advanceTimersByTimeAsync(1_001);
+
+    await expect(pending).resolves.toEqual({ outcome: { outcome: 'cancelled' } });
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]).toMatchObject({
+      status: 'resolved',
+      outcome: 'cancelled',
+      toolCallId: 'tc-slow',
+      reason: expect.stringContaining('1s'),
+    });
+  });
+
+  it('ignores a resolver answer that arrives after the wait expired', async () => {
+    vi.useFakeTimers();
+    const resolved: AcpPermissionEvent[] = [];
+    let answer!: (response: { outcome: { outcome: 'selected'; optionId: string } }) => void;
+    const client = createMindosClient(
+      makeAcpProcess(),
+      '/tmp/mind',
+      {
+        onPermissionResolved: (event) => resolved.push(event),
+        resolvePermissionRequest: () => new Promise((resolve) => { answer = resolve; }),
+      },
+      'ask',
+      {},
+      { permissionWaitMs: 1_000 },
+    );
+
+    const pending = client.requestPermission({ sessionId: 'ses-1', toolCall: { toolCallId: 'tc-late', status: 'pending' }, options });
+    await vi.advanceTimersByTimeAsync(1_001);
+    await expect(pending).resolves.toEqual({ outcome: { outcome: 'cancelled' } });
+    answer({ outcome: { outcome: 'selected', optionId: 'allow' } });
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(resolved).toHaveLength(1);
   });
 });

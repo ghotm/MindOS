@@ -1,3 +1,4 @@
+import { RUNTIME_APPROVAL_CAPABILITIES, runtimeApprovalRequirements } from './approval-capabilities.js';
 import type {
   AgentRuntimeCapabilities,
   AgentRuntimeCompatibilityAssessment,
@@ -258,11 +259,11 @@ export function nativeRuntimeCompatibilityProfile(
         owner: 'external',
         summary: runtime === 'codex'
           ? 'Codex provides native thread continuity, list/attach/fork/archive semantics, and MindOS stores only bindings and archive pointers.'
-          : 'Claude Code can resume through its own local semantics, but list/attach/archive are not exposed as a full MindOS session lifecycle.',
+          : 'Claude Code exposes native local history listing, attachment and resume. Fork and archive controls remain owned by Claude.',
         requirements: [
           requirement('runtime-session-owner', 'external', 'external', `${name} owns full session history and compaction.`),
           requirement('mindos-runtime-binding', 'satisfied', 'mindos', 'MindOS stores the runtime binding needed to continue from the product session.'),
-          requirement('list-attach-archive', runtime === 'codex' ? 'satisfied' : 'missing', 'external', 'Native runtime should expose list/attach/archive when MindOS needs full session lifecycle controls.'),
+          requirement('list-attach-archive', runtime === 'codex' ? 'satisfied' : 'missing', 'external', runtime === 'codex' ? 'Native list, attachment and archive are supported.' : 'Native list and attachment are supported; archive is not yet exposed.'),
         ],
         ...(runtime === 'codex' ? {} : { blockers: ['list-attach-archive'] }),
       }),
@@ -284,9 +285,9 @@ export function nativeRuntimeCompatibilityProfile(
           requirement('runtime-approvals', input.capabilities.supportsApprovals ? 'external' : 'unknown', 'external', `${name} must expose approval prompts or a safe native permission mode.`),
           requirement('mindos-permission-bridge', input.capabilities.supportsApprovals ? 'satisfied' : 'unknown', 'mindos', 'MindOS can route supported native approval requests into product stream events.'),
           requirement('permission-projection-contract', 'satisfied', 'mindos', 'MindOS exposes read-only permission readiness diagnostics for native runtime bridges.'),
-          requirement('durable-approval-queue', 'missing', 'mindos', 'Native approval prompts are still in-process and interactive, not durable for headless or resumed runs.'),
+          ...runtimeApprovalRequirements(),
         ],
-        ...(input.capabilities.supportsApprovals ? { blockers: ['durable-approval-queue'] } : {}),
+        ...(input.capabilities.supportsApprovals ? { blockers: [...RUNTIME_APPROVAL_CAPABILITIES.blockers] } : {}),
       }),
       'mcp-tooling': assessment({
         level: input.capabilities.supportsMcpConfig ? 'limited' : 'blocked',
@@ -343,6 +344,93 @@ export function nativeRuntimeCompatibilityProfile(
   };
 }
 
+/**
+ * ACP scenario assessments read the derived capabilities
+ * (`acpCapabilitiesFromHandshake`) instead of restating a pessimistic default:
+ * an agent that declared `loadSession` / `sessionCapabilities.list` and a
+ * session layer that bridges `session/request_permission` change the answer.
+ */
+function acpSessionContinuityAssessment(input: RuntimeCompatibilityInput): AgentRuntimeCompatibilityAssessment {
+  const { supportsResume, supportsListSessions } = input.capabilities;
+  const requirements = [
+    requirement('runtime-session-binding', 'satisfied', 'mindos', 'MindOS can remember the runtime binding for a run.'),
+    requirement('session-load', supportsResume ? 'external' : 'missing', 'external', supportsResume
+      ? 'The agent declared session/load, so MindOS can resume its session by agent session id.'
+      : 'The agent has not declared session/load; MindOS cannot resume its sessions.'),
+    requirement('list-attach-archive', supportsListSessions ? 'external' : 'missing', 'external', supportsListSessions
+      ? 'The agent declared session/list, so MindOS can attach to sessions it created elsewhere.'
+      : 'Generic ACP session list/attach/archive is not part of the current contract.'),
+  ];
+  if (supportsResume && supportsListSessions) {
+    return assessment({
+      level: 'ready',
+      owner: 'external',
+      summary: 'The ACP agent declares session load and list, so MindOS can resume and attach to its sessions while the adapter owns session identity.',
+      requirements,
+    });
+  }
+  return assessment({
+    level: 'limited',
+    owner: 'external',
+    summary: supportsResume
+      ? 'The ACP agent can resume sessions through session/load, but MindOS cannot list, attach, fork, or archive them yet.'
+      : 'ACP session identity belongs to the adapter/protocol; MindOS records bindings but cannot resume, list, attach, fork, or archive generic ACP sessions.',
+    requirements,
+    blockers: ['list-attach-archive'],
+  });
+}
+
+function acpPermissionGovernanceAssessment(input: RuntimeCompatibilityInput): AgentRuntimeCompatibilityAssessment {
+  const bridged = input.capabilities.supportsApprovals && input.harnessCapabilities.eventStream.includes('permissions');
+  if (!bridged) {
+    return assessment({
+      level: 'unknown',
+      owner: 'external',
+      summary: 'Generic ACP does not expose a shared permission/approval prompt contract through MindOS yet.',
+      requirements: [
+        requirement('permission-projection-contract', 'satisfied', 'mindos', 'MindOS exposes read-only permission readiness diagnostics for runtime descriptors.'),
+        requirement('adapter-approval-contract', 'unknown', 'external', 'Adapter-specific permission semantics must be declared before MindOS can route approvals reliably.'),
+      ],
+    });
+  }
+  return assessment({
+    level: 'limited',
+    owner: 'shared',
+    summary: RUNTIME_APPROVAL_CAPABILITIES.summary,
+    requirements: [
+      requirement('permission-projection-contract', 'satisfied', 'mindos', 'MindOS exposes read-only permission readiness diagnostics for runtime descriptors.'),
+      requirement('adapter-approval-contract', 'satisfied', 'external', 'The ACP protocol routes approval prompts through session/request_permission, which MindOS bridges.'),
+      requirement('mindos-permission-bridge', 'satisfied', 'mindos', 'MindOS resolves ACP permission requests from the selected permission mode or the user.'),
+      ...runtimeApprovalRequirements(),
+    ],
+    blockers: [...RUNTIME_APPROVAL_CAPABILITIES.blockers],
+  });
+}
+
+function acpMcpToolingAssessment(input: RuntimeCompatibilityInput): AgentRuntimeCompatibilityAssessment {
+  if (!input.capabilities.supportsMcpConfig) {
+    return assessment({
+      level: 'unknown',
+      owner: 'external',
+      summary: 'Generic ACP adapters may own their own MCP/tool configuration; MindOS can report known MCP profiles, but adapter-specific tool contracts remain required.',
+      requirements: [
+        requirement('mindos-mcp-projection-contract', 'satisfied', 'mindos', 'MindOS exposes read-only MCP projection diagnostics for runtimes with known MCP profiles.'),
+        requirement('adapter-mcp-contract', 'unknown', 'external', 'Adapter-specific MCP/tool projection needs to be declared.'),
+      ],
+    });
+  }
+  return assessment({
+    level: 'limited',
+    owner: 'shared',
+    summary: 'The ACP agent declares MCP transport support, so MindOS passes its configured MCP servers into session/new; adapter-side tool semantics remain external.',
+    requirements: [
+      requirement('mindos-mcp-projection-contract', 'satisfied', 'mindos', 'MindOS exposes read-only MCP projection diagnostics for runtimes with known MCP profiles.'),
+      requirement('adapter-mcp-contract', 'external', 'external', 'The agent declared MCP transport capabilities in its adapter metadata or initialize response.'),
+      requirement('mcp-inheritance', 'satisfied', 'mindos', 'MindOS inherits its MCP server configuration into ACP sessions the agent can consume.'),
+    ],
+  });
+}
+
 export function acpRuntimeCompatibilityProfile(input: RuntimeCompatibilityInput): AgentRuntimeCompatibilityProfile {
   const blocked = availabilityGate(input.status, 'ACP runtime');
   return {
@@ -367,16 +455,7 @@ export function acpRuntimeCompatibilityProfile(input: RuntimeCompatibilityInput)
         ],
         blockers: ['adapter-tool-declaration'],
       }),
-      'session-continuity': assessment({
-        level: 'limited',
-        owner: 'external',
-        summary: 'ACP session identity belongs to the adapter/protocol; MindOS records bindings but cannot list, attach, fork, or archive generic ACP sessions.',
-        requirements: [
-          requirement('runtime-session-binding', 'satisfied', 'mindos', 'MindOS can remember the runtime binding for a run.'),
-          requirement('list-attach-archive', 'missing', 'external', 'Generic ACP session list/attach/archive is not part of the current contract.'),
-        ],
-        blockers: ['list-attach-archive'],
-      }),
+      'session-continuity': acpSessionContinuityAssessment(input),
       'context-governance': assessment({
         level: 'limited',
         owner: 'shared',
@@ -386,24 +465,8 @@ export function acpRuntimeCompatibilityProfile(input: RuntimeCompatibilityInput)
           requirement('adapter-context-owner', 'external', 'external', 'ACP adapter owns native context-window behavior.'),
         ],
       }),
-      'permission-governance': assessment({
-        level: 'unknown',
-        owner: 'external',
-        summary: 'Generic ACP does not expose a shared permission/approval prompt contract through MindOS yet.',
-        requirements: [
-          requirement('permission-projection-contract', 'satisfied', 'mindos', 'MindOS exposes read-only permission readiness diagnostics for runtime descriptors.'),
-          requirement('adapter-approval-contract', 'unknown', 'external', 'Adapter-specific permission semantics must be declared before MindOS can route approvals reliably.'),
-        ],
-      }),
-      'mcp-tooling': assessment({
-        level: 'unknown',
-        owner: 'external',
-        summary: 'Generic ACP adapters may own their own MCP/tool configuration; MindOS can report known MCP profiles, but adapter-specific tool contracts remain required.',
-        requirements: [
-          requirement('mindos-mcp-projection-contract', 'satisfied', 'mindos', 'MindOS exposes read-only MCP projection diagnostics for runtimes with known MCP profiles.'),
-          requirement('adapter-mcp-contract', 'unknown', 'external', 'Adapter-specific MCP/tool projection needs to be declared.'),
-        ],
-      }),
+      'permission-governance': acpPermissionGovernanceAssessment(input),
+      'mcp-tooling': acpMcpToolingAssessment(input),
       'skill-execution': assessment({
         level: 'limited',
         owner: 'shared',

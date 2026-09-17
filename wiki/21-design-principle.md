@@ -9,6 +9,27 @@
 
 ## 核心品牌主张
 
+### 官网：Human–Agent Co-evolution
+
+官网以“人提出判断 → Agent 行动 → 人复盘 → 经验进入下一轮”为主叙事。静态站复用暖纸色、琥珀动作色和明暗主题；官网独立 token、交互规范、对比度实测及维护入口见 [官网设计与维护](refs/website-coevolution.md)。
+
+### 2026-09 UI 可读性补充
+
+- `--amber` 保持装饰与品牌识别用途，不直接假定它与白字满足正文对比度。
+- 新增 `--amber-action`（浅色 `#95551b`、深色 `#a46328`），在 `@theme inline` 注册；共享 amber Button 在自身作用域将 `--amber` 指向该动作色，保持 `bg-[var(--amber)] text-[var(--amber-foreground)]` 与白字契约。
+- 默认与 hover 状态均须达到小字号文字 AA；不得靠改变全局品牌琥珀色影响所有装饰元素。
+- 需要阅读的辅助文字使用完整 `text-muted-foreground`，不叠加 /50、/60 等透明度模拟层级。
+- 空态不使用无来源的个人成就文案或默认演示统计；尚未保存、保存失败不能短暂消失为正常状态。
+
+### 2026-09 主要工作页面补充
+
+- 完整设置页采用 page 变体：桌面分组导航，窄屏共享 Select；URL 保存当前分类，浏览器后退恢复对应内容。modal/panel 保持局部状态。
+- Field 为 Input、PasswordInput、Select 提供标签与错误描述关联；Select 将 active descendant 放在保持焦点的 combobox 上。
+- 首页优先最近工作，存在最近内容时模板默认收起；知识库置顶和最近内容位于空间概览之前。
+- 收集箱详情先显示正文。窄屏选中后独立展示详情、返回原列表；预览与批量勾选独立。
+- Agents 与 Echo 主区保留分类导航；系统关系说明按需展开，避免与主要入口竞争。
+- 新笔记恢复按知识库和标签页隔离。暂存不等于写入知识库；保存失败提示不随屏幕尺寸隐藏。
+
 **MindOS：让认知沉淀，让心手并进。**
 
 在 AI 时代，心负责判断，手交给 Agent。
@@ -51,7 +72,8 @@
 
 | Token | 值 | 语义用途 |
 |-------|-----|---------|
-| `--amber` | `#c8873a` | 品牌主色，交互高亮，链接，focus ring |
+| `--amber` | `#c8873a` | 品牌主色，交互高亮，链接；焦点另用 `--ring` |
+| `--ring` | `#95551b` | 浅色键盘焦点专用琥珀色；深色为 `#e0a85e`，六种标准背景 ≥3:1 |
 | `--amber-text` | `#9a6a2b` | 浅 amber 底上的文字，不用于 amber 实底 |
 | `--amber-dim` | `rgba(200,135,58,0.18)` | 较强 amber 背景色（active、selected） |
 | `--amber-subtle` | `rgba(200,135,30,0.08)` | 轻 amber 背景色（icon shell、hint、quiet selected） |
@@ -62,7 +84,7 @@
 | `--primary-foreground` | `#f8f6f1` | 主按钮文字 |
 | `--card` | `#f2efe9` | 卡片背景 |
 | `--muted` | `#e8e4db` | 禁用/次要背景 |
-| `--muted-foreground` | `#7a7568` | 辅助文字 |
+| `--muted-foreground` | `#685f52` | 辅助文字；与当前源码对齐。浅色页面底上约 5.81:1，重要说明不可再叠加低透明度 |
 | `--accent` | `#d9d3c6` | 高亮背景（hover 行等） |
 | `--border` | `rgba(28,26,23,0.1)` | 边框 |
 | `--sidebar` | `#ede9e1` | 侧边栏背景 |
@@ -123,11 +145,11 @@
 
 | Token | 亮色 | 暗色 | 用途 |
 |-------|------|------|------|
-| `--success` | `#7aad80` | `#7aad80` | 保存成功、同步完成、在线状态 |
-| `--error` | `#c85050` | `#c85050` | 操作失败、删除确认、错误提示 |
+| `--success` | `#234b2c` | `#a0c4a4` | 保存成功、同步完成、在线状态文字 / 图标 |
+| `--error` | `#762c2c` | `#eeaaa4` | 操作失败、删除确认、错误提示文字 / 图标 |
 | `--warning` | `var(--amber)` | `var(--amber)` | 警告提示（复用品牌色） |
 | `--info` | `#5a8ab4` | `#8ab4d8` | 信息提示、帮助文本 |
-| `--destructive` | `oklch(0.56 0.14 24)` | `oklch(0.56 0.14 22)` | 破坏性操作按钮背景（删除、放弃等） |
+| `--destructive` | `#b33b3b` | `#b33636` | 破坏性操作按钮背景（删除、放弃等） |
 | `--destructive-foreground` | `#ffffff` | `#ffffff` | 破坏性按钮文字（白色） |
 
 #### Destructive 色彩设计原则
@@ -135,6 +157,8 @@
 - **克制而非恐吓**：破坏性操作用低饱和暖红（terracotta/dusty rose），不用高饱和刺眼红。与品牌 "温暖、专业、克制" 一致。
 - **`--destructive` vs `--error`**：`--destructive` 用于按钮/操作背景（低饱和、配白字），`--error` 用于文字/图标提示（中等饱和、需要足够对比度）。两者不要混用。
 - **按钮用法**：`bg-destructive text-destructive-foreground`，hover 用 `hover:bg-destructive/90`。
+- **次级危险操作**：共享 `Button variant="destructive"` 使用 `bg-error/10 text-error hover:bg-error/20`，保留柔和层级；需要实心确认时才用上述 destructive 背景与白字。不要把深色主题较亮的 error / success 文字色拿来铺白字按钮背景。
+- **状态正文不降透明度**：错误说明、覆盖警告和重试文案不再叠加 `text-error/70` 等透明度。当前两主题 success / error 在 background、card、popover、muted、accent、sidebar，以及同色 10% / 20% 浅底上有 ≥4.5:1 回归测试；自定义主题、父级 opacity、其它叠层和焦点边框需要另测，不能据此视为全站达标。
 
 > **迁移状态**：核心 token 已存在，仍需要防止组件继续散落 `rgba(...)`、Tailwind 原色和局部 `color-mix(...)`。装饰色（例如文件类型、文件夹图标）可以保留原色，但必须限定在装饰语义；工具操作色（read/search/create/delete）应进入 renderer theme 或 CSS token，不在组件里重复硬编码。
 
@@ -155,7 +179,7 @@
 
 | Token | 使用场景 | 禁止 |
 |------|---------|------|
-| `--amber` | CTA 实底、focus ring、当前主焦点、链接 | 大面积背景、普通正文 |
+| `--amber` | 品牌高亮、当前项、链接；CTA 用 action、键盘焦点用 ring | 大面积背景、普通正文 |
 | `--amber-foreground` | 只用于 `--amber` 实底上的文字或图标 | 单独作为文字色；浅底上使用 |
 | `--amber-text` | `--amber-subtle` / `--amber-dim` 浅底上的文字 | 实底按钮文字 |
 | `--amber-subtle` | icon shell、quiet selected、轻提示背景 | 表达强 active 状态 |
@@ -275,12 +299,17 @@
 
 所有可交互元素统一 focus-visible 样式：
 ```css
-outline: 2px solid var(--amber);
+outline: 2px solid var(--ring);
 outline-offset: 2px;
-border-radius: 4px;
 ```
 
-`--ring` 变量指向 `var(--amber)`，shadcn/ui 组件通过 `ring-ring` 自动继承。自定义 input 使用 `focus-visible:ring-1 focus-visible:ring-ring`。**不要用 `focus:` 前缀**（鼠标点击不应触发 ring）。
+`--ring` 是专用琥珀色焦点令牌（浅色 `#95551b` / 深色 `#e0a85e`），不跟随按钮局部覆盖的 `--amber`；`ring-ring` 与 `--sidebar-ring` 统一引用它。全局规则覆盖按钮、链接、input / textarea / select、summary 与可顺序聚焦的 tabindex，不在聚焦时修改圆角。共享 Button 只保留全局 outline，不叠加半透明 halo；checkbox / radio 保留原有形状并使用同样的外描边。基础 outline 色不加 50% 透明度，避免快速 Tab 时先出现低对比焦点。**不要用 `focus:` 前缀**；保留 `:focus-visible` 的浏览器输入方式判断（文本输入可能在鼠标聚焦时也需要可见焦点）。
+
+外描边占用控件边界外 4px，紧贴视口或 overflow 容器边缘的控件必须另验裁切，不可仅靠色值测试宣布全局达标。自定义主题、强制颜色和富文本编辑器焦点需单独验收。
+
+优先给滚动条目留 4px 绘制空间；只有不能缩小点击面的 full-bleed 入口才设置 `[--focus-ring-offset:-3px] [--focus-ring-width:3px]`，将描边放到内部（当前用于 Activity Bar 标志）。内部描边还必须对该控件自身背景验对比度，不可机械套到琥珀色实底。
+
+键盘滚动也要给描边留位置：焦点元素 `scroll-margin: 8px`，主滚动区 `scroll-padding-block: 8px`。手机主区的上方排除 `--mobile-header-height + 8px`，该高度为 44px 目标 + 上下各 4px + 1px 边框 + 顶部安全区；初始内容 padding 与它同源。`mobile-app-header` 把安全区留白加在 4px 基础间距上，不再用 `env(..., 0px)` 覆盖基础 padding。不要加 JS focus/scroll 循环来代替浏览器原生滚动；其它 sticky 子工具栏与真实设备仍需独立验收。
 
 ### Z-Index 层级
 
@@ -391,3 +420,14 @@ rg 'rounded-2xl|shadow-2xl' packages/web/app packages/web/components --glob '*.{
 | 动效 | 已支持 `prefers-reduced-motion: reduce` 关闭动画 |
 | 色彩对比 | 正文/背景对比度 ≥ 4.5:1（WCAG AA） |
 | Skip link | 未来应增加 "Skip to content" 跳转链接 |
+
+### 移动端原生主题补充（2026-09-12）
+
+Android/iOS 原生组件通过 `packages/mobile/lib/palette.ts` 定义语义色，
+`useThemedStyles` 按系统明暗模式选择并复用同一份样式。原生样式不支持 CSS 变量，
+因此色值只允许集中出现在 palette；组件、Markdown、导航不得各自写色值。
+`amber` 用于文字/图标，`amberAction` 用于填充按钮并配白字；两者分开保证主要正文、
+辅助文字及按钮达到 4.5:1 对比度。Web 的现有 `--amber` 定义不随此原生 token 调整。
+通用按钮触区为 48，编辑器按钮至少 44；尺寸用最小高度，允许系统字号放大。
+系统主题切换不重建页面状态，导航与正文使用同一主题。主页优先快速记录、目录和真实
+最近修改记录，空的 Agent 状态卡不占首屏。编辑时只显示编辑器相关操作。

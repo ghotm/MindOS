@@ -34,11 +34,13 @@ const CLI_RUNTIME_ROOT_DEPENDENCIES = [
   '@earendil-works/pi-agent-core',
   '@earendil-works/pi-ai',
   '@earendil-works/pi-coding-agent',
+  '@hono/node-server',
   '@modelcontextprotocol/sdk',
   '@sinclair/typebox',
   'chokidar',
-  'pino',
-  'pino-pretty',
+  'hono',
+  'jsonc-parser',
+  'picomatch',
   'zod',
 ];
 

@@ -189,13 +189,46 @@ describe('idle polling budget (35s 空闲请求数 ≤10 的支撑契约)', () =
     expect(host.textContent).not.toContain('3 new changes');
   });
 
-  it('SidebarLayout tree-version poll runs at most every 15s (own writes arrive via events)', () => {
-    const src = readFileSync(
+  it('tree-version safety poll runs at most every 60s and only while the event stream is down', () => {
+    // Real-time updates arrive over /api/events (see useTreeVersionSync and
+    // __tests__/hooks/use-tree-version-sync.test.tsx, which asserts zero
+    // tree-version requests while connected). The poll is the degraded path.
+    const hook = readFileSync(
+      path.resolve(__dirname, '../../hooks/useTreeVersionSync.ts'),
+      'utf-8',
+    );
+    const m = hook.match(/FALLBACK_POLL_INTERVAL_MS = (\d+_?\d*)/);
+    expect(m, 'useTreeVersionSync must define FALLBACK_POLL_INTERVAL_MS').toBeTruthy();
+    expect(Number(m![1].replace('_', ''))).toBeGreaterThanOrEqual(60_000);
+    expect(hook).toContain("getServerEventsState() === 'connected'");
+
+    const sidebar = readFileSync(
       path.resolve(__dirname, '../../components/SidebarLayout.tsx'),
       'utf-8',
     );
-    const m = src.match(/POLL_INTERVAL_MS = (\d+_?\d*)/);
-    expect(m, 'SidebarLayout must define POLL_INTERVAL_MS').toBeTruthy();
-    expect(Number(m![1].replace('_', ''))).toBeGreaterThanOrEqual(15_000);
+    expect(sidebar).not.toContain('/api/tree-version');
+    expect(sidebar).toContain('useTreeVersionSync(router)');
+  });
+
+  it('runtime session projection refreshes on events and only polls (>= 30s) while the stream is down', () => {
+    // Behavioural coverage lives in __tests__/hooks/use-runtime-session-projection.test.tsx;
+    // this pins the constants and guards so a future edit cannot quietly restore the 3.5 s poll.
+    const hook = readFileSync(
+      path.resolve(__dirname, '../../hooks/useRuntimeSessionProjection.ts'),
+      'utf-8',
+    );
+    const m = hook.match(/RUNTIME_SESSION_PROJECTION_FALLBACK_POLL_MS = (\d+_?\d*)/);
+    expect(m, 'useRuntimeSessionProjection must define RUNTIME_SESSION_PROJECTION_FALLBACK_POLL_MS').toBeTruthy();
+    expect(Number(m![1].replace('_', ''))).toBeGreaterThanOrEqual(30_000);
+    expect(hook).toContain("getServerEventsState() === 'connected'");
+    expect(hook).toContain("document.visibilityState !== 'visible'");
+    expect(hook).toContain("subscribeServerEvents('agent-run.event'");
+    expect(hook).toContain("subscribeServerEvents('runtime.changed'");
+    expect(hook).not.toMatch(/refreshMs = 3500/);
+
+    for (const file of ['useNativeRuntimeDetection.ts', 'useAcpDetection.ts', 'useRuntimeReadiness.ts']) {
+      const source = readFileSync(path.resolve(__dirname, '../../hooks', file), 'utf-8');
+      expect(source, file).toContain("subscribeServerEvents('runtime.changed'");
+    }
   });
 });

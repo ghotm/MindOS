@@ -2,7 +2,7 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { seedFile, testMindRoot } from '../setup';
 import { GET, POST } from '../../app/api/file/route';
-import { invalidateCache } from '../../lib/fs';
+import { collectAllFiles, invalidateCache, listContentChanges, peekContentVersion, peekTreeVersion } from '../../lib/fs';
 import fs from 'fs';
 import path from 'path';
 
@@ -160,6 +160,56 @@ describe('POST /api/file', () => {
     expect(content).toBe('hello');
   });
 
+  describe('in-memory cache invalidation', () => {
+    it('makes a created file visible to the cached file list without a manual invalidateCache()', async () => {
+      invalidateCache();
+      // Warm the tree cache for this mind root before writing through the API.
+      expect(collectAllFiles()).not.toContain('cached/new-note.md');
+
+      const res = await POST(post({ op: 'create_file', path: 'cached/new-note.md', content: 'fresh' }));
+      expect(res.status).toBe(200);
+
+      expect(collectAllFiles()).toContain('cached/new-note.md');
+    });
+
+    it('makes a save_file that creates a new path visible through the cache', async () => {
+      invalidateCache();
+      expect(collectAllFiles()).not.toContain('saved-fresh.md');
+
+      const res = await POST(post({ op: 'save_file', path: 'saved-fresh.md', content: 'hello' }));
+      expect(res.status).toBe(200);
+
+      expect(collectAllFiles()).toContain('saved-fresh.md');
+    });
+
+    it('bumps the content version without a tree change for in-place edits', async () => {
+      seedFile('edited.md', 'v1');
+      invalidateCache();
+      expect(collectAllFiles()).toContain('edited.md');
+      const treeBefore = peekTreeVersion();
+      const contentBefore = peekContentVersion();
+
+      const res = await POST(post({ op: 'save_file', path: 'edited.md', content: 'v2' }));
+      expect(res.status).toBe(200);
+
+      expect(peekContentVersion()).toBeGreaterThan(contentBefore);
+      expect(peekTreeVersion()).toBe(treeBefore);
+    });
+
+    it('drops a deleted file from the cached file list', async () => {
+      seedFile('doomed.md', 'bye');
+      invalidateCache();
+      expect(collectAllFiles()).toContain('doomed.md');
+      const treeBefore = peekTreeVersion();
+
+      const res = await POST(post({ op: 'delete_file', path: 'doomed.md' }));
+      expect(res.status).toBe(200);
+
+      expect(collectAllFiles()).not.toContain('doomed.md');
+      expect(peekTreeVersion()).toBeGreaterThan(treeBefore);
+    });
+  });
+
   it('denies agent writes to root-level system files by default', async () => {
     seedFile('INSTRUCTION.md', 'original');
     invalidateCache();
@@ -234,20 +284,18 @@ describe('POST /api/file', () => {
     expect(fs.existsSync(path.join(root(), 'draft.md'))).toBe(true);
   }));
 
-  it('save_file records a structured change event in JSON log', async () => {
+  it('save_file records a structured change event in the sqlite change log', async () => {
     const res = await POST(post({ op: 'save_file', path: 'logged.md', content: 'v1' }));
     expect(res.status).toBe(200);
 
-    const logPath = path.join(root(), '.mindos', 'change-log.json');
-    expect(fs.existsSync(logPath)).toBe(true);
+    // The legacy JSONL file is gone; the store lives in .mindos/db (spec-sqlite-derived-stores).
+    expect(fs.existsSync(path.join(root(), '.mindos', 'change-log.json'))).toBe(false);
+    expect(fs.existsSync(path.join(root(), '.mindos', 'db', 'change_log_1.sqlite'))).toBe(true);
 
-    // JSONL format: newest event is the last line.
-    const lines = fs.readFileSync(logPath, 'utf-8').trim().split('\n');
-    expect(lines.length).toBeGreaterThan(0);
-    const latest = JSON.parse(lines[lines.length - 1]) as { op: string; path: string; after?: string };
-    expect(latest.op).toBe('save_file');
-    expect(latest.path).toBe('logged.md');
-    expect(latest.after).toContain('v1');
+    const latest = listContentChanges({ limit: 1 })[0];
+    expect(latest?.op).toBe('save_file');
+    expect(latest?.path).toBe('logged.md');
+    expect(latest?.after).toContain('v1');
   });
 
   it('records the agent header on agent-authored content changes', async () => {
@@ -257,12 +305,10 @@ describe('POST /api/file', () => {
     ));
     expect(res.status).toBe(200);
 
-    const logPath = path.join(root(), '.mindos', 'change-log.json');
-    const lines = fs.readFileSync(logPath, 'utf-8').trim().split('\n');
-    const latest = JSON.parse(lines[lines.length - 1]) as { source: string; agentName?: string; path: string };
-    expect(latest.path).toBe('agent-logged.md');
-    expect(latest.source).toBe('agent');
-    expect(latest.agentName).toBe('codex');
+    const latest = listContentChanges({ limit: 1 })[0];
+    expect(latest?.path).toBe('agent-logged.md');
+    expect(latest?.source).toBe('agent');
+    expect(latest?.agentName).toBe('codex');
   });
 
   it('save_file returns error if content missing', async () => {

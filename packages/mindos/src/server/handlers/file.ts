@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { release as osRelease } from 'node:os';
 import { basename, dirname, extname, join, posix, relative, resolve } from 'node:path';
 import { resolveExistingSafe, resolveSafe } from '../../foundation/security/index.js';
@@ -29,8 +30,12 @@ import {
 } from '../../knowledge/knowledge-ops/index.js';
 import { assertSafeAgentWriteContent, readBooleanFlag } from '../../knowledge/content-integrity.js';
 import { queryValue, type MindosRequestQuery } from '../context.js';
+import { createMindosSearchIgnoreMatcher } from '../search-ignore.js';
+import { MINDOS_IGNORED_DIRS } from '../runtime.js';
 import { json, type MindosServerResponse } from '../response.js';
 import { isMindosBuiltinAssistantId } from './assistants.js';
+import { knowledgeRootIdentity } from '../knowledge-root-identity.js';
+import { mindRootIdentity } from '../root-identity.js';
 
 export type FileGetHandlerServices = {
   mindRoot?: string;
@@ -38,6 +43,8 @@ export type FileGetHandlerServices = {
   readLines(path: string): string[];
   listSpaces(): string[];
   listDirectories(): string[];
+  /** Cached file list; when present, space file counts come from it instead of a per-space walk. */
+  collectAllFiles?(): string[];
 };
 
 export type FilePostHandlerServices = {
@@ -77,7 +84,7 @@ export function handleFileGet(
 ): MindosServerResponse<unknown> {
   const op = queryValue(query, 'op') ?? 'read_file';
 
-  if (op === 'list_spaces') return json({ spaces: services.mindRoot ? listDetailedSpaces(services.mindRoot) : services.listSpaces() });
+  if (op === 'list_spaces') return json({ spaces: services.mindRoot ? listDetailedSpaces(services.mindRoot, services.collectAllFiles?.()) : services.listSpaces() });
   if (op === 'list_dirs') return json({ dirs: services.mindRoot ? listDirectories(services.mindRoot) : services.listDirectories() });
   if (op === 'check_conflicts') return handleCheckConflicts(query, services);
 
@@ -93,7 +100,10 @@ export function handleFileGet(
       const mtime = services.mindRoot
         ? statSync(resolveExistingSafe(services.mindRoot, filePath)).mtimeMs
         : undefined;
-      return json(mtime === undefined ? { content } : { content, mtime });
+      const revision = contentRevision(content);
+      return json(services.mindRoot === undefined
+        ? { content, revision }
+        : { content, mtime, revision, vaultId: knowledgeRootIdentity(services.mindRoot) });
     }
     return json({ error: `Unknown op: ${op}` }, { status: 400 });
   } catch (error) {
@@ -187,6 +197,11 @@ export async function handleFilePost(
   if (!body || typeof body !== 'object') return json({ error: 'Invalid JSON body' }, { status: 400 });
 
   const payload = body as Record<string, unknown>;
+  // Discovery and the write may straddle a host-side workspace switch.
+  // Check before dispatch so rejected creates cannot even make a directory.
+  if ('expectedRootId' in payload && payload.expectedRootId !== mindRootIdentity(services.mindRoot)) {
+    return json({ error: 'root_changed' }, { status: 409 });
+  }
   const source = deriveKnowledgeOperationSource({
     hasAgentHeader: Boolean(options.agentHeader),
     bodySource: payload.source,
@@ -278,9 +293,15 @@ function handleCheckConflicts(
   }
 }
 
-function listDetailedSpaces(mindRoot: string): Array<{ name: string; path: string; fileCount: number; description: string }> {
+function listDetailedSpaces(
+  mindRoot: string,
+  cachedFiles?: string[],
+): Array<{ name: string; path: string; fileCount: number; description: string }> {
   const root = resolve(mindRoot);
   if (!existsSync(root)) return [];
+  // One pass over the cached file list replaces a recursive walk per space;
+  // list_spaces runs on every ask session open.
+  const countsBySpace = cachedFiles ? countFilesBySpace(cachedFiles) : null;
   return readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && isMindSpaceDirectory(root, entry.name))
     .map((entry) => {
@@ -288,7 +309,7 @@ function listDetailedSpaces(mindRoot: string): Array<{ name: string; path: strin
       return {
         name: entry.name,
         path: spacePath,
-        fileCount: countFiles(resolveExistingSafe(mindRoot, spacePath)),
+        fileCount: countsBySpace ? (countsBySpace.get(spacePath) ?? 0) : countFiles(resolveExistingSafe(mindRoot, spacePath)),
         description: readSpaceDescription(mindRoot, spacePath),
       };
     })
@@ -301,15 +322,31 @@ function isMindSpaceDirectory(root: string, name: string): boolean {
   return existsSync(instructionPath) && statSync(instructionPath).isFile();
 }
 
+function countFilesBySpace(files: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const filePath of files) {
+    const slash = filePath.indexOf('/');
+    if (slash <= 0) continue;
+    const space = filePath.slice(0, slash);
+    counts.set(space, (counts.get(space) ?? 0) + 1);
+  }
+  return counts;
+}
+
 function listDirectories(mindRoot: string): string[] {
   const root = resolve(mindRoot);
   if (!existsSync(root)) return [];
+  // Same ignore rules as the tree cache / search (MINDOS_IGNORED_DIRS and
+  // .mindosignore), so node_modules / build output never show up as targets.
+  const isIgnored = createMindosSearchIgnoreMatcher(root, MINDOS_IGNORED_DIRS);
   const dirs: string[] = [];
   const walk = (abs: string) => {
     for (const entry of readdirSync(abs, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
       const child = join(abs, entry.name);
-      dirs.push(relative(root, child).split('\\').join('/'));
+      const rel = relative(root, child).split('\\').join('/');
+      if (isIgnored(rel)) continue;
+      dirs.push(rel);
       walk(child);
     }
   };
@@ -384,15 +421,43 @@ function saveFile(
   source: ContentChangeSource,
 ) {
   const content = requireString(params.content, 'content');
+  const expectedRevision = params.expectedRevision;
+  if (expectedRevision !== undefined && (typeof expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(expectedRevision))) {
+    throw new Error('Invalid expectedRevision: must be a SHA-256 content revision');
+  }
+  const expectedVaultId = params.expectedVaultId;
+  if (expectedVaultId !== undefined) {
+    if (typeof expectedVaultId !== 'string' || !/^[a-f0-9]{64}$/.test(expectedVaultId)) {
+      throw new Error('Invalid expectedVaultId: must be a knowledge root identity');
+    }
+    if (expectedVaultId !== knowledgeRootIdentity(mindRoot)) {
+      return { response: json({ error: 'vault_changed' }, { status: 409 }), changeEvent: null };
+    }
+  }
   const abs = resolveExistingSafe(mindRoot, filePath);
   const normalizedPath = relativeKnowledgePath(mindRoot, abs);
+  // Read strictly for conditional writes: an unreadable file is not an empty file.
+  let before: string | undefined;
+  if (expectedRevision !== undefined) {
+    try {
+      const bytes = readFileSync(abs);
+      before = bytes.toString('utf8');
+      if (!Buffer.from(before, 'utf8').equals(bytes)) throw new Error('Invalid UTF-8 document: refusing to replace undecodable content');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const serverRevision = before === undefined ? null : contentRevision(before);
+    if (serverRevision !== expectedRevision) {
+      return { response: json({ error: 'conflict', serverRevision }, { status: 409 }), changeEvent: null };
+    }
+  }
   if (typeof params.expectedMtime === 'number' && existsSync(abs) && statSync(abs).mtimeMs > params.expectedMtime) {
     return {
       response: json({ error: 'conflict', serverMtime: statSync(abs).mtimeMs } as unknown as { error: string }, { status: 409 }),
       changeEvent: null,
     };
   }
-  const before = safeRead(mindRoot, filePath);
+  before ??= safeRead(mindRoot, filePath);
   assertSafeAgentWriteContent({
     operation: 'save_file',
     path: normalizedPath,
@@ -404,7 +469,7 @@ function saveFile(
   });
   atomicWriteFile(abs, content);
   return {
-    response: json({ ok: true, path: normalizedPath, mtime: statSync(abs).mtimeMs }),
+    response: json({ ok: true, path: normalizedPath, mtime: statSync(abs).mtimeMs, revision: contentRevision(content) }),
     changeEvent: { op: 'save_file', path: normalizedPath, summary: 'Updated file content', before, after: content },
   };
 }
@@ -587,11 +652,13 @@ function updateSectionOperation(
 }
 
 function deleteFile(mindRoot: string, filePath: string) {
-  if (!filePath.includes('/') && basename(filePath) === 'TODO.md') {
-    return { response: json({ error: `"${filePath}" is a protected file and cannot be deleted` }, { status: 403 }), changeEvent: null };
-  }
   const abs = resolveExistingSafe(mindRoot, filePath);
   const normalizedPath = relativeKnowledgePath(mindRoot, abs);
+  // Compare the canonical path, not the raw input: `./TODO.md` resolves to the
+  // same root file and must be protected the same way.
+  if (normalizedPath === 'TODO.md') {
+    return { response: json({ error: `"${filePath}" is a protected file and cannot be deleted` }, { status: 403 }), changeEvent: null };
+  }
   assertNotBuiltinAssistantDestructivePath(normalizedPath, 'deleted');
   const before = safeRead(mindRoot, filePath);
   const trash = moveToTrash(mindRoot, normalizedPath);
@@ -711,6 +778,10 @@ function atomicWriteFile(absPath: string, content: string): void {
     try { unlinkSync(tmp); } catch { /* ignore cleanup errors */ }
     throw error;
   }
+}
+
+function contentRevision(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
 function readLines(mindRoot: string, filePath: string): string[] {

@@ -2,12 +2,15 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, st
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { resolveExistingSafe } from '../../foundation/security/index.js';
 import { json, type MindosServerResponse } from '../response.js';
+import type { MindosServerEventEmitter } from '../events/bus.js';
 import {
   buildSkillMatrix,
   disableNativeSkill,
   enableNativeSkill,
   linkSkillToAgent,
+  migrateInstalledSkillAgents,
   unlinkSkillFromAgent,
+  type MindosSkillInstallRecord,
   type MindosSkillLinkAgent,
   type MindosSkillLinkOutcome,
   type MindosSkillMatrix,
@@ -16,16 +19,12 @@ import {
   parseSkillMarkdownMetadata,
   type MindosSkillRuntimeRequirements,
 } from './skill-metadata.js';
+import { getSkillsIndex } from './skills-index.js';
+import type { SkillRoot, SkillRootOrigin, SkillRootSource } from '../../agent/config/types.js';
 
-export type MindosSkillSource = 'builtin' | 'user';
-export type MindosSkillOrigin = 'app-builtin' | 'mindos-user' | 'mindos-global' | 'agents-global' | 'custom' | 'project-builtin';
-
-export type MindosSkillRoot = {
-  path: string;
-  source: MindosSkillSource;
-  origin: MindosSkillOrigin;
-  editable: boolean;
-};
+export type MindosSkillSource = SkillRootSource;
+export type MindosSkillOrigin = SkillRootOrigin;
+export type MindosSkillRoot = SkillRoot;
 
 export type MindosSkillInfo = {
   name: string;
@@ -60,7 +59,6 @@ export type SkillsPostAction =
   | 'toggle'
   | 'read'
   | 'read-native'
-  | 'record-install'
   | 'link'
   | 'unlink'
   | 'disable-native'
@@ -74,7 +72,6 @@ export type SkillsPostPayload = {
   enabled?: boolean;
   sourcePath?: string;
   agentKey?: string;
-  installPath?: string;
 };
 
 export type SkillsPostHandlerServices = {
@@ -85,6 +82,8 @@ export type SkillsPostHandlerServices = {
   writeSettings(settings: MindosSkillsSettings): void;
   /** Downstream agents eligible for skill linking (present, skill-capable). Required for link/unlink. */
   listLinkAgents?(): MindosSkillLinkAgent[];
+  /** Receives `skills.changed` after a successful mutation so connected clients refresh. */
+  events?: MindosServerEventEmitter;
 };
 
 export type SkillsPayload = {
@@ -98,22 +97,45 @@ export function handleSkillsGet(services: SkillsHandlerServices): MindosServerRe
   });
 }
 
-/** Scan all skill roots and de-duplicate by name (first root wins). */
+/**
+ * Scan all skill roots and de-duplicate by name (first root wins). The walk
+ * itself is memoised per root list (`skills-index.ts`) and only repeats when
+ * a root, a skill directory or a `SKILL.md` changed on disk; the disabled
+ * set is applied on top so toggles take effect immediately.
+ */
 export function collectSkillInfos(skillRoots: MindosSkillRoot[], disabled: Set<string>): MindosSkillInfo[] {
+  const scanned = getSkillsIndex(skillRoots, (path) => readdirSync(path, { withFileTypes: true }), scanSkillRoots);
+  return scanned.map((skill) => ({ ...skill, enabled: !disabled.has(skill.name) }));
+}
+
+function scanSkillRoots(skillRoots: MindosSkillRoot[]): MindosSkillInfo[] {
   const byName = new Map<string, MindosSkillInfo>();
   for (const root of skillRoots) {
-    for (const skill of readSkillsFromRoot(root, disabled)) {
+    for (const skill of readSkillsFromRoot(root)) {
       if (!byName.has(skill.name)) byName.set(skill.name, skill);
     }
   }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+const READ_ONLY_SKILL_ACTIONS = new Set<string>(['read', 'read-native']);
+
 export function handleSkillsPost(
   body: unknown,
   services: SkillsPostHandlerServices,
 ): MindosServerResponse<{ ok: true } | { content: string; description?: string } | { error: string }> {
   const payload = normalizeSkillsPostPayload(body);
+  const response = dispatchSkillsPost(payload, services);
+  if (response.status < 300 && payload.action && !READ_ONLY_SKILL_ACTIONS.has(payload.action)) {
+    services.events?.emit({ type: 'skills.changed' });
+  }
+  return response;
+}
+
+function dispatchSkillsPost(
+  payload: ReturnType<typeof normalizeSkillsPostPayload>,
+  services: SkillsPostHandlerServices,
+): MindosServerResponse<{ ok: true } | { content: string; description?: string } | { error: string }> {
   const { action, name } = payload;
   const settings = services.readSettings();
 
@@ -175,9 +197,6 @@ export function handleSkillsPost(
       }
       return readNativeSkill(name, payload.sourcePath, services.skillRoots, services.trustedNativeSkillRoots);
 
-    case 'record-install':
-      return recordSkillInstall(payload, settings, services);
-
     case 'link':
     case 'unlink':
     case 'disable-native':
@@ -185,11 +204,42 @@ export function handleSkillsPost(
       if (!name || !payload.agentKey) {
         return json({ error: 'name and agentKey required' }, { status: 400 });
       }
+      migrateLegacyInstalledSkillAgents(settings, services);
       return setSkillLinked(action, name, payload.agentKey, services);
 
     default:
       return json({ error: `Unknown action: ${String(action)}` }, { status: 400 });
   }
+}
+
+/**
+ * One-time replay of the legacy `installedSkillAgents[]` copy ledger
+ * (spec-skill-management-fix §5): links on disk are the truth, so identical
+ * copies become links, user-modified copies stay (and are reported), and the
+ * field is dropped from settings. Runs on the first matrix write, never on a
+ * read, so opening a page never rewrites config or agent skill directories.
+ */
+function migrateLegacyInstalledSkillAgents(settings: MindosSkillsSettings, services: SkillsPostHandlerServices): void {
+  if (!('installedSkillAgents' in settings)) return;
+  const records = Array.isArray(settings.installedSkillAgents)
+    ? settings.installedSkillAgents.filter(isSkillInstallRecord)
+    : [];
+  if (records.length > 0) {
+    migrateInstalledSkillAgents({
+      records,
+      skillRoots: services.skillRoots,
+      agents: services.listLinkAgents?.() ?? [],
+      warn: (message) => console.warn(`[skills] legacy install migration: ${message}`),
+    });
+  }
+  const { installedSkillAgents: _legacy, ...rest } = settings;
+  services.writeSettings(rest);
+}
+
+function isSkillInstallRecord(value: unknown): value is MindosSkillInstallRecord {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.agent === 'string' && typeof record.skill === 'string' && typeof record.path === 'string';
 }
 
 /* ── Unified write interface for the (skill × agent) matrix (spec 4.3) ── */
@@ -255,11 +305,11 @@ function resolveUserSkillsDirForWrite(mindRoot: string):
   }
 }
 
-function readSkillsFromRoot(root: MindosSkillRoot, disabled: Set<string>): MindosSkillInfo[] {
+function readSkillsFromRoot(root: MindosSkillRoot): MindosSkillInfo[] {
   if (!existsSync(root.path)) return [];
   if (root.origin === 'mindos-user' && lstatSync(root.path).isSymbolicLink()) return [];
   const skills: MindosSkillInfo[] = [];
-  const directSkill = readDirectSkillFromRoot(root, disabled);
+  const directSkill = readDirectSkillFromRoot(root);
   if (directSkill) skills.push(directSkill);
 
   for (const entry of readdirSync(root.path, { withFileTypes: true })) {
@@ -274,7 +324,7 @@ function readSkillsFromRoot(root: MindosSkillRoot, disabled: Set<string>): Mindo
       description: parsed.description || name,
       path: skillFile,
       source: root.source,
-      enabled: !disabled.has(name),
+      enabled: true,
       editable: root.editable,
       origin: root.origin,
       runtimeRequirements: parsed.runtimeRequirements,
@@ -284,7 +334,7 @@ function readSkillsFromRoot(root: MindosSkillRoot, disabled: Set<string>): Mindo
   return skills;
 }
 
-function readDirectSkillFromRoot(root: MindosSkillRoot, disabled: Set<string>): MindosSkillInfo | null {
+function readDirectSkillFromRoot(root: MindosSkillRoot): MindosSkillInfo | null {
   const skillFile = join(root.path, 'SKILL.md');
   if (!existsSync(skillFile) || !statSync(skillFile).isFile()) return null;
   const content = readFileSync(skillFile, 'utf-8');
@@ -295,7 +345,7 @@ function readDirectSkillFromRoot(root: MindosSkillRoot, disabled: Set<string>): 
     description: parsed.description || name,
     path: skillFile,
     source: root.source,
-    enabled: !disabled.has(name),
+    enabled: true,
     editable: root.editable,
     origin: root.origin,
     runtimeRequirements: parsed.runtimeRequirements,
@@ -458,28 +508,4 @@ function readNativeSkill(
 function isRegisteredSkillRoot(sourcePath: string, skillRoots: MindosSkillRoot[], trustedNativeSkillRoots: string[]): boolean {
   if (skillRoots.some((root) => resolve(root.path) === sourcePath)) return true;
   return trustedNativeSkillRoots.some((root) => resolve(root) === sourcePath);
-}
-
-function recordSkillInstall(
-  payload: SkillsPostPayload,
-  settings: MindosSkillsSettings,
-  services: SkillsPostHandlerServices,
-): MindosServerResponse<{ ok: true } | { error: string }> {
-  const agentKey = payload.agentKey;
-  const skillName = payload.name;
-  const installPath = payload.installPath;
-  if (!agentKey || !skillName || !installPath) {
-    return json({ error: 'agentKey, name, and installPath are required' }, { status: 400 });
-  }
-
-  const installed = Array.isArray(settings.installedSkillAgents)
-    ? [...settings.installedSkillAgents]
-    : [];
-  const entry = { agent: agentKey, skill: skillName, path: installPath };
-  const index = installed.findIndex((item) => item.agent === agentKey && item.skill === skillName);
-  if (index >= 0) installed[index] = entry;
-  else installed.push(entry);
-
-  services.writeSettings({ ...settings, installedSkillAgents: installed });
-  return json({ ok: true });
 }

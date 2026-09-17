@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { resetRuntimeDetectionCacheForTest } from '../../../mindos/src/server';
 
 const mockDetectLocalAcpAgents = vi.fn();
 const mockResolveCommandPath = vi.fn();
@@ -13,6 +14,15 @@ const RAW_CODEX_OPTIONAL_DEPENDENCY_STACK = [
   'Node.js v22.16.0',
 ].join('\n');
 
+// The delegated route resolves core from source, like every other API test
+// here, so a stale `dist` cannot make this file fail on its own.
+vi.mock('@geminilight/mindos/server', async () => {
+  const actual = await import('../../../mindos/src/server');
+  return { ...actual };
+});
+
+// The Web host forwards these through its `agentRuntimes` services slot; the
+// mocks are the detection seam for the whole file.
 vi.mock('@/lib/acp/detect-local', () => ({
   detectLocalAcpAgents: mockDetectLocalAcpAgents,
   resolveCommandPath: mockResolveCommandPath,
@@ -26,6 +36,8 @@ vi.mock('@/lib/settings', () => ({
 
 describe('/api/agent-runtimes', () => {
   beforeEach(() => {
+    // Every test changes the detection mocks under the same settings fingerprint.
+    resetRuntimeDetectionCacheForTest();
     mockDetectLocalAcpAgents.mockReset();
     mockResolveCommandPath.mockReset();
     mockResolveCommandPathCandidates.mockReset();
@@ -216,7 +228,10 @@ describe('/api/agent-runtimes', () => {
           },
           supportsResume: false,
           supportsToolEvents: true,
-          supportsApprovals: false,
+          // Derived: the MindOS ACP client answers session/request_permission,
+          // so approvals are bridged even without a handshake; resume stays
+          // false because gemini declares no loadSession.
+          supportsApprovals: true,
         }),
         lifecycle: expect.objectContaining({
           stages: expect.objectContaining({
@@ -231,7 +246,10 @@ describe('/api/agent-runtimes', () => {
               level: 'limited',
               blockers: expect.arrayContaining(['adapter-tool-declaration']),
             }),
-            'permission-governance': expect.objectContaining({ level: 'unknown' }),
+            'permission-governance': expect.objectContaining({
+              level: 'limited',
+              blockers: expect.arrayContaining(['approval-owner-recovery', 'approval-timeout-recovery']),
+            }),
           }),
         }),
         adapterContract: expect.objectContaining({
@@ -659,5 +677,31 @@ describe('/api/agent-runtimes', () => {
     expect(body.notInstalled).toEqual([
       expect.objectContaining({ id: 'opencode', name: 'OpenCode' }),
     ]);
+  });
+
+  it('gives the runtime picker and the readiness route the same compacted descriptor from one probe', async () => {
+    mockResolveCommandPath.mockImplementation(async (command: string) => {
+      if (command === 'claude') return '/usr/local/bin/claude';
+      return null;
+    });
+    mockCheckNativeRuntimeHealth.mockResolvedValue({
+      status: 'available',
+      diagnosticHints: ['Claude Code CLI is available; Claude Agent SDK bridge is unavailable, so MindOS will use CLI fallback. SDK missing'],
+    });
+    mockDetectLocalAcpAgents.mockResolvedValue({ installed: [], notInstalled: [] });
+
+    const { GET: getRuntimes } = await import('../../app/api/agent-runtimes/route');
+    const { GET: getAdapterProjections } = await import('../../app/api/agent-runtimes/adapter-projections/route');
+    const picker = await (await getRuntimes(new Request('http://localhost/api/agent-runtimes?runtime=claude'))).json();
+    const listed = await (await getRuntimes(new Request('http://localhost/api/agent-runtimes'))).json();
+    const adapter = await (await getAdapterProjections(new Request('http://localhost/api/agent-runtimes/adapter-projections?runtime=claude'))).json();
+
+    const claude = listed.runtimes.find((runtime: { id: string }) => runtime.id === 'claude');
+    expect(picker.runtime.runtimeBridge).toEqual({ kind: 'claude-cli', label: 'CLI fallback active', fallback: true, reason: 'SDK missing' });
+    expect(claude.runtimeBridge).toEqual(picker.runtime.runtimeBridge);
+    expect(claude.adapter).toBe('claude-cli');
+    expect(adapter.projections[0]).toMatchObject({ runtimeId: 'claude', connection: { kind: 'cli' } });
+    // Three routes, one probe: the Web host shares the core detection cache across bundles.
+    expect(mockCheckNativeRuntimeHealth).toHaveBeenCalledTimes(1);
   });
 });

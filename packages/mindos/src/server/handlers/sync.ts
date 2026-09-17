@@ -5,6 +5,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { resolveExistingSafe } from '../../foundation/security/index.js';
 import { json, type MindosServerResponse } from '../response.js';
+import type { MindosServerEventEmitter } from '../events/bus.js';
 
 // Git hooks (pre-push etc.) export GIT_DIR — and may export GIT_WORK_TREE,
 // GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_PREFIX, GIT_QUARANTINE_PATH —
@@ -89,7 +90,12 @@ export type MindosSyncServices = {
     reconfigure?(mindRoot: string): void;
     restart?(mindRoot: string): void;
   };
+  /** Receives `sync.changed` after a successful mutating action. */
+  events?: MindosServerEventEmitter;
 };
+
+/** Sync POST actions that only read state and must not trigger `sync.changed`. */
+const READ_ONLY_SYNC_ACTIONS = new Set<string>(['gitignore-get', 'conflict-preview']);
 
 const DEFAULT_MINDOS_DIR = join(homedir(), '.mindos');
 const DEFAULT_CONFIG_PATH = join(DEFAULT_MINDOS_DIR, 'config.json');
@@ -263,8 +269,19 @@ export async function handleSyncPost(
   body: MindosSyncPostPayload | unknown,
   services: MindosSyncServices = {},
 ): Promise<MindosServerResponse<Record<string, unknown> | { error: string }>> {
+  const payload = body && typeof body === 'object' ? body as MindosSyncPostPayload : {};
+  const response = await dispatchSyncPost(payload, services);
+  if (response.status < 300 && payload.action && !READ_ONLY_SYNC_ACTIONS.has(payload.action)) {
+    services.events?.emit({ type: 'sync.changed' });
+  }
+  return response;
+}
+
+async function dispatchSyncPost(
+  payload: MindosSyncPostPayload,
+  services: MindosSyncServices,
+): Promise<MindosServerResponse<Record<string, unknown> | { error: string }>> {
   try {
-    const payload = body && typeof body === 'object' ? body as MindosSyncPostPayload : {};
     const config = readConfig(services);
     const configReadError = getConfigReadError(config);
 
@@ -1129,12 +1146,17 @@ function callGetUnpushedCount(services: MindosSyncServices, cwd: string): string
   return String((unpushedCommits || 0) + (dirtyFiles || 0));
 }
 
+// Matches bin/lib/sync.js gitExec: a stuck git (index.lock, network FS,
+// credential prompt) must fail instead of blocking every other request.
+const GIT_STATUS_TIMEOUT_MS = 15_000;
+
 function runGit(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'ignore'],
     env: sanitizeGitEnv(),
+    timeout: GIT_STATUS_TIMEOUT_MS,
   }).trim();
 }
 

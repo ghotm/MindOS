@@ -1,7 +1,15 @@
+import { closeAllMindosDatabases } from '../../foundation/storage/sqlite.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { setMindRootResolverForTests } from '../../foundation/mind-root/index.js';
+import {
+  completeAgentRun,
+  reloadAgentRunsFromDiskForTest,
+  resetAgentRunsForTest,
+  startAgentRun,
+} from '../../agent/ledger/run-ledger.js';
 import type { AgentArtifactLedgerRecord } from '../../agent/ledger/artifact-ledger.js';
 import type { AgentEvent, AgentRunRecord } from '../../agent/ledger/run-ledger-types.js';
 import type { AgentRunCapsuleProjection } from '../../agent/capsules/types.js';
@@ -149,6 +157,15 @@ const capsule: AgentRunCapsuleProjection = {
 };
 
 describe('Agent Run Observatory projection', () => {
+  it('links separately prepared method context alongside ordinary retrieval without cross-run leakage', () => {
+    const result = buildAgentRunObservatory({
+      runs: [{ ...rootRun, metadata: { ...rootRun.metadata, retrievalReceiptIds: ['explicit-method'] } }],
+      events: [], artifacts: [], receipts: [receipt, { ...receipt, id: 'explicit-method' }, { ...receipt, id: 'unrelated' }],
+      contextAssets: [], automations: [], approvals: [],
+    });
+    expect(result.traces[0].receipts.map(item => item.id)).toEqual(['receipt-1', 'explicit-method']);
+  });
+
   it('groups an agent tree and links only visible events, artifacts, receipts, context, and safe session metadata', () => {
     const result = buildAgentRunObservatory({
       runs: [childRun, rootRun],
@@ -263,6 +280,7 @@ describe('Agent Run Observatory projection', () => {
 
   it('degrades a corrupt automation attachment without failing the run endpoint', () => {
     const mindRoot = mkdtempSync(join(tmpdir(), 'mindos-observatory-degraded-'));
+    setMindRootResolverForTests(() => mindRoot);
     try {
       const statePath = join(mindRoot, STUDIO_AUTOMATION_STATE_FILE);
       mkdirSync(dirname(statePath), { recursive: true });
@@ -278,6 +296,106 @@ describe('Agent Run Observatory projection', () => {
         },
       });
     } finally {
+      setMindRootResolverForTests(null);
+      closeAllMindosDatabases();
+      rmSync(mindRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('handleAgentRunsGet view=timeline', () => {
+  it('serves runs, events and the shared timeline projection without observatory attachments', () => {
+    const mindRoot = mkdtempSync(join(tmpdir(), 'mindos-agent-runs-timeline-'));
+    setMindRootResolverForTests(() => mindRoot);
+    resetAgentRunsForTest();
+    try {
+      const child = startAgentRun({
+        id: 'run-timeline-child',
+        agentKind: 'pi-subagent',
+        runtimeId: 'reviewer',
+        displayName: 'Reviewer',
+        permissionMode: 'read',
+        inputSummary: 'review the patch',
+        chatSessionId: 'chat-timeline',
+      });
+      completeAgentRun(child.id, { outputSummary: 'looks good' });
+      startAgentRun({
+        id: 'run-timeline-main',
+        agentKind: 'mindos-main',
+        runtimeId: 'mindos',
+        displayName: 'MindOS Agent',
+        permissionMode: 'ask',
+        inputSummary: 'turn',
+        chatSessionId: 'chat-timeline',
+      });
+
+      // A mind root that does not exist for the attachment readers: the lean
+      // view must not read them at all, so no warnings can appear.
+      const response = handleAgentRunsGet(
+        new URLSearchParams('view=timeline&chatSessionId=chat-timeline&includeEvents=1&startedAfter=0'),
+        { mindRoot: join(mindRoot, 'does-not-exist'), now: () => new Date(5_000) },
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.observatory).toBeUndefined();
+      expect(response.body.runs.map((run) => run.id).sort()).toEqual(['run-timeline-child', 'run-timeline-main']);
+      expect(response.body.events.length).toBeGreaterThan(0);
+      expect(response.body.timeline).toMatchObject({
+        type: 'agent-run-timeline',
+        chatSessionId: 'chat-timeline',
+        startedAfter: 0,
+        updatedAt: 5_000,
+        // mindos-main is the turn itself: the shared projection hides it.
+        runs: [expect.objectContaining({ id: 'run-timeline-child', agentKind: 'pi-subagent' })],
+      });
+    } finally {
+      resetAgentRunsForTest();
+      setMindRootResolverForTests(null);
+      reloadAgentRunsFromDiskForTest();
+      closeAllMindosDatabases();
+      rmSync(mindRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('returns a null timeline without chatSessionId but still serves runs and events', () => {
+    const mindRoot = mkdtempSync(join(tmpdir(), 'mindos-agent-runs-timeline-nochat-'));
+    setMindRootResolverForTests(() => mindRoot);
+    resetAgentRunsForTest();
+    try {
+      const response = handleAgentRunsGet(
+        new URLSearchParams('view=timeline'),
+        { mindRoot, now: () => new Date(5_000) },
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.timeline).toBeNull();
+      expect(response.body.observatory).toBeUndefined();
+      expect(Array.isArray(response.body.runs)).toBe(true);
+      // view=timeline forces events even without includeEvents=1.
+      expect(Array.isArray(response.body.events)).toBe(true);
+    } finally {
+      resetAgentRunsForTest();
+      setMindRootResolverForTests(null);
+      reloadAgentRunsFromDiskForTest();
+      closeAllMindosDatabases();
+      rmSync(mindRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the default response shape untouched when no view parameter is given', () => {
+    const mindRoot = mkdtempSync(join(tmpdir(), 'mindos-agent-runs-default-view-'));
+    setMindRootResolverForTests(() => mindRoot);
+    resetAgentRunsForTest();
+    try {
+      const response = handleAgentRunsGet(new URLSearchParams(''), { mindRoot, now: () => new Date(5_000) });
+      expect(response.status).toBe(200);
+      expect(response.body.observatory).toBeDefined();
+      expect(response.body.observatory?.schemaVersion).toBe(1);
+      expect(response.body).not.toHaveProperty('timeline');
+      expect(response.body.events).toEqual([]);
+    } finally {
+      resetAgentRunsForTest();
+      setMindRootResolverForTests(null);
+      reloadAgentRunsFromDiskForTest();
+      closeAllMindosDatabases();
       rmSync(mindRoot, { recursive: true, force: true });
     }
   });

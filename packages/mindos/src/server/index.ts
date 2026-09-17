@@ -1,3 +1,6 @@
+export { readPluginPackageSnapshot, type PluginPackageSnapshot, type PluginPackageFile } from './plugin-package-snapshot.js';
+export { readPluginVaultSnapshot, type PluginVaultSnapshot, type PluginVaultFile } from './plugin-vault-snapshot.js';
+
 export {
   MINDOS_SERVER_ROUTES,
   getMindosServerContract,
@@ -103,6 +106,12 @@ export {
   checkClaudeRuntimeHealth,
   defaultCheckNativeRuntimeHealth,
   handleAgentRuntimesGet,
+  getAcpRuntimeDetection,
+  getNativeRuntimeDetection,
+  buildNativeRuntimeDescriptor,
+  type AcpRuntimeDetection,
+  type AgentRuntimeDetectionServices,
+  type NativeRuntimeDetection,
   mergeCodexProviderAndLoginHealth,
   type AgentRuntimeCapabilities,
   type AgentRuntimeBridge,
@@ -132,6 +141,17 @@ export {
   type NativeRuntimeHealthInput,
   type NativeRuntimeHealthResult,
 } from './handlers/agent-runtimes.js';
+
+export {
+  RUNTIME_DETECTION_CACHE_TTL_MS,
+  fingerprintRuntimeDetectionSettings,
+  getRuntimeDetection,
+  peekRuntimeDetection,
+  resetRuntimeDetectionCacheForTest,
+  type RuntimeDetectionEntry,
+  type RuntimeDetectionScope,
+  type RuntimeDetectionServices,
+} from './handlers/runtime-detection-cache.js';
 
 export {
   buildSkillRuntimeMatchesPayload,
@@ -222,6 +242,12 @@ export {
   handleRuntimeControlPlaneGet,
   handleRuntimeControlPlanePost,
   readRuntimeControlPlane,
+  subscribeRuntimeControlPlaneMutations,
+  RUNTIME_CONTROL_PLANE_LEASE,
+  RuntimeControlPlaneBusyError,
+  RuntimeControlPlaneCorruptError,
+  type RuntimeControlPlaneMutationEvent,
+  type RuntimeControlPlaneMutationListener,
   type RuntimeControlPlaneApprovalRequest,
   type RuntimeControlPlaneApprovalStatus,
   type RuntimeControlPlaneFailureAudit,
@@ -355,6 +381,9 @@ export {
   handleCodexThreadGet,
   handleCodexThreadUnarchivePost,
   handleCodexThreadsGet,
+  CODEX_APP_SERVER_CLIENT_IDLE_TTL_MS,
+  closePooledCodexAppServerClients,
+  resetCodexAppServerClientPoolForTest,
   type CodexModelListPayload,
   type CodexThreadForkPayload,
   type CodexThreadListPayload,
@@ -400,16 +429,109 @@ export {
   type MindosHttpServices,
 } from './http.js';
 
+export type {
+  MindosA2aHostServices,
+  MindosAcpHostServices,
+  MindosAgentRuntimeHostServices,
+  MindosChannelServices,
+  MindosKnowledgeWriteChange,
+  MindosKnowledgeWriteHostServices,
+  MindosMcpAgentHostServices,
+  MindosSkillHostServices,
+} from './services.js';
+
+export {
+  createMindosApp,
+  handleMindosRequest,
+  type HandleMindosRequestOptions,
+  type MindosApp,
+  type MindosAppAuthMode,
+  type MindosAppOptions,
+} from './app.js';
+
+export {
+  defineRoutes,
+  toHonoPath,
+  type MindosRouteAuth,
+  type MindosRouteAuthGuard,
+  type MindosRouteContext,
+  type MindosRouteDefinition,
+  type MindosRouteHandler,
+  type MindosRouteMethod,
+} from './route-table.js';
+
+export { MINDOS_ROUTE_AUTH_GUARDS, MINDOS_ROUTE_TABLE } from './routes/index.js';
+
+export { toWebResponse, etagMatches, isByteStreamBody, isSseBody, isSseFrameBody, sseFrames } from './web-response.js';
+export { HttpBodyError, readJsonBody, KNOWLEDGE_WRITE_MAX_BODY_BYTES, MINDOS_DEFAULT_JSON_BODY_LIMIT } from './body.js';
+export {
+  allowsSameOriginExemption,
+  forwardedClientAddresses,
+  forwardedClientIsRemote,
+  isAuthorizedRequest,
+  isLoopbackAddress,
+  isLoopbackHost,
+  readAuthToken,
+  readWebPassword,
+  type SameOriginExemptionInput,
+} from './auth.js';
+
+export {
+  MINDOS_SERVER_EVENT_TYPES,
+  createMindosServerEventBus,
+  getMindosServerEventBus,
+  resetMindosServerEventBusForTest,
+  type MindosAgentRunEventSummary,
+  type MindosServerEvent,
+  type MindosServerEventBus,
+  type MindosServerEventBusOptions,
+  type MindosServerEventEmitter,
+  type MindosServerEventEnvelope,
+  type MindosServerEventListener,
+  type MindosServerEventReplay,
+  type MindosServerEventType,
+} from './events/bus.js';
+
+export {
+  installAgentRunLedgerBridge,
+  isAgentRunLedgerBridgeInstalled,
+  summarizeAgentRunEvent,
+} from './events/ledger-bridge.js';
+export {
+  LEDGER_TAIL_INTERVAL_MS,
+  getLedgerTailBridgeStatsForTest,
+  installLedgerTailBridge,
+  isLedgerTailBridgeActive,
+  isLedgerTailBridgeInstalled,
+} from './events/ledger-tail-bridge.js';
+export { installRuntimeControlPlaneBridge, isRuntimeControlPlaneBridgeInstalled } from './events/control-plane-bridge.js';
+
+export {
+  MINDOS_SERVER_EVENTS_HEARTBEAT_MS,
+  encodeMindosServerEventFrame,
+  handleEventsStream,
+  parseLastEventId,
+  parseServerEventTypesFilter,
+  type EventsHandlerServices,
+  type EventsStreamOptions,
+  type MindosServerEventFrame,
+  type MindosServerEventStreamResponse,
+  type MindosServerReadyEvent,
+  type MindosServerStreamEvent,
+} from './handlers/events.js';
+
 export {
   MINDOS_ALLOWED_FILE_EXTENSIONS,
   MINDOS_IGNORED_DIRS,
   collectAllFilesFromMindRoot,
+  collectFileStatsFromMindRoot,
   getDefaultMindRoot,
   getRecentlyModifiedFromMindRoot,
   getSkillRootsFromRuntime,
   getTreeVersionFromMindRoot,
   listDirectoriesFromMindRoot,
   listMindSpacesFromMindRoot,
+  prewarmRuntimeSearch,
   readLinesFromMindRoot,
   readMindosIgnoreFile,
   readRuntimeSettings,
@@ -417,11 +539,58 @@ export {
   searchMindRoot,
   writeMindosIgnoreFile,
   type MindosRuntimeFileNode,
+  type MindosRuntimeFileStat,
   type MindosRuntimeOptions,
+  type MindosRuntimeSearchHints,
+  type MindosRuntimeSearchOptions,
   type MindosRuntimeSearchResult,
   type MindosRuntimeSettings,
   type MindosRuntimeSkillRoot,
 } from './runtime.js';
+
+export {
+  MINDOS_IGNORE_FILE,
+  createCachedMindosSearchIgnoreMatcher,
+  createMindosIgnoreRuleMatcher,
+  createMindosSearchIgnoreMatcher,
+  normalizeSearchIgnoredPaths,
+  parseMindosIgnoreContent,
+  type MindosSearchIgnoreMatcher,
+} from './search-ignore.js';
+
+export {
+  createMindRootTreeCache,
+  getMindRootTreeCache,
+  resetMindRootTreeCachesForTests,
+  type MindRootTreeCache,
+  type MindRootTreeCacheOptions,
+  type TreeCacheFlushResult,
+  type TreeCachePathChange,
+} from './tree-cache.js';
+
+export {
+  MindosSearchIndex,
+  getMindosSearchIndex,
+  resetMindosSearchIndexesForTests,
+  type MindosSearchFileStat,
+  type MindosSearchHit,
+  type MindosSearchIndexOptions,
+  type MindosSearchQueryOptions,
+  type MindosSearchRefreshHints,
+  type MindosSearchRefreshOptions,
+  type MindosSearchRefreshResult,
+  type MindosSearchTextExtractor,
+  type MindosSearchUpdateResult,
+} from './search/index.js';
+
+export {
+  CJK_CHAR_REGEX,
+  hasCjkWordSegmenter,
+  splitSearchQueryTerms,
+  tokenizeSearchText,
+} from './search/tokenizer.js';
+
+export { bm25Score } from './search/scoring.js';
 
 export {
   createMindosHealth,
@@ -504,6 +673,18 @@ export {
   type ChangesListPayload,
   type ChangesMarkSeenPayload,
 } from './handlers/changes.js';
+
+export {
+  CHANGE_LOG_DB_RELATIVE_PATH,
+  appendContentChangeToLog,
+  getContentChangeFacetsFromLog,
+  getContentChangeSummaryFromLog,
+  listContentChangesFromLog,
+  markContentChangesSeenInLog,
+  type ContentChangeFacetItem,
+  type ContentChangeFacets,
+  type ContentChangeListOptions,
+} from './handlers/change-log-store.js';
 
 export {
   handleAcpConfigDelete,
@@ -721,7 +902,9 @@ export {
 export {
   MAX_RAW_FILE_SIZE,
   RAW_FILE_MIME_TYPES,
+  RAW_FILE_STREAM_THRESHOLD,
   handleRawFile,
+  type RawFileBody,
   type RawFileHandlerOptions,
   type RawFileHandlerServices,
 } from './handlers/file-raw.js';
@@ -945,9 +1128,13 @@ export {
 } from './handlers/agents.js';
 
 export {
+  AgentConfigProjectRootError,
+  agentConfigPathNeedsProjectRoot,
   handleMcpInstallPost,
   handleMcpServerCopyPost,
   handleMcpUninstallPost,
+  resolveAgentConfigPath,
+  type AgentConfigPathServices,
   type MindosMcpAgentDef,
   type MindosMcpInstallItem,
   type MindosMcpInstallRequest,
@@ -963,11 +1150,23 @@ export {
 } from './handlers/mcp-install.js';
 
 export {
+  detectConfigFormat,
+  getNestedPath,
+  listMcpServerNamesFromText,
+  readMcpServerEntryFromText,
+  readOwnRecord,
+  stripBom,
+  type McpConfigFormat,
+  type McpServerEntryLocation,
+} from '../agent/config/formats.js';
+
+export {
+  detectAgentConfiguredMcpServersFromConfigs,
+  detectAgentInstalledFromConfigs,
   detectCustomAgentConfiguredMcp,
   handleMcpAgentsGet,
-  parseJsonForServers,
-  parseTomlForServers,
   resolveSkillLinkAgents,
+  type MindosAgentConfigDetectionServices,
   type MindosCustomMcpAgentDef,
   type MindosMcpAgentConfiguredServers,
   type MindosMcpAgentInstallStatus,
@@ -987,7 +1186,107 @@ export {
   createDefaultSkillAgentRegistry,
   DEFAULT_MCP_AGENTS,
   DEFAULT_SKILL_AGENT_REGISTRY,
-} from './mcp-agent-registry.js';
+} from '../agent/config/registry.js';
+
+// agent/config: the single adapter layer behind the MCP handlers, the Web host
+// and the generated CLI bundle (spec-agent-config-adapter.md). Names already
+// exported above through their handler shells (linkSkillToAgent,
+// detectConfigFormat, resolveAgentConfigPath, ...) are intentionally not
+// repeated here.
+export {
+  AGENT_PRESENCE_TTL_MS,
+  AgentConfigScopeError,
+  agentConfigReadCacheSize,
+  assertSafeMcpServerName,
+  assertSafeObjectKey,
+  assertSafeObjectKeyPath,
+  buildMindosMcpServerEntry,
+  buildTomlEntry,
+  buildYamlEntry,
+  classifyMcpServerEntryTransport,
+  configFileLooksMindosManagedOnly,
+  configPathCandidates,
+  createAgentConfigAdapter,
+  createAgentConfigAdapters,
+  customAgentSkillDir,
+  customAgentToConfigDef,
+  DEFAULT_MINDOS_MCP_PORT,
+  defaultCommandExists,
+  defaultMindosMcpUrl,
+  detectAgentPresence,
+  entryLocation,
+  expandHome,
+  installAgentConnection,
+  listDownstreamAgentDefs,
+  listInstalledSkillNames,
+  listServerNamesFromFile,
+  listTomlServerNames,
+  listYamlServerNames,
+  mergeAgentConfigDefs,
+  mergeTomlEntry,
+  mergeYamlEntry,
+  parseTomlMcpServerEntry,
+  parseYamlMcpServerEntry,
+  presencePathHasAgentSignal,
+  primaryConfigPath,
+  readAgentConfigFile,
+  readJsonConfigDocument,
+  removeInstalledSkill,
+  removeMcpServerEntryFromFile,
+  removeTomlEntry,
+  removeYamlEntry,
+  resetAgentConfigReadCacheForTests,
+  resetAgentPresenceCacheForTests,
+  resolveAgentConfigProbes,
+  resolveAgentHiddenRoot,
+  resolveSkillWorkspaceProfile,
+  UNIVERSAL_SKILLS_DIR,
+  writeFileAtomically,
+  writeMcpServerEntryToFile,
+  type AgentConfigAdapter,
+  type AgentConfigAdapterRegistry,
+  type AgentConfigDef,
+  type AgentConfigEntryStyle,
+  type AgentConfigFormat,
+  type AgentConfigLocationDef,
+  type AgentConfigProbes,
+  type AgentConfigReadableFile,
+  type AgentConfigScope,
+  type AgentConfigTransport,
+  type AgentDirent,
+  type AgentFileStat,
+  type AgentServerList,
+  type AgentServerRead,
+  type AgentServerReadOptions,
+  type AgentServerRemoveResult,
+  type AgentServerWriteOptions,
+  type AgentServerWriteResult,
+  type CreateAgentConfigAdapterOptions,
+  type CreateAgentConfigAdaptersInput,
+  type CustomAgentConfigDef,
+  type InstallAgentConnectionInput,
+  type InstallAgentConnectionResult,
+  type InstallAgentConnectionSettingsStep,
+  type InstallAgentConnectionSkillResult,
+  type InstallAgentConnectionSkillStep,
+  type ListInstalledSkillNamesOptions,
+  type MindosMcpServerEntryOptions,
+  type ResolvedAgentConfigProbes,
+  type SkillAgentRegistration,
+  type SkillInstallMode,
+  type SkillRoot,
+  type SkillRootOrigin,
+  type SkillRootSource,
+  type SkillWorkspaceProfile,
+} from '../agent/config/index.js';
+
+export {
+  computeSkillsIndexSignature,
+  getSkillsIndex,
+  resetSkillsIndexForTests,
+  skillsIndexStats,
+  type SkillsIndexReadDir,
+} from './handlers/skills-index.js';
 
 export {
   handleMcpDirectToolsPost,
@@ -1001,15 +1300,10 @@ export {
 } from './handlers/mcp-tools.js';
 
 export {
-  buildMcpInstallSkillCommand,
-  filterAdditionalSkillAgents,
   handleMcpInstallSkillPost,
-  resolveNpxInvocation,
   type MindosMcpInstallSkillRequest,
   type MindosMcpInstallSkillResult,
   type MindosMcpInstallSkillServices,
-  type MindosNpxInvocation,
-  type MindosNpxInvocationOptions,
 } from './handlers/mcp-install-skill.js';
 
 export {
@@ -1025,3 +1319,5 @@ export {
   type MindosMcpRestartServices,
   type MindosMcpRestartSettings,
 } from './handlers/mcp-restart.js';
+
+export { readPluginData, writePluginData, type PluginDataBinding, type PluginDataSnapshot } from './plugin-data-store.js';

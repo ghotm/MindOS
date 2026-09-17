@@ -1,7 +1,6 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { effectiveMindRoot } from '../../foundation/mind-root/index.js';
-import { resolveExistingSafe } from '../../foundation/security/index.js';
+import { effectiveMindRoot, mindRootResolverGeneration } from '../../foundation/mind-root/index.js';
+import { closeMindosDatabase, type MindosDatabase } from '../../foundation/storage/sqlite.js';
+import { installKnowledgeAgentRunLister } from '../../knowledge/agent-run-data.js';
 import { getCurrentAgentRunContext } from '../agent-run-context.js';
 import {
   AGENT_RUN_LEDGER_SHARD_KEY,
@@ -10,42 +9,83 @@ import {
   deleteProcessGlobal,
   getProcessGlobal,
 } from '../global-state.js';
-import { readLegacyMindosPermissionMode } from '../permission/index.js';
-import { redactSensitiveObject, redactSensitiveText } from '../redaction.js';
-import { emitStudioAutomationEvent, recordStudioAutomationEventSourceFailure } from '../../server/automations/events.js';
+import { emitStudioAutomationEvent, recordStudioAutomationEventSourceFailure } from '../automations/events.js';
+import {
+  EVENT_TRIM_SLACK,
+  MAX_EVENTS,
+  MAX_RUNS,
+  clearLedger,
+  insertEventRow,
+  listEventRows,
+  listRunRows,
+  openLedgerDatabase,
+  parseRunRow,
+  pruneRunEvents,
+  pruneRuns,
+  readRunRow,
+  rowOwner,
+  upsertRun,
+  type RunRow,
+} from './run-ledger-db.js';
+import {
+  LEGACY_LEDGER_FILE_PATTERN,
+  hasLegacyLedgerFiles,
+  isDeadOwner,
+  ledgerDirPath,
+  readLegacyLedgerFiles,
+  renameLegacyFileToMigrated,
+  type RunOwner,
+} from './run-ledger-legacy-import.js';
+import {
+  createEventId,
+  createRunId,
+  errorMessage,
+  isTerminalStatus,
+  markOrphanedRun,
+  normalizeArchiveRef,
+  normalizeEventCategory,
+  normalizeEventPatch,
+  normalizePermissionMode,
+  nowMs,
+  redactMetadata,
+  truncateSummary,
+} from './run-ledger-normalize.js';
+import fs from 'node:fs';
+import path from 'node:path';
 
 /**
  * Cross-runtime agent run ledger — an INDEX CARD store, not a transcript
- * store (spec-agent-core-consolidation B.1/C).
+ * store (spec-agent-core-consolidation B.1/C), persisted in `node:sqlite`
+ * (spec-sqlite-derived-stores).
  *
  * Each runtime keeps its own full archive (Claude Code: ~/.claude, Codex:
  * ~/.codex, embedded Pi: SessionManager archive when session-bound). The ledger
- * persists only run records — id / kind / status / parent-child links /
- * timestamps / capped summaries / an `archive` pointer into the runtime's
- * own archive. Fine-grained timeline events still flow through the in-memory
- * store and realtime subscribers for live UI, but are NOT written to disk;
- * after a restart the UI can list runs and their terminal state (the ledger's
- * minimal crash-survival contract), not replay old timelines.
+ * persists run records — id / kind / status / parent-child links / timestamps /
+ * capped summaries / an `archive` pointer into the runtime's own archive — plus
+ * a bounded window of timeline and debug events per run, so the UI can list
+ * runs, replay recent events and reattach after a restart.
  *
- * Persistence model — one shard per process, no shared writers:
- *   <mindRoot>/.mindos/agent-run-ledger.<pid>-<startTs>.jsonl
- * Reads scan the directory and merge every shard plus the two legacy files
- * (agent-run-ledger.json v1, agent-run-ledger.jsonl v2), which are read-only
- * and never written again. Compaction rewrites ONLY this process's shard —
- * single writer per file, so no cross-process locking exists or is needed.
- * Nothing in this module may rewrite a file another process wrote.
+ * Persistence model — one WAL-mode database per mind root:
+ *   <mindRoot>/.mindos/db/agent_runs_1.sqlite
+ * Every write is a single statement (or one short transaction), so several
+ * MindOS processes share the file safely without per-process shards, and a
+ * run created by one process is visible to the others on their next read.
+ * Realtime subscribers stay in-process; the SSE bridge subscribes in the
+ * process that produces the events.
+ *
+ * Write cost (spec-ledger-write-cost): event rows carry the event payload
+ * only (the run record is joined back on read), the record of an open run
+ * this process owns is cached instead of re-read per event, and token deltas
+ * are delivered to subscribers at once but persisted as one merged row per
+ * ~250 ms / 2 KB window.
  */
 
 export * from './run-ledger-types.js';
 import type {
   AgentEvent,
-  AgentEventCategory,
-  AgentEventData,
   AgentEventType,
-  AgentRunArchiveRef,
   AgentRunPermissionMode,
   AgentRunRecord,
-  AgentRunStatus,
   AppendAgentEventInput,
   CancelAgentRunInput,
   CompleteAgentRunInput,
@@ -56,54 +96,45 @@ import type {
   UpdateAgentRunInput,
 } from './run-ledger-types.js';
 
-type AgentRunLedgerStore = {
-  records: AgentRunRecord[];
-  /** Live timeline, in-memory only — see module header. */
-  events: AgentEvent[];
-  mindRoot?: string;
-  /** Run ids this process has persisted; compaction writes exactly these. */
-  ownRecordIds: Set<string>;
-};
-
 export type AgentRunEventSubscriber = (event: AgentEvent) => void;
 
-const MAX_RUNS = 500;
-const MAX_EVENTS = 1000;
-const MAX_SUMMARY_CHARS = 4000;
-const MAX_SHARD_LOG_BYTES = 1024 * 1024;
-const LEDGER_DIR_NAME = '.mindos';
-const LEDGER_LEGACY_JSON_NAME = 'agent-run-ledger.json';
-const LEDGER_LEGACY_JSONL_NAME = 'agent-run-ledger.jsonl';
-const SHARD_FILE_PATTERN = /^agent-run-ledger\.(\d+)-(\d+)\.jsonl$/;
+/**
+ * `effectiveMindRoot()` stats ~/.mindos/config.json on every call and the
+ * ledger resolves it for every appended event. Memoize the answer briefly;
+ * resolver changes (test seam) and MIND_ROOT env changes invalidate at once.
+ */
+const LEDGER_ROOT_CACHE_MS = 2000;
 
-interface LegacyPersistedAgentRunLedger {
-  version: 1;
-  records: AgentRunRecord[];
-  events: AgentEvent[];
-}
-
-/** v2 ops only ever appear in the legacy global JSONL (read-only). */
-type LegacyPersistedOperation =
-  | { version: 2; type: 'compact'; records: AgentRunRecord[]; events: AgentEvent[] }
-  | { version: 2; type: 'record_upsert'; record: AgentRunRecord }
-  | { version: 2; type: 'event_append'; event: AgentEvent }
-  | { version: 2; type: 'reset' };
-
-type ShardOperation =
-  | { version: 3; type: 'record_upsert'; ts: number; record: AgentRunRecord }
-  | { version: 3; type: 'compact'; ts: number; records: AgentRunRecord[] };
-
-/** A record merged from disk, tagged with where and when it was written. */
-type MergedRecordEntry = {
-  record: AgentRunRecord;
-  ts: number;
-  /** null = legacy global file (no owning process is alive for it). */
-  shard: { pid: number; startTs: number } | null;
+type DeltaBuffer = {
+  /** `text:<channel>` or `tool:<toolCallId>`: one row never mixes channels or tool calls. */
+  key: string;
+  /** Private copy of the first delta; later deltas are merged into it. Subscribers got the originals. */
+  event: AgentEvent;
+  chars: number;
+  count: number;
+  timer: ReturnType<typeof setTimeout> | null;
 };
 
-type ShardIdentity = { pid: number; startTs: number };
+type LedgerProcessState = {
+  mindRoot: string | undefined;
+  db: MindosDatabase | null;
+  /** Legacy files were imported for the current handle. */
+  imported: boolean;
+  /** Appends since the last per-run prune, keyed by `${runId}\n${visibility}`. */
+  pendingPrunes: Map<string, number>;
+  /**
+   * Non-terminal runs this process owns, keyed by id: the record every
+   * appended event snapshots, so streaming a token does not re-read the run
+   * row. Terminal writes evict; a reopened handle starts empty.
+   */
+  openRuns: Map<string, AgentRunRecord>;
+  /** Token deltas waiting to be persisted as one merged row, keyed by run id. */
+  pendingDeltas: Map<string, DeltaBuffer>;
+};
 
-function shardIdentity(): ShardIdentity {
+type OwnerIdentity = { pid: number; startTs: number };
+
+function ownerIdentity(): OwnerIdentity {
   return getProcessGlobal(AGENT_RUN_LEDGER_SHARD_KEY, () => ({
     pid: process.pid,
     // performance.timeOrigin is identical for every module copy in the
@@ -112,514 +143,151 @@ function shardIdentity(): ShardIdentity {
   }));
 }
 
-function emptyStore(mindRoot?: string): AgentRunLedgerStore {
-  return { records: [], events: [], ownRecordIds: new Set(), ...(mindRoot ? { mindRoot } : {}) };
+function freshState(mindRoot: string | undefined): LedgerProcessState {
+  return { mindRoot, db: null, imported: false, pendingPrunes: new Map(), openRuns: new Map(), pendingDeltas: new Map() };
+}
+
+type LedgerRootCache = {
+  root: string | undefined;
+  resolvedAt: number;
+  generation: number;
+  envRoot: string | undefined;
+};
+
+let ledgerRootCache: LedgerRootCache | null = null;
+
+function invalidateLedgerRootCache(): void {
+  ledgerRootCache = null;
 }
 
 function resolveLedgerRoot(): string | undefined {
+  const now = Date.now();
+  const generation = mindRootResolverGeneration();
+  const envRoot = process.env.MIND_ROOT;
+  const cached = ledgerRootCache;
+  if (
+    cached
+    && cached.generation === generation
+    && cached.envRoot === envRoot
+    && now >= cached.resolvedAt
+    && now - cached.resolvedAt < LEDGER_ROOT_CACHE_MS
+  ) {
+    return cached.root;
+  }
+
+  let root: string | undefined;
   try {
-    const root = effectiveMindRoot();
-    return typeof root === 'string' && root.trim() ? root : undefined;
+    const resolved = effectiveMindRoot();
+    root = typeof resolved === 'string' && resolved.trim() ? resolved : undefined;
   } catch {
-    return undefined;
+    root = undefined;
   }
+  ledgerRootCache = { root, resolvedAt: now, generation, envRoot };
+  return root;
 }
 
-function ledgerDirPath(mindRoot: string): string {
-  return resolveExistingSafe(mindRoot, LEDGER_DIR_NAME);
-}
-
-function ownShardPath(mindRoot: string): string {
-  const { pid, startTs } = shardIdentity();
-  return resolveExistingSafe(
-    mindRoot,
-    path.posix.join(LEDGER_DIR_NAME, `agent-run-ledger.${pid}-${startTs}.jsonl`),
-  );
-}
-
-function legacyJsonPath(mindRoot: string): string {
-  return resolveExistingSafe(mindRoot, path.posix.join(LEDGER_DIR_NAME, LEDGER_LEGACY_JSON_NAME));
-}
-
-function legacyJsonlPath(mindRoot: string): string {
-  return resolveExistingSafe(mindRoot, path.posix.join(LEDGER_DIR_NAME, LEDGER_LEGACY_JSONL_NAME));
-}
-
-function normalizeRecord(value: unknown): AgentRunRecord | null {
-  if (!value || typeof value !== 'object') return null;
-  const record = value as Partial<AgentRunRecord>;
-  if (typeof record.id !== 'string' || typeof record.runtimeId !== 'string' || typeof record.displayName !== 'string') return null;
-  if (typeof record.startedAt !== 'number' || typeof record.inputSummary !== 'string') return null;
-  if (!record.agentKind || !record.status || !record.permissionMode) return null;
-  return record as AgentRunRecord;
-}
-
-function normalizeEvent(value: unknown): AgentEvent | null {
-  if (!value || typeof value !== 'object') return null;
-  const event = value as Partial<AgentEvent>;
-  if (typeof event.id !== 'string' || typeof event.runId !== 'string' || typeof event.type !== 'string') return null;
-  if (typeof event.ts !== 'number' || !event.status || !event.record) return null;
-  const type = event.type as AgentEventType;
-  const category = normalizeEventCategory(event.category, type);
-  return {
-    ...(event as AgentEvent),
-    type,
-    category,
-    ...(event.message !== undefined ? { message: truncateSummary(event.message) } : {}),
-    data: normalizeAgentEventData(event.data, category, event as AgentEvent),
-    ...(event.metadata ? { metadata: redactMetadata(event.metadata) } : {}),
-  };
-}
-
-function normalizeEventCategory(value: unknown, type: AgentEventType): AgentEventCategory {
-  if (value === 'status' || value === 'text' || value === 'tool' || value === 'file' || value === 'permission' || value === 'question' || value === 'plan' || value === 'goal' || value === 'error') {
-    return value;
+function getState(): LedgerProcessState {
+  const mindRoot = resolveLedgerRoot();
+  let state = getProcessGlobal<LedgerProcessState>(AGENT_RUN_LEDGER_STORE_KEY, () => freshState(mindRoot));
+  if (state.mindRoot !== mindRoot) {
+    deleteProcessGlobal(AGENT_RUN_LEDGER_STORE_KEY);
+    state = getProcessGlobal<LedgerProcessState>(AGENT_RUN_LEDGER_STORE_KEY, () => freshState(mindRoot));
   }
-  if (type === 'text') return 'text';
-  if (type === 'tool_started' || type === 'tool_updated' || type === 'tool_completed') return 'tool';
-  if (type === 'file_changed') return 'file';
-  if (type === 'permission_requested' || type === 'permission_resolved') return 'permission';
-  if (type === 'user_question_started' || type === 'user_question_resolved') return 'question';
-  if (type === 'plan_artifact') return 'plan';
-  if (type === 'goal_evaluation') return 'goal';
-  if (type === 'run_failed' || type === 'error') return 'error';
-  if (type === 'tool') return 'tool';
-  if (type === 'file') return 'file';
-  if (type === 'permission') return 'permission';
-  if (type === 'status' || type === 'runtime_status') return 'status';
-  return 'status';
-}
-
-function truncateEventDataValue(value: unknown, depth = 0): unknown {
-  if (typeof value === 'string') return truncateSummary(value);
-  if (typeof value !== 'object' || value === null) return value;
-  if (depth > 4) return '[truncated]';
-  if (Array.isArray(value)) {
-    return value.slice(0, 50).map((item) => truncateEventDataValue(item, depth + 1));
-  }
-  const next: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value)) {
-    next[key] = truncateEventDataValue(item, depth + 1);
-  }
-  return next;
-}
-
-function redactEventData(data: AgentEventData | undefined): AgentEventData | undefined {
-  if (!data) return undefined;
-  return truncateEventDataValue(redactSensitiveObject(data)) as AgentEventData;
-}
-
-function statusLabel(status: AgentRunStatus): string {
-  return status === 'timed_out' ? 'timed out' : status.replace(/_/g, ' ');
-}
-
-function defaultEventData(
-  record: AgentRunRecord,
-  type: AgentEventType,
-  category: AgentEventCategory,
-  message?: unknown,
-  input?: Partial<AppendAgentEventInput>,
-): AgentEventData {
-  const summary = message === undefined ? undefined : truncateSummary(message);
-  if (category === 'error') {
-    return {
-      kind: 'error',
-      message: summary || record.error || statusLabel(record.status),
-    };
-  }
-  if (category === 'text') {
-    return {
-      kind: 'text',
-      text: summary || '',
-      channel: 'assistant',
-    };
-  }
-  if (category === 'tool') {
-    const status = type === 'tool_started'
-      ? 'started'
-      : type === 'tool_completed'
-        ? 'completed'
-        : undefined;
-    return {
-      kind: 'tool',
-      name: input?.toolName ? truncateSummary(input.toolName) : 'tool',
-      ...(status ? { status } : {}),
-      ...(summary ? { outputSummary: summary } : {}),
-    };
-  }
-  if (category === 'file') {
-    return {
-      kind: 'file',
-      path: input?.filePath ? truncateSummary(input.filePath) : 'unknown',
-      action: 'unknown',
-      ...(summary ? { summary } : {}),
-    };
-  }
-  if (category === 'permission') {
-    return {
-      kind: 'permission',
-      action: input?.toolName ? truncateSummary(input.toolName) : 'approval',
-      status: type === 'permission_resolved' || type === 'user_question_resolved' ? 'approved' : 'requested',
-      ...(input?.filePath ? { resource: truncateSummary(input.filePath) } : {}),
-      ...(summary ? { prompt: summary } : {}),
-    };
-  }
-  if (category === 'question') {
-    return {
-      kind: 'question',
-      status: type === 'user_question_resolved' ? 'answered' : 'requested',
-      ...(summary ? { prompt: summary } : {}),
-    };
-  }
-  if (category === 'plan') {
-    return {
-      kind: 'plan',
-      schemaVersion: 1,
-      mode: 'plan',
-      summary: summary || 'Plan artifact recorded.',
-      steps: [],
-      risks: [],
-      source: 'fallback',
-      generatedAt: nowMs(),
-    };
-  }
-  if (category === 'goal') {
-    return {
-      kind: 'goal',
-      schemaVersion: 1,
-      mode: 'goal',
-      objective: 'Complete the requested goal.',
-      status: type === 'run_failed' ? 'blocked' : 'completed',
-      confidence: 'low',
-      summary: summary || 'Goal evaluation recorded.',
-      evidence: [],
-      evaluatedAt: nowMs(),
-    };
-  }
-  return {
-    kind: 'status',
-    nextStatus: input?.status ?? record.status,
-    ...(summary ? { summary } : {}),
-  };
-}
-
-function normalizeAgentEventData(
-  data: AgentEventData | undefined,
-  category: AgentEventCategory,
-  event: Pick<AgentEvent, 'record' | 'type' | 'message' | 'status'> & Partial<Pick<AgentEvent, 'toolName' | 'filePath'>>,
-): AgentEventData {
-  if (data) return redactEventData(data) ?? defaultEventData(event.record, event.type, category, event.message);
-  return defaultEventData(event.record, event.type, category, event.message, {
-    type: event.type,
-    category,
-    status: event.status,
-    message: event.message,
-    toolName: event.toolName,
-    filePath: event.filePath,
-  });
-}
-
-type NormalizedEventPatch =
-  Omit<AgentEvent, 'id' | 'runId' | 'ts' | 'record' | 'status'> &
-  Partial<Pick<AgentEvent, 'status'>>;
-
-function normalizeEventPatch(record: AgentRunRecord, input: AppendAgentEventInput): NormalizedEventPatch {
-  const category = normalizeEventCategory(input.category, input.type);
-  const status = input.status ?? record.status;
-  const message = input.message !== undefined ? truncateSummary(input.message) : undefined;
-  const legacyInput = {
-    toolName: input.toolName,
-    filePath: input.filePath,
-    status,
-    message,
-  };
-  return {
-    type: input.type,
-    category,
-    ...(input.status ? { status } : {}),
-    ...(message !== undefined ? { message } : {}),
-    data: input.data
-      ? redactEventData(input.data) ?? defaultEventData(record, input.type, category, message, legacyInput)
-      : defaultEventData(record, input.type, category, message, legacyInput),
-    ...(input.title ? { title: truncateSummary(input.title) } : {}),
-    ...(input.toolCallId ? { toolCallId: truncateSummary(input.toolCallId) } : {}),
-    ...(input.toolName ? { toolName: truncateSummary(input.toolName) } : {}),
-    ...(input.filePath ? { filePath: truncateSummary(input.filePath) } : {}),
-    ...(input.runtime ? { runtime: truncateSummary(input.runtime) } : {}),
-    ...(input.visibility ? { visibility: input.visibility } : {}),
-    ...(input.metadata ? { metadata: redactMetadata(input.metadata) } : {}),
-  };
-}
-
-// --- disk: legacy readers (read-only, never written again) ---
-
-function recordWriteTs(record: AgentRunRecord): number {
-  return record.completedAt ?? record.startedAt;
-}
-
-function mergeLegacyJson(mindRoot: string, merged: Map<string, MergedRecordEntry>, events: AgentEvent[]): void {
-  try {
-    const file = legacyJsonPath(mindRoot);
-    if (!fs.existsSync(file)) return;
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<LegacyPersistedAgentRunLedger>;
-    for (const value of Array.isArray(parsed.records) ? parsed.records : []) {
-      const record = normalizeRecord(value);
-      if (record) mergeRecordEntry(merged, { record, ts: recordWriteTs(record), shard: null });
-    }
-    for (const value of Array.isArray(parsed.events) ? parsed.events : []) {
-      const event = normalizeEvent(value);
-      if (event) events.push(event);
-    }
-  } catch {
-    // Unreadable legacy data must never block the ledger.
-  }
-}
-
-function mergeLegacyJsonl(mindRoot: string, merged: Map<string, MergedRecordEntry>, events: AgentEvent[]): void {
-  try {
-    const file = legacyJsonlPath(mindRoot);
-    if (!fs.existsSync(file)) return;
-    // Replay the v2 op log into a local view first — later ops override
-    // earlier ones within the file, independent of cross-shard merge order.
-    const local = new Map<string, AgentRunRecord>();
-    const localEvents: AgentEvent[] = [];
-    for (const line of fs.readFileSync(file, 'utf-8').split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let op: Partial<LegacyPersistedOperation>;
-      try { op = JSON.parse(trimmed) as Partial<LegacyPersistedOperation>; } catch { continue; }
-      if (op.version !== 2 || typeof op.type !== 'string') continue;
-      if (op.type === 'reset') { local.clear(); localEvents.length = 0; continue; }
-      if (op.type === 'compact') {
-        local.clear();
-        localEvents.length = 0;
-        const compact = op as Partial<Extract<LegacyPersistedOperation, { type: 'compact' }>>;
-        for (const value of Array.isArray(compact.records) ? compact.records : []) {
-          const record = normalizeRecord(value);
-          if (record) local.set(record.id, record);
-        }
-        for (const value of Array.isArray(compact.events) ? compact.events : []) {
-          const event = normalizeEvent(value);
-          if (event) localEvents.push(event);
-        }
-        continue;
-      }
-      if (op.type === 'record_upsert') {
-        const record = normalizeRecord((op as Partial<Extract<LegacyPersistedOperation, { type: 'record_upsert' }>>).record);
-        if (record) local.set(record.id, record);
-        continue;
-      }
-      if (op.type === 'event_append') {
-        const event = normalizeEvent((op as Partial<Extract<LegacyPersistedOperation, { type: 'event_append' }>>).event);
-        if (event) localEvents.push(event);
-      }
-    }
-    for (const record of local.values()) {
-      mergeRecordEntry(merged, { record, ts: recordWriteTs(record), shard: null });
-    }
-    events.push(...localEvents);
-  } catch {
-    // Unreadable legacy data must never block the ledger.
-  }
-}
-
-// --- disk: shard readers + merge ---
-
-function listShardFiles(mindRoot: string): Array<{ file: string; pid: number; startTs: number }> {
-  try {
-    const dir = ledgerDirPath(mindRoot);
-    if (!fs.existsSync(dir)) return [];
-    const shards: Array<{ file: string; pid: number; startTs: number }> = [];
-    for (const name of fs.readdirSync(dir)) {
-      const match = SHARD_FILE_PATTERN.exec(name);
-      if (!match) continue;
-      shards.push({ file: path.join(dir, name), pid: Number(match[1]), startTs: Number(match[2]) });
-    }
-    // Deterministic merge order so every reader resolves ties identically.
-    return shards.sort((a, b) => (a.startTs - b.startTs) || (a.pid - b.pid));
-  } catch {
-    return [];
-  }
-}
-
-const conflictWarnedRunIds = new Set<string>();
-
-function mergeRecordEntry(merged: Map<string, MergedRecordEntry>, entry: MergedRecordEntry): void {
-  const existing = merged.get(entry.record.id);
-  if (!existing) {
-    merged.set(entry.record.id, entry);
-    return;
-  }
-  // Same run id written from two places (spec edge case: cross-process id
-  // collision). Runs are owned by the creating process; resolve
-  // last-write-wins by timestamp and surface the anomaly once.
-  const differentWriter = existing.shard?.pid !== entry.shard?.pid || existing.shard?.startTs !== entry.shard?.startTs;
-  if (differentWriter && !conflictWarnedRunIds.has(entry.record.id)) {
-    conflictWarnedRunIds.add(entry.record.id);
-    console.warn(`[mindos] agent run ledger: run id ${entry.record.id} appears in multiple ledger sources; keeping the most recent write.`);
-  }
-  if (entry.ts >= existing.ts) merged.set(entry.record.id, entry);
-}
-
-function mergeShard(shard: { file: string; pid: number; startTs: number }, merged: Map<string, MergedRecordEntry>): void {
-  try {
-    if (!fs.existsSync(shard.file)) return;
-    const local = new Map<string, { record: AgentRunRecord; ts: number }>();
-    for (const line of fs.readFileSync(shard.file, 'utf-8').split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let op: Partial<ShardOperation>;
-      try { op = JSON.parse(trimmed) as Partial<ShardOperation>; } catch { continue; }
-      if (op.version !== 3 || typeof op.type !== 'string') continue;
-      if (op.type === 'compact') {
-        local.clear();
-        const compact = op as Partial<Extract<ShardOperation, { type: 'compact' }>>;
-        for (const value of Array.isArray(compact.records) ? compact.records : []) {
-          const record = normalizeRecord(value);
-          if (record) local.set(record.id, { record, ts: typeof op.ts === 'number' ? op.ts : recordWriteTs(record) });
-        }
-        continue;
-      }
-      if (op.type === 'record_upsert') {
-        const record = normalizeRecord((op as Partial<Extract<ShardOperation, { type: 'record_upsert' }>>).record);
-        if (record) local.set(record.id, { record, ts: typeof op.ts === 'number' ? op.ts : recordWriteTs(record) });
-      }
-    }
-    for (const { record, ts } of local.values()) {
-      mergeRecordEntry(merged, { record, ts, shard: { pid: shard.pid, startTs: shard.startTs } });
-    }
-  } catch {
-    // A torn or unreadable shard must never block the ledger.
-  }
-}
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM = exists but owned by another user; anything else (ESRCH) = gone.
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-function isDeadWriter(entry: MergedRecordEntry): boolean {
-  // Legacy global files have no owning process — since the migration, no live
-  // process appends to them, so a non-terminal record there can never
-  // progress again.
-  if (!entry.shard) return true;
-  const self = shardIdentity();
-  if (entry.shard.pid === self.pid) {
-    // Same pid but a different start timestamp is a previous incarnation of
-    // a recycled pid — that writer is gone even though the pid looks alive.
-    return entry.shard.startTs !== self.startTs;
-  }
-  return !isPidAlive(entry.shard.pid);
+  return state;
 }
 
 /**
- * Orphaned runs: the owning process died before reaching a terminal status.
- * Marked failed at merge time, in memory only — the shard stays untouched on
- * disk for audit, and every reader computes the same result.
+ * Returns the ledger database, opening it on demand. Read paths pass
+ * `create: false` and get null while nothing has been persisted yet (unless
+ * legacy files are waiting to be imported); write paths always get a handle.
  */
-function markOrphanedRun(record: AgentRunRecord): AgentRunRecord {
-  return {
-    ...record,
-    status: 'failed',
-    error: record.error ?? 'MindOS process that owned this run exited before it finished.',
-    metadata: { ...(record.metadata ?? {}), failureReason: 'process-died' },
-  };
+function getLedger(options: { create: boolean }): MindosDatabase | null {
+  const state = getState();
+  if (!state.db || !state.db.isOpen) {
+    const mustCreate = options.create || (state.mindRoot !== undefined && hasLegacyLedgerFiles(state.mindRoot));
+    const db = openLedgerDatabase(state.mindRoot, { create: mustCreate });
+    if (!db) return null;
+    state.db = db;
+    state.imported = false;
+    state.pendingPrunes.clear();
+    // A fresh handle (first open, or reopened after closeAllMindosDatabases)
+    // may see rows written elsewhere; cached run snapshots are re-read on demand.
+    state.openRuns.clear();
+  }
+  if (!state.imported) {
+    state.imported = true;
+    if (state.mindRoot) importLegacyLedger(state.mindRoot, state.db);
+  }
+  return state.db;
 }
 
-function readPersistedStore(mindRoot: string): AgentRunLedgerStore {
-  const merged = new Map<string, MergedRecordEntry>();
-  const events: AgentEvent[] = [];
-  mergeLegacyJson(mindRoot, merged, events);
-  mergeLegacyJsonl(mindRoot, merged, events);
-  const self = shardIdentity();
-  const ownRecordIds = new Set<string>();
-  for (const shard of listShardFiles(mindRoot)) {
-    mergeShard(shard, merged);
-  }
+// --- legacy import ---
 
-  const records: AgentRunRecord[] = [];
-  for (const entry of merged.values()) {
-    const ownedBySelf = entry.shard?.pid === self.pid && entry.shard?.startTs === self.startTs;
-    if (ownedBySelf) ownRecordIds.add(entry.record.id);
-    if (!isTerminalStatus(entry.record.status) && !ownedBySelf && isDeadWriter(entry)) {
-      records.push(markOrphanedRun(entry.record));
-    } else {
-      records.push(entry.record);
-    }
-  }
-  records.sort((a, b) => b.startedAt - a.startedAt);
-  events.sort((a, b) => b.ts - a.ts);
+const conflictWarnedRunIds = new Set<string>();
 
-  return {
-    mindRoot,
-    records: records.slice(0, MAX_RUNS),
-    events: events.slice(0, MAX_EVENTS),
-    ownRecordIds,
-  };
+function ownerKey(owner: RunOwner): string {
+  return owner ? `${owner.pid}-${owner.startTs}` : 'legacy';
 }
 
-// --- disk: own-shard writer (the ONLY writes this module performs) ---
+function warnConflictOnce(runId: string): void {
+  if (conflictWarnedRunIds.has(runId)) return;
+  conflictWarnedRunIds.add(runId);
+  console.warn(`[mindos] agent run ledger: run id ${runId} appears in multiple ledger sources; keeping the most recent write.`);
+}
 
-function appendOwnShardOperation(store: AgentRunLedgerStore, record: AgentRunRecord): void {
-  if (!store.mindRoot) return;
+function importLegacyLedger(mindRoot: string, db: MindosDatabase): void {
+  let legacy;
   try {
-    const file = ownShardPath(store.mindRoot);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const op: ShardOperation = { version: 3, type: 'record_upsert', ts: nowMs(), record };
-    fs.appendFileSync(file, `${JSON.stringify(op)}\n`, 'utf-8');
-    store.ownRecordIds.add(record.id);
-    if (fs.statSync(file).size > MAX_SHARD_LOG_BYTES) {
-      compactOwnShard(store);
-    }
+    legacy = readLegacyLedgerFiles(mindRoot);
   } catch {
-    // Ledger persistence must never affect agent execution.
+    return;
   }
-}
-
-function compactOwnShard(store: AgentRunLedgerStore): void {
-  if (!store.mindRoot) return;
+  if (legacy.files.length === 0) return;
+  const self = ownerIdentity();
   try {
-    const file = ownShardPath(store.mindRoot);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    // This process is the shard's single writer, so the in-memory view of its
-    // OWN records is authoritative — foreign records live in foreign shards
-    // and are deliberately not written here.
-    const op: ShardOperation = {
-      version: 3,
-      type: 'compact',
-      ts: nowMs(),
-      records: store.records.filter((record) => store.ownRecordIds.has(record.id)).slice(0, MAX_RUNS),
-    };
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, `${JSON.stringify(op)}\n`, 'utf-8');
-    fs.renameSync(tmp, file);
+    db.transaction(() => {
+      const seen = new Map<string, string>();
+      for (const entry of legacy.runs) {
+        const key = ownerKey(entry.owner);
+        const existing = readRunRow(db, entry.record.id);
+        const previous = seen.get(entry.record.id) ?? (existing ? ownerKey(rowOwner(existing)) : undefined);
+        // Same run id written from two places (spec edge case: cross-process id
+        // collision). Resolve last-write-wins by timestamp and surface it once.
+        if (previous !== undefined && previous !== key) warnConflictOnce(entry.record.id);
+        seen.set(entry.record.id, key);
+        upsertRun(db, entry.record, entry.owner, entry.ts, { onlyIfNewer: true });
+      }
+      for (const event of legacy.events) insertEventRow(db, event);
+      pruneRuns(db);
+    });
   } catch {
-    // Ledger persistence must never affect agent execution.
+    // Unreadable legacy data must never block the ledger.
+    return;
+  }
+  for (const file of legacy.files) {
+    if (isDeadOwner(file.owner, self)) renameLegacyFileToMigrated(file.file);
   }
 }
 
-// --- in-memory store + subscribers ---
+// --- projections ---
 
-function getStore(): AgentRunLedgerStore {
-  const mindRoot = resolveLedgerRoot();
-  const store = getProcessGlobal<AgentRunLedgerStore>(
-    AGENT_RUN_LEDGER_STORE_KEY,
-    () => (mindRoot ? readPersistedStore(mindRoot) : emptyStore()),
-  );
-  if (store.mindRoot !== mindRoot) {
-    deleteProcessGlobal(AGENT_RUN_LEDGER_STORE_KEY);
-    return getProcessGlobal<AgentRunLedgerStore>(
-      AGENT_RUN_LEDGER_STORE_KEY,
-      () => (mindRoot ? readPersistedStore(mindRoot) : emptyStore()),
-    );
-  }
-  return store;
+/** Read-time orphan view: rows whose owner died before a terminal status are reported failed. */
+function projectRow(row: RunRow, self: OwnerIdentity): AgentRunRecord | null {
+  const record = parseRunRow(row);
+  if (!record) return null;
+  if (isTerminalStatus(record.status)) return record;
+  const owner = rowOwner(row);
+  if (owner && owner.pid === self.pid && owner.startTs === self.startTs) return record;
+  return isDeadOwner(owner, self) ? markOrphanedRun(record) : record;
 }
+
+function readRun(db: MindosDatabase, id: string): AgentRunRecord | undefined {
+  const row = readRunRow(db, id);
+  if (!row) return undefined;
+  return projectRow(row, ownerIdentity()) ?? undefined;
+}
+
+// --- subscribers ---
 
 function getSubscribers(): Set<AgentRunEventSubscriber> {
   return getProcessGlobal(AGENT_RUN_LEDGER_SUBSCRIBERS_KEY, () => new Set<AgentRunEventSubscriber>());
@@ -635,68 +303,45 @@ function notifyAgentEventSubscribers(event: AgentEvent): void {
   }
 }
 
-function nowMs(): number {
-  return Date.now();
-}
+// --- writes ---
 
-function createRunId(): string {
-  return `agent-run-${nowMs().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
+/** Token deltas are persisted as one merged row per window (spec-ledger-write-cost). */
+const DELTA_FLUSH_MS = 250;
+const DELTA_FLUSH_CHARS = 2048;
+/** Bound on cached open runs; a lane that never reaches a terminal write must not leak. */
+const OPEN_RUN_CACHE_MAX = 1000;
 
-function createEventId(): string {
-  return `agent-event-${nowMs().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function truncateSummary(value: unknown): string {
-  if (typeof value === 'string') {
-    const redacted = redactSensitiveText(value);
-    return redacted.length > MAX_SUMMARY_CHARS ? `${redacted.slice(0, MAX_SUMMARY_CHARS)}...` : redacted;
-  }
-  if (value == null) return '';
+function insertPersistedEvent(event: AgentEvent): void {
+  const db = getLedger({ create: true });
+  if (!db) return;
   try {
-    const serialized = JSON.stringify(redactSensitiveObject(value));
-    return serialized.length > MAX_SUMMARY_CHARS ? `${serialized.slice(0, MAX_SUMMARY_CHARS)}...` : serialized;
+    insertEventRow(db, event);
+    const state = getState();
+    const visibility = event.visibility ?? 'timeline';
+    const key = `${event.runId}\n${visibility}`;
+    const pending = (state.pendingPrunes.get(key) ?? 0) + 1;
+    if (pending >= EVENT_TRIM_SLACK) {
+      pruneRunEvents(db, event.runId, visibility);
+      state.pendingPrunes.set(key, 0);
+    } else {
+      state.pendingPrunes.set(key, pending);
+    }
   } catch {
-    return redactSensitiveText(String(value));
+    // Ledger persistence must never affect agent execution.
   }
 }
 
-function redactMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
-  return redactSensitiveObject(metadata) as Record<string, unknown>;
+/** Persists a non-delta event after the run's buffered deltas, so `seq` follows the order things happened. */
+function persistEvent(event: AgentEvent): void {
+  flushRunDeltas(event.runId);
+  insertPersistedEvent(event);
 }
 
-function normalizePermissionMode(mode: unknown): AgentRunPermissionMode {
-  return readLegacyMindosPermissionMode(mode);
-}
-
-function normalizeArchiveRef(value: AgentRunArchiveRef | undefined): AgentRunArchiveRef | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const archive: AgentRunArchiveRef = {};
-  if (typeof value.sessionId === 'string' && value.sessionId.trim()) archive.sessionId = truncateSummary(value.sessionId);
-  if (typeof value.path === 'string' && value.path.trim()) archive.path = truncateSummary(value.path);
-  return Object.keys(archive).length > 0 ? archive : undefined;
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
-}
-
-function isTerminalStatus(status: AgentRunStatus): boolean {
-  return status === 'completed' || status === 'failed' || status === 'canceled' || status === 'timed_out';
-}
-
-function appendAgentEvent(record: AgentRunRecord, input: AgentEventType | AppendAgentEventInput, message?: string): AgentEvent {
-  const store = getStore();
+function buildEvent(record: AgentRunRecord, input: AgentEventType | AppendAgentEventInput, message?: string): AgentEvent {
   const patch = typeof input === 'string'
     ? normalizeEventPatch(record, { type: input, category: normalizeEventCategory(undefined, input), ...(message ? { message } : {}) })
     : normalizeEventPatch(record, input);
-  const event: AgentEvent = {
+  return {
     id: createEventId(),
     runId: record.id,
     ...patch,
@@ -704,29 +349,186 @@ function appendAgentEvent(record: AgentRunRecord, input: AgentEventType | Append
     status: patch.status ?? record.status,
     record,
   };
-  store.events.unshift(event);
-  if (store.events.length > MAX_EVENTS) {
-    store.events = store.events.slice(0, MAX_EVENTS);
-  }
+}
+
+function appendAgentEvent(record: AgentRunRecord, input: AgentEventType | AppendAgentEventInput, message?: string): AgentEvent {
+  const event = buildEvent(record, input, message);
+  persistEvent(event);
   notifyAgentEventSubscribers(event);
   return event;
 }
 
+function deltaKey(event: AgentEvent): string {
+  if (event.data?.kind === 'tool') return `tool:${event.toolCallId ?? ''}`;
+  if (event.data?.kind === 'text') return `text:${event.data.channel ?? 'assistant'}`;
+  return `${event.type}:${event.category}`;
+}
+
+function deltaText(event: AgentEvent): string {
+  if (event.data?.kind === 'text') return event.data.text;
+  if (event.data?.kind === 'tool') return event.data.outputSummary ?? '';
+  return event.message ?? '';
+}
+
+function cloneForBuffer(event: AgentEvent): AgentEvent {
+  return {
+    ...event,
+    ...(event.data ? { data: { ...event.data } } : {}),
+    ...(event.metadata ? { metadata: { ...event.metadata } } : {}),
+  };
+}
+
+function mergeDelta(buffer: DeltaBuffer, event: AgentEvent, text: string): void {
+  const target = buffer.event;
+  if (event.message !== undefined) target.message = `${target.message ?? ''}${event.message}`;
+  if (target.data?.kind === 'text' && event.data?.kind === 'text') {
+    target.data.text += event.data.text;
+  } else if (target.data?.kind === 'tool' && event.data?.kind === 'tool') {
+    target.data.outputSummary = `${target.data.outputSummary ?? ''}${event.data.outputSummary ?? ''}`;
+  }
+  buffer.chars += text.length;
+  buffer.count += 1;
+}
+
+function flushRunDeltas(runId: string): void {
+  const state = getState();
+  const buffer = state.pendingDeltas.get(runId);
+  if (!buffer) return;
+  state.pendingDeltas.delete(runId);
+  if (buffer.timer) clearTimeout(buffer.timer);
+  if (buffer.count > 1) buffer.event.metadata = { ...(buffer.event.metadata ?? {}), coalesced: buffer.count };
+  insertPersistedEvent(buffer.event);
+}
+
+function flushAllPendingDeltas(): void {
+  const state = getState();
+  for (const runId of Array.from(state.pendingDeltas.keys())) flushRunDeltas(runId);
+}
+
+function discardPendingDeltas(state: LedgerProcessState): void {
+  for (const buffer of state.pendingDeltas.values()) {
+    if (buffer.timer) clearTimeout(buffer.timer);
+  }
+  state.pendingDeltas.clear();
+}
+
+/**
+ * Queues a delta for persistence. Same-key deltas of a run merge into one
+ * row; a different key (channel or tool call) flushes the open buffer first
+ * so rows keep the order in which things were said. The buffer flushes on
+ * size, on a short timer, before any non-delta write for the run, and before
+ * an in-process read.
+ */
+function bufferDelta(event: AgentEvent): void {
+  const state = getState();
+  const key = deltaKey(event);
+  const text = deltaText(event);
+  const open = state.pendingDeltas.get(event.runId);
+  if (open && open.key !== key) flushRunDeltas(event.runId);
+  let buffer = state.pendingDeltas.get(event.runId);
+  if (buffer) {
+    mergeDelta(buffer, event, text);
+  } else {
+    buffer = { key, event: cloneForBuffer(event), chars: text.length, count: 1, timer: null };
+    state.pendingDeltas.set(event.runId, buffer);
+  }
+  if (buffer.chars >= DELTA_FLUSH_CHARS) {
+    flushRunDeltas(event.runId);
+    return;
+  }
+  if (!buffer.timer) {
+    const runId = event.runId;
+    const timer = setTimeout(() => {
+      try {
+        flushRunDeltas(runId);
+      } catch {
+        // A late flush must never surface into agent execution.
+      }
+    }, DELTA_FLUSH_MS);
+    timer.unref?.();
+    buffer.timer = timer;
+  }
+}
+
+function rememberOpenRun(state: LedgerProcessState, record: AgentRunRecord): void {
+  if (isTerminalStatus(record.status)) {
+    state.openRuns.delete(record.id);
+    return;
+  }
+  if (!state.openRuns.has(record.id) && state.openRuns.size >= OPEN_RUN_CACHE_MAX) {
+    const oldest = state.openRuns.keys().next().value;
+    if (oldest !== undefined) state.openRuns.delete(oldest);
+  }
+  state.openRuns.set(record.id, record);
+}
+
+/**
+ * The record an event appended to `runId` snapshots. Open runs this process
+ * owns come from the cache; anything else is read from the database (and
+ * cached when it turns out to be ours, e.g. after the handle was reopened).
+ */
+function resolveRunForEvent(runId: string): AgentRunRecord | undefined {
+  const state = getState();
+  const cached = state.openRuns.get(runId);
+  if (cached && state.db?.isOpen) return cached;
+  const db = getLedger({ create: false });
+  if (!db) return undefined;
+  try {
+    const row = readRunRow(db, runId);
+    if (!row) return undefined;
+    const self = ownerIdentity();
+    const record = projectRow(row, self);
+    if (!record) return undefined;
+    const owner = rowOwner(row);
+    if (owner && owner.pid === self.pid && owner.startTs === self.startTs) rememberOpenRun(getState(), record);
+    return record;
+  } catch {
+    return undefined;
+  }
+}
+
+function persistRun(record: AgentRunRecord): void {
+  // Deltas that were streamed before this transition belong before its event row.
+  flushRunDeltas(record.id);
+  const db = getLedger({ create: true });
+  if (!db) return;
+  try {
+    db.transaction(() => {
+      upsertRun(db, record, ownerIdentity(), nowMs());
+      pruneRuns(db);
+    });
+    rememberOpenRun(getState(), record);
+  } catch {
+    // Ledger persistence must never affect agent execution.
+  }
+}
+
 export function appendAgentRunEvent(runId: string, input: AppendAgentEventInput): AgentEvent | undefined {
-  const record = getAgentRun(runId);
+  const record = resolveRunForEvent(runId);
   if (!record) return undefined;
   return appendAgentEvent(record, input);
+}
+
+/**
+ * Appends a streamed delta (assistant / reasoning text, tool output). Live
+ * subscribers receive it at once, exactly like `appendAgentRunEvent`; only
+ * persistence is coalesced, so a token costs no database round trip.
+ */
+export function appendAgentRunDeltaEvent(runId: string, input: AppendAgentEventInput): AgentEvent | undefined {
+  const record = resolveRunForEvent(runId);
+  if (!record) return undefined;
+  const event = buildEvent(record, input);
+  bufferDelta(event);
+  notifyAgentEventSubscribers(event);
+  return event;
 }
 
 function finishRun(
   id: string,
   patch: Pick<AgentRunRecord, 'status'> & Partial<Pick<AgentRunRecord, 'outputSummary' | 'error' | 'metadata' | 'archive'>>,
 ): AgentRunRecord | undefined {
-  const store = getStore();
-  const index = store.records.findIndex((record) => record.id === id);
-  if (index < 0) return undefined;
-
-  const current = store.records[index]!;
+  const current = getAgentRun(id);
+  if (!current) return undefined;
   if (isTerminalStatus(current.status)) return current;
 
   const archivePatch = normalizeArchiveRef(patch.archive);
@@ -741,15 +543,14 @@ function finishRun(
     completedAt,
     durationMs: Math.max(0, completedAt - current.startedAt),
   };
-  store.records[index] = next;
-  appendOwnShardOperation(store, next);
+  persistRun(next);
   const eventType = patch.status === 'completed'
     ? 'run_completed'
     : patch.status === 'canceled'
       ? 'run_canceled'
       : 'run_failed';
   appendAgentEvent(next, eventType, patch.error);
-  emitTerminalRunAutomationEvent(store.mindRoot, next);
+  emitTerminalRunAutomationEvent(getState().mindRoot, next);
   return next;
 }
 
@@ -805,22 +606,15 @@ export function startAgentRun(input: StartAgentRunInput): AgentRunRecord {
     ...(input.metadata ? { metadata: redactMetadata(input.metadata) } : {}),
   };
 
-  const store = getStore();
-  store.records.unshift(record);
-  if (store.records.length > MAX_RUNS) {
-    store.records = store.records.slice(0, MAX_RUNS);
-  }
-  appendOwnShardOperation(store, record);
+  persistRun(record);
   appendAgentEvent(record, 'run_started');
   return record;
 }
 
 export function updateAgentRun(id: string, input: UpdateAgentRunInput): AgentRunRecord | undefined {
-  const store = getStore();
-  const index = store.records.findIndex((record) => record.id === id);
-  if (index < 0) return undefined;
+  const current = getAgentRun(id);
+  if (!current) return undefined;
 
-  const current = store.records[index]!;
   const archivePatch = normalizeArchiveRef(input.archive);
   const next: AgentRunRecord = {
     ...current,
@@ -835,8 +629,7 @@ export function updateAgentRun(id: string, input: UpdateAgentRunInput): AgentRun
     ...(archivePatch ? { archive: { ...(current.archive ?? {}), ...archivePatch } } : {}),
     ...(input.metadata ? { metadata: redactMetadata({ ...(current.metadata ?? {}), ...input.metadata }) } : {}),
   };
-  store.records[index] = next;
-  appendOwnShardOperation(store, next);
+  persistRun(next);
   appendAgentEvent(next, 'run_updated', input.error ?? input.outputSummary);
   return next;
 }
@@ -869,33 +662,52 @@ export function cancelAgentRun(id: string, input: CancelAgentRunInput = {}): Age
   });
 }
 
+// --- reads ---
+
 export function getAgentRun(id: string): AgentRunRecord | undefined {
-  return getStore().records.find((record) => record.id === id);
+  const db = getLedger({ create: false });
+  if (!db) return undefined;
+  try {
+    return readRun(db, id);
+  } catch {
+    return undefined;
+  }
 }
 
 export function listAgentRuns(options: ListAgentRunsOptions = {}): AgentRunRecord[] {
   const limit = Math.max(1, Math.min(options.limit ?? 100, MAX_RUNS));
-  return getStore().records
-    .filter((record) => !options.runId || record.id === options.runId)
-    .filter((record) => !options.rootRunId || record.rootRunId === options.rootRunId || record.id === options.rootRunId)
-    .filter((record) => !options.kind || record.agentKind === options.kind)
-    .filter((record) => !options.status || record.status === options.status)
-    .filter((record) => !options.parentRunId || record.parentRunId === options.parentRunId)
-    .filter((record) => !options.chatSessionId || record.chatSessionId === options.chatSessionId)
-    .filter((record) => options.startedAfter === undefined || record.startedAt >= options.startedAfter)
-    .slice(0, limit);
+  const db = getLedger({ create: false });
+  if (!db) return [];
+  try {
+    const self = ownerIdentity();
+    // The status filter applies to the projected status (an orphaned run reads
+    // as failed), so it cannot be pushed into SQL; every other filter can.
+    const rows = listRunRows(db, options, options.status ? null : limit);
+    const records: AgentRunRecord[] = [];
+    for (const row of rows) {
+      const record = projectRow(row, self);
+      if (!record) continue;
+      if (options.status && record.status !== options.status) continue;
+      records.push(record);
+      if (records.length >= limit) break;
+    }
+    return records;
+  } catch {
+    return [];
+  }
 }
 
 export function listAgentEvents(options: ListAgentEventsOptions = {}): AgentEvent[] {
   const limit = Math.max(1, Math.min(options.limit ?? 100, MAX_EVENTS));
-  return getStore().events
-    .filter((event) => !options.runId || event.runId === options.runId)
-    .filter((event) => !options.rootRunId || event.record.rootRunId === options.rootRunId || event.record.id === options.rootRunId)
-    .filter((event) => !options.chatSessionId || event.record.chatSessionId === options.chatSessionId)
-    .filter((event) => !options.type || event.type === options.type)
-    .filter((event) => !options.category || event.category === options.category)
-    .filter((event) => options.startedAfter === undefined || event.ts >= options.startedAfter || event.record.startedAt >= options.startedAfter)
-    .slice(0, limit);
+  // In-process readers (reattach replay, /api/agent-runs) see every delta streamed so far.
+  flushAllPendingDeltas();
+  const db = getLedger({ create: false });
+  if (!db) return [];
+  try {
+    return listEventRows(db, options, limit);
+  } catch {
+    return [];
+  }
 }
 
 export function subscribeAgentRunEvents(subscriber: AgentRunEventSubscriber): () => void {
@@ -910,31 +722,74 @@ export function coerceAgentRunPermissionMode(mode: unknown): AgentRunPermissionM
   return normalizePermissionMode(mode);
 }
 
+// --- shared handle (artifact ledger) ---
+
 /**
- * Test-only: clear memory and delete every ledger file under the current
- * mind root — shards of other (test) processes and legacy files included.
- * Production code must never delete foreign shards; tests need a clean slate.
+ * The ledger database, for stores that live in the same file
+ * (spec-ledger-write-cost P2: `agent_artifacts`). Same open-on-demand rules
+ * as the run ledger: `create: false` returns null while nothing exists yet.
+ */
+export function getAgentLedgerDatabase(options: { create: boolean }): MindosDatabase | null {
+  return getLedger(options);
+}
+
+/** Mind root the ledger currently resolves to (undefined = in-memory fallback). */
+export function agentLedgerMindRoot(): string | undefined {
+  return getState().mindRoot;
+}
+
+/** `{ pid, startTs }` this process stamps on rows it writes; also decides whether a legacy shard owner is dead. */
+export function agentLedgerOwnerIdentity(): { pid: number; startTs: number } {
+  return ownerIdentity();
+}
+
+// --- test seams ---
+
+/**
+ * Test-only: empty the ledger database for the current mind root and delete
+ * every legacy ledger file (originals and `*.migrated` copies). The database
+ * is not created when it does not exist yet, so suites asserting an untouched
+ * mind root keep passing.
  */
 export function resetAgentRunsForTest(): void {
-  const store = getStore();
-  store.records = [];
-  store.events = [];
-  store.ownRecordIds.clear();
-  if (!store.mindRoot) return;
+  invalidateLedgerRootCache();
+  const state = getState();
+  state.pendingPrunes.clear();
+  state.openRuns.clear();
+  discardPendingDeltas(state);
   try {
-    const dir = ledgerDirPath(store.mindRoot);
-    if (!fs.existsSync(dir)) return;
+    const db = state.db?.isOpen ? state.db : openLedgerDatabase(state.mindRoot, { create: false });
+    if (db) {
+      clearLedger(db);
+      state.db = db;
+      state.imported = true;
+    }
+  } catch {
+    // Test cleanup is best-effort.
+  }
+  if (!state.mindRoot) return;
+  try {
+    const dir = ledgerDirPath(state.mindRoot);
+    if (!dir || !fs.existsSync(dir)) return;
     for (const name of fs.readdirSync(dir)) {
-      if (SHARD_FILE_PATTERN.test(name) || name === LEDGER_LEGACY_JSON_NAME || name === LEDGER_LEGACY_JSONL_NAME) {
-        fs.rmSync(path.join(dir, name), { force: true });
-      }
+      if (LEGACY_LEDGER_FILE_PATTERN.test(name)) fs.rmSync(path.join(dir, name), { force: true });
     }
   } catch {
     // Test cleanup is best-effort.
   }
 }
 
-/** Test-only: drop the in-memory store so the next access re-merges from disk. */
+/** Test-only: drop the cached handle so the next access re-opens the database and re-imports legacy files. */
 export function reloadAgentRunsFromDiskForTest(): void {
+  invalidateLedgerRootCache();
+  const state = getProcessGlobal<LedgerProcessState | null>(AGENT_RUN_LEDGER_STORE_KEY, () => null);
+  if (state) discardPendingDeltas(state);
+  if (state?.db) closeMindosDatabase(state.db.file);
   deleteProcessGlobal(AGENT_RUN_LEDGER_STORE_KEY);
 }
+
+// Knowledge-layer run-data port (spec-knowledge-layering-and-export-surface):
+// knowledge modules read the ledger through `knowledge/agent-run-data.ts`;
+// loading the ledger is what makes run data available, so the ledger installs
+// the implementation. Agent → knowledge is the legal direction.
+installKnowledgeAgentRunLister((options) => listAgentRuns(options));

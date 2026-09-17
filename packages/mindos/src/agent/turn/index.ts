@@ -1,36 +1,58 @@
 import {
-  safeParseMindosJsonObject,
   sanitizeToolArgs,
   sanitizeToolOutput,
 } from './tool-event-safety.js';
+import {
+  type MindOSSSEvent,
+} from './sse.js';
 import {
   renderMindosContextPrompt,
   type MindosContextPromptSection,
 } from '../prompt/context-prompt.js';
 
-export { redactSensitiveObject, redactSensitiveText } from './redaction.js';
+export { redactSensitiveObject, redactSensitiveText } from '../../foundation/security/redaction.js';
+// Turn-request wire contract and context-omission signatures are shared by the
+// Product Server handler and the Next host route; the barrel stays the single
+// import surface (spec-runtime-lane-contract).
+export * from './request.js';
+export * from './context.js';
 export {
   safeParseMindosJsonObject,
   sanitizeToolArgs,
   sanitizeToolOutput,
 } from './tool-event-safety.js';
+// Turn-execution control (retry / timeout) and the ACP lane live in sibling
+// modules; re-exported here so the barrel stays the single import surface.
 export {
-  buildMindosCompatEndpointCandidates,
-  mindosPiMessagesToOpenAI,
-  parseMindosOpenAICompatResponse,
-  reassembleMindosOpenAISse,
-  runMindosNonStreamingFallback,
-  runMindosOpenAICompatFallback,
-} from './openai-compat-fallback.js';
+  isMindosRetryableError,
+  isMindosTransientError,
+  mindosRetryDelay,
+  resolveMindosAgentTimeoutMs,
+  runMindosAgentTurnWithRetry,
+  runMindosWithTimeout,
+  sleepMindos,
+} from './retry.js';
+export type { MindosAgentTurnRetryOptions } from './retry.js';
+// Turn-clock suspension while permission / question bridge waits are pending
+// (spec-runtime-lane-contract item 3); the timeout helpers consult it.
+export * from './turn-deadline.js';
+export {
+  mapMindosAcpUpdateToSseEvents,
+  MindosAcpReportedError,
+  runMindosAcpAgentTurn,
+} from './acp-lane.js';
 export type {
-  MindosNonStreamingFallbackOptions,
-  MindosOpenAICompatChoice,
-  MindosOpenAICompatCompletion,
-  MindosOpenAICompatFallbackEvent,
-  MindosOpenAICompatFallbackOptions,
-  MindosOpenAIMessage,
-  MindosOpenAIToolCall,
-} from './openai-compat-fallback.js';
+  MindosAcpAgentTurnCloseOptions,
+  MindosAcpAgentTurnOptions,
+  MindosAcpAgentTurnPromptOptions,
+  MindosAcpAgentTurnResult,
+  MindosAcpAgentTurnServices,
+  MindosAcpAgentTurnSession,
+  MindosAcpAgentTurnSessionOptions,
+  MindosAcpSessionPoolKey,
+  MindosAcpSessionUpdate,
+  MindosAcpUpdateMappingOptions,
+} from './acp-lane.js';
 export type MindosSessionEventType =
   | 'session.started'
   | 'message.delta'
@@ -75,269 +97,26 @@ export function createMindosSessionEvent<TData>(
   };
 }
 
-export type MindOSSSEvent =
-  | { type: 'agent_run_context'; rootRunId: string; chatSessionId?: string; startedAt: number }
-  | {
-      type: 'context_usage';
-      runtime?: 'mindos' | 'acp' | 'codex' | 'claude';
-      phase: 'preflight' | 'post';
-      action:
-        | 'none'
-        | 'prompt_compacted'
-        | 'prompt_truncated'
-        | 'history_compacted'
-        | 'history_pruned'
-        | 'history_compacted_history_pruned'
-        | 'prompt_compacted_history_compacted'
-        | 'prompt_compacted_history_pruned'
-        | 'prompt_compacted_history_compacted_history_pruned'
-        | 'prompt_truncated_history_compacted'
-        | 'prompt_truncated_history_pruned'
-        | 'prompt_truncated_history_compacted_history_pruned';
-      modelName?: string;
-      percent: number;
-      usedTokens: number;
-      contextWindow: number;
-      nativeContextWindow?: number;
-      contextTokens?: number;
-      contextWindowSource?: 'user' | 'catalog' | 'discovered' | 'pi-ai' | 'fallback' | 'model';
-      contextWindowIsFallback?: boolean;
-      budgetTokens: number;
-      reserveTokens: number;
-      keepRecentTokens?: number;
-      systemPromptTokens: number;
-      turnPromptTokens: number;
-      historyTokens: number;
-      originalUsedTokens?: number;
-      originalHistoryTokens?: number;
-      runtimeMessageCompaction?: boolean;
-      compactedMessages?: number;
-      historyCompactTokens?: number;
-      historyBeforeCompactTokens?: number;
-      prunedMessages?: number;
-      message?: string;
-    }
-  | { type: 'text_delta'; delta: string }
-  | { type: 'thinking_delta'; delta: string }
-  | { type: 'tool_start'; toolCallId: string; toolName: string; args: unknown; runtime?: 'mindos' | 'acp' | 'codex' | 'claude' }
-  | { type: 'tool_delta'; toolCallId: string; delta: string; toolName?: string; runtime?: 'mindos' | 'acp' | 'codex' | 'claude' }
-  | { type: 'tool_end'; toolCallId: string; output: string; isError: boolean; toolName?: string; runtime?: 'mindos' | 'acp' | 'codex' | 'claude' }
-  | {
-      type: 'runtime_permission_request';
-      runId: string;
-      requestId: string;
-      runtime: 'acp' | 'codex' | 'claude';
-      toolCallId: string;
-      toolName: string;
-      input: unknown;
-      options: Array<{ id: string; label: string; description?: string; intent?: 'allow' | 'deny' | 'cancel'; scope?: 'once' | 'session' | 'always' | 'turn' }>;
-      reason?: string;
-      action?: string;
-      resource?: string;
-      risk?: { level: 'low' | 'medium' | 'high'; summary: string; reasons?: string[] };
-    }
-  | {
-      type: 'runtime_permission_resolved';
-      runId: string;
-      requestId: string;
-      runtime: 'acp' | 'codex' | 'claude';
-      toolCallId: string;
-      decision: string;
-      cancelled?: boolean;
-      decisionLabel?: string;
-      decisionIntent?: 'allow' | 'deny' | 'cancel';
-      decisionScope?: 'once' | 'session' | 'always' | 'turn';
-    }
-  | { type: 'user_question_start'; runId: string; toolCallId: string; questions: unknown }
-  | { type: 'user_question_answered'; runId: string; toolCallId: string; answers?: unknown }
-  | { type: 'user_question_cancelled'; runId: string; toolCallId: string; reason: string }
-  | {
-      type: 'runtime_binding';
-      runtime: 'mindos' | 'acp' | 'codex' | 'claude';
-      externalSessionId: string;
-      cwd?: string;
-      status?: 'active' | 'missing' | 'signed-out' | 'archived' | 'failed';
-      reason?: string;
-    }
-  | { type: 'done'; usage?: { input: number; output: number } }
-  | { type: 'error'; message: string }
-  | { type: 'status'; message: string; visible?: boolean; runtime?: 'mindos' | 'acp' | 'codex' | 'claude' };
+// The SSE wire surface lives in a sibling module; re-exported explicitly so
+// the barrel stays the single import surface (contract: opencode-architecture
+// -alignment pins these names on this file).
+export {
+  encodeMindosSseEvent,
+  isHiddenMindosSseStatusEvent,
+  MINDOS_AGENT_TURN_SSE_HEARTBEAT_EVENT,
+  MINDOS_AGENT_TURN_SSE_HEARTBEAT_MS,
+  MINDOS_AGENT_TURN_STREAM_EVENT_TYPES,
+  MINDOS_SSE_HEADERS,
+  startMindosAgentTurnSseHeartbeat,
+} from './sse.js';
+export type { MindOSSSEvent } from './sse.js';
 
-export const MINDOS_AGENT_TURN_STREAM_EVENT_TYPES = [
-  'text_delta',
-  'thinking_delta',
-  'agent_run_context',
-  'context_usage',
-  'tool_start',
-  'tool_delta',
-  'tool_end',
-  'runtime_permission_request',
-  'runtime_permission_resolved',
-  'user_question_start',
-  'user_question_answered',
-  'user_question_cancelled',
-  'runtime_binding',
-  'done',
-  'error',
-  'status',
-] as const;
-
-export const MINDOS_SSE_HEADERS: Record<string, string> = {
-  'Content-Type': 'text/event-stream',
-  'Cache-Control': 'no-cache, no-transform',
-  Connection: 'keep-alive',
-  'X-Accel-Buffering': 'no',
-};
-
-export const MINDOS_AGENT_TURN_SSE_HEARTBEAT_MS = 15_000;
-export const MINDOS_AGENT_TURN_SSE_HEARTBEAT_EVENT: MindOSSSEvent = {
-  type: 'status',
-  visible: false,
-  message: 'keep-alive',
-};
-
-export function isHiddenMindosSseStatusEvent(event: MindOSSSEvent): boolean {
-  return event.type === 'status' && event.visible === false;
-}
-
-export function startMindosAgentTurnSseHeartbeat(
-  write: (event: MindOSSSEvent) => void,
-  options: { intervalMs?: number; onError?: (error: unknown) => void } = {},
-): () => void {
-  const requestedIntervalMs = options.intervalMs;
-  const hasCustomInterval = typeof requestedIntervalMs === 'number'
-    && Number.isFinite(requestedIntervalMs)
-    && requestedIntervalMs > 0;
-  const intervalMs = hasCustomInterval ? requestedIntervalMs : MINDOS_AGENT_TURN_SSE_HEARTBEAT_MS;
-  let stopped = false;
-  const timer = setInterval(() => {
-    if (stopped) return;
-    try {
-      write(MINDOS_AGENT_TURN_SSE_HEARTBEAT_EVENT);
-    } catch (error) {
-      stop();
-      options.onError?.(error);
-    }
-  }, intervalMs);
-
-  function stop() {
-    if (stopped) return;
-    stopped = true;
-    clearInterval(timer);
-  }
-
-  return stop;
-}
-
-export type MessageUpdateEvent = {
-  type: 'message_update';
-  assistantMessageEvent?: { type: string; delta?: string };
-};
-
-export type ToolExecStartEvent = {
-  type: 'tool_execution_start';
-  toolCallId: string;
-  toolName: string;
-  args: unknown;
-};
-
-export type ToolExecEndEvent = {
-  type: 'tool_execution_end';
-  toolCallId: string;
-  result?: { content?: Array<{ type: string; text?: string }> };
-  isError?: boolean;
-};
-
-export type TurnEndEvent = {
-  type: 'turn_end';
-  toolResults?: Array<{ toolName: string; content: unknown }>;
-  usage?: { inputTokens: number; outputTokens?: number };
-};
-
-export type AgentEndEvent = {
-  type: 'agent_end';
-  messages?: Array<{
-    role: string;
-    content?: Array<{ type: string; text?: string }>;
-    stopReason?: string;
-    errorMessage?: string;
-  }>;
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object';
-}
-
-function nestedRecord(value: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
-  const child = value[key];
-  return isRecord(child) ? child : undefined;
-}
-
-export function isTextDeltaEvent(event: unknown): event is MessageUpdateEvent {
-  if (!isRecord(event) || event.type !== 'message_update') return false;
-  return nestedRecord(event, 'assistantMessageEvent')?.type === 'text_delta';
-}
-
-export function getTextDelta(event: unknown): string {
-  if (!isRecord(event)) return '';
-  const assistantEvent = nestedRecord(event, 'assistantMessageEvent');
-  return typeof assistantEvent?.delta === 'string' ? assistantEvent.delta : '';
-}
-
-export function isThinkingDeltaEvent(event: unknown): event is MessageUpdateEvent {
-  if (!isRecord(event) || event.type !== 'message_update') return false;
-  return nestedRecord(event, 'assistantMessageEvent')?.type === 'thinking_delta';
-}
-
-export function getThinkingDelta(event: unknown): string {
-  return getTextDelta(event);
-}
-
-export function isToolExecutionStartEvent(event: unknown): event is ToolExecStartEvent {
-  return isRecord(event) && event.type === 'tool_execution_start';
-}
-
-export function getToolExecutionStart(event: unknown): { toolCallId: string; toolName: string; args: unknown } {
-  if (!isRecord(event)) return { toolCallId: '', toolName: 'unknown', args: {} };
-  return {
-    toolCallId: typeof event.toolCallId === 'string' ? event.toolCallId : '',
-    toolName: typeof event.toolName === 'string' ? event.toolName : 'unknown',
-    args: event.args ?? {},
-  };
-}
-
-export function isToolExecutionEndEvent(event: unknown): event is ToolExecEndEvent {
-  return isRecord(event) && event.type === 'tool_execution_end';
-}
-
-export function getToolExecutionEnd(event: unknown): { toolCallId: string; output: string; isError: boolean } {
-  if (!isRecord(event)) return { toolCallId: '', output: '', isError: false };
-  const result = nestedRecord(event, 'result');
-  const content = Array.isArray(result?.content) ? result.content : [];
-  const output = content
-    .filter((part): part is { type: string; text?: string } => isRecord(part) && part.type === 'text')
-    .map((part) => part.text ?? '')
-    .join('');
-
-  return {
-    toolCallId: typeof event.toolCallId === 'string' ? event.toolCallId : '',
-    output,
-    isError: event.isError === true,
-  };
-}
-
-export function isTurnEndEvent(event: unknown): event is TurnEndEvent {
-  return isRecord(event) && event.type === 'turn_end';
-}
-
-export function getTurnEndData(event: unknown): { toolResults: Array<{ toolName: string; content: unknown }> } {
-  if (!isRecord(event)) return { toolResults: [] };
-  return {
-    toolResults: Array.isArray(event.toolResults)
-      ? event.toolResults.filter((item): item is { toolName: string; content: unknown } => isRecord(item) && typeof item.toolName === 'string')
-      : [],
-  };
-}
+export * from './ui-events.js';
+import {
+  isRecord, isTextDeltaEvent, getTextDelta, isThinkingDeltaEvent, getThinkingDelta,
+  isToolExecutionStartEvent, getToolExecutionStart, isToolExecutionEndEvent,
+  getToolExecutionEnd, isTurnEndEvent, getTurnEndData,
+} from './ui-events.js';
 
 export type MindosAgentEventReducerOptions = {
   stepLimit: number;
@@ -365,11 +144,9 @@ export function createMindosAgentEventReducer(options: MindosAgentEventReducerOp
   const stepHistory: MindosAgentStepEntry[] = [];
   let stepCount = 0;
   let loopCooldown = 0;
-  let finalAnswerSteered = false;
   let lastModelError = '';
   const loopWarningMessage = options.loopWarningMessage
     ?? '[SYSTEM WARNING] You appear to be in a loop — repeating the same tool calls in a cycle. Try a completely different approach or ask the user for clarification.';
-  const finalAnswerWarningMessage = '[SYSTEM WARNING] You have reached the tool step budget. Stop using tools and provide a concise final answer from the evidence already gathered.';
 
   return {
     get lastModelError() {
@@ -430,12 +207,7 @@ export function createMindosAgentEventReducer(options: MindosAgentEventReducerOp
           effect.steerMessage = loopWarningMessage;
         }
 
-        if (stepCount >= options.stepLimit) {
-          if (toolResults.length > 0 && !finalAnswerSteered && !effect.steerMessage) {
-            finalAnswerSteered = true;
-            effect.steerMessage = finalAnswerWarningMessage;
-            return effect;
-          }
+        if (stepCount >= options.stepLimit && toolResults.length > 0) {
           effect.shouldAbort = true;
         }
 
@@ -462,24 +234,8 @@ export function createMindosAgentEventReducer(options: MindosAgentEventReducerOp
   };
 }
 
-export function encodeMindosSseEvent(event: MindOSSSEvent): string {
-  return `data:${JSON.stringify(event)}\n\n`;
-}
 
-export function parseMindosSseLine(line: string): MindOSSSEvent | null {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith('data:')) return null;
-  const json = trimmed.slice(5).trim();
-  if (!json || json === '[DONE]') return null;
-  try {
-    const parsed = JSON.parse(json) as unknown;
-    if (!isRecord(parsed) || typeof parsed.type !== 'string') return null;
-    if (!(MINDOS_AGENT_TURN_STREAM_EVENT_TYPES as readonly string[]).includes(parsed.type)) return null;
-    return parsed as MindOSSSEvent;
-  } catch {
-    return null;
-  }
-}
+export { parseMindosSseLine } from './ui-events.js';
 
 export type MindosAgentFileValidationResult = {
   valid: boolean;
@@ -488,7 +244,8 @@ export type MindosAgentFileValidationResult = {
 };
 
 export const MINDOS_AGENT_DEFAULT_MAX_STEPS = 100;
-export const MINDOS_AGENT_ATTACHMENT_MAX_CHARS = 20_000;
+export { MINDOS_AGENT_ATTACHMENT_MAX_CHARS } from './attachment-limits.js';
+import { MINDOS_AGENT_ATTACHMENT_MAX_CHARS } from './attachment-limits.js';
 
 export type MindosAgentFileContextIssueCode =
   | 'content_too_large'
@@ -535,12 +292,6 @@ export function normalizeMindosAgentStepLimit(options: {
     ? options.requestedMaxSteps
     : defaultMaxSteps;
   return Math.min(999, Math.max(1, Number(raw)));
-}
-
-export function resolveMindosAgentTimeoutMs(raw: string | undefined = undefined, defaultMs = 600_000): number {
-  if (!raw) return defaultMs;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultMs;
 }
 
 export function expandMindosAgentAttachedFiles(
@@ -766,441 +517,6 @@ export type MindosAgentStepEntry = {
   input: string;
 };
 
-export function isMindosTransientError(err: Error): boolean {
-  const msg = err.message.toLowerCase();
-  if (msg.includes('timeout') || msg.includes('timed out') || msg.includes('etimedout')) return true;
-  if (msg.includes('429') || msg.includes('rate limit') || msg.includes('too many requests')) return true;
-  if (/\b5\d{2}\b/.test(msg) || msg.includes('internal server error') || msg.includes('service unavailable')) return true;
-  if (msg.includes('econnreset') || msg.includes('econnrefused') || msg.includes('socket hang up')) return true;
-  if (msg.includes('overloaded') || msg.includes('capacity')) return true;
-  return false;
-}
-
-const MINDOS_NON_RETRYABLE_STATUS = new Set([401, 403, 429]);
-const MINDOS_NON_RETRYABLE_PATTERNS = [
-  /api.?key/i,
-  /model.*not.?found/i,
-  /authentication/i,
-  /unauthorized/i,
-  /forbidden/i,
-];
-
-export function isMindosRetryableError(err: unknown, httpStatus?: number): boolean {
-  if (err instanceof DOMException && err.name === 'AbortError') return false;
-  if (httpStatus && MINDOS_NON_RETRYABLE_STATUS.has(httpStatus)) return false;
-
-  if (err instanceof Error) {
-    const msg = err.message;
-    if (MINDOS_NON_RETRYABLE_PATTERNS.some((pattern) => pattern.test(msg))) return false;
-  }
-
-  return true;
-}
-
-export function mindosRetryDelay(attempt: number): number {
-  return Math.min(1000 * 2 ** attempt, 10_000);
-}
-
-export function sleepMindos(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolveSleep, reject) => {
-    const abortReason = () => signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError');
-    if (signal?.aborted) {
-      reject(abortReason());
-      return;
-    }
-    const timer = setTimeout(resolveSleep, ms);
-    signal?.addEventListener('abort', () => {
-      clearTimeout(timer);
-      reject(abortReason());
-    }, { once: true });
-  });
-}
-
-export type MindosAgentTurnRetryOptions = {
-  maxRetries?: number;
-  signal?: AbortSignal;
-  hasContent(): boolean;
-  onVisibleContent?(): void;
-  send(event: MindOSSSEvent): void;
-  execute(attempt: number): Promise<void>;
-  onAttemptError?(error: Error, attempt: number): Promise<void> | void;
-  isTransientError?: (error: Error) => boolean;
-  retryDelay?: (attempt: number) => number;
-  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
-  retryMessage?: (attempt: number, maxRetries: number) => string;
-};
-
-export async function runMindosAgentTurnWithRetry(options: MindosAgentTurnRetryOptions): Promise<Error | null> {
-  const maxRetries = options.maxRetries ?? 3;
-  const isTransient = options.isTransientError ?? isMindosTransientError;
-  const delayForAttempt = options.retryDelay ?? mindosRetryDelay;
-  const wait = options.sleep ?? sleepMindos;
-  const retryMessage = options.retryMessage ?? ((attempt, max) => `Request failed, retrying (${attempt}/${max})...`);
-  let lastError: Error | null = null;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
-    try {
-      await options.execute(attempt);
-      return null;
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      await options.onAttemptError?.(lastError, attempt);
-
-      const canRetry = !options.hasContent() && attempt < maxRetries && isTransient(lastError);
-      if (!canRetry) break;
-
-      options.send({ type: 'status', message: retryMessage(attempt, maxRetries) });
-      await wait(delayForAttempt(attempt), options.signal);
-    }
-  }
-
-  return lastError;
-}
-
-export type MindosAcpSessionUpdate = {
-  type: string;
-  text?: string;
-  error?: string;
-  permission?: {
-    requestId: string;
-    sessionId: string;
-    toolCallId: string;
-    toolName: string;
-    status: 'pending' | 'resolved';
-    options: Array<{ id: string; label: string; kind: string }>;
-    selectedOptionId?: string;
-    outcome?: string;
-  };
-  toolCall?: {
-    toolCallId: string;
-    title?: string;
-    kind?: string;
-    rawInput?: string;
-    rawOutput?: string;
-    status?: string;
-  };
-  plan?: {
-    entries?: Array<{ status?: string; content?: string }>;
-  };
-};
-
-export type MindosAcpUpdateMappingOptions = {
-  suppressErrors?: boolean;
-  permissionRunId?: string;
-};
-
-export function mapMindosAcpUpdateToSseEvents(
-  update: MindosAcpSessionUpdate,
-  options: MindosAcpUpdateMappingOptions = {},
-): { events: MindOSSSEvent[]; hasVisibleContent: boolean } {
-  switch (update.type) {
-    case 'agent_message_chunk':
-    case 'text':
-      if (!update.text) return { events: [], hasVisibleContent: false };
-      return { events: [{ type: 'text_delta', delta: update.text }], hasVisibleContent: true };
-
-    case 'agent_thought_chunk':
-      if (!update.text) return { events: [], hasVisibleContent: false };
-      return { events: [{ type: 'thinking_delta', delta: update.text }], hasVisibleContent: true };
-
-    case 'tool_call':
-      if (!update.toolCall) return { events: [], hasVisibleContent: false };
-      return {
-        events: [{
-          type: 'tool_start',
-          toolCallId: update.toolCall.toolCallId,
-          toolName: update.toolCall.title ?? update.toolCall.kind ?? 'tool',
-          runtime: 'acp',
-          args: sanitizeToolArgs(
-            update.toolCall.title ?? update.toolCall.kind ?? 'tool',
-            safeParseMindosJsonObject(update.toolCall.rawInput),
-          ),
-        }],
-        hasVisibleContent: true,
-      };
-
-    case 'tool_call_update':
-      if (!update.toolCall || (update.toolCall.status !== 'completed' && update.toolCall.status !== 'failed')) {
-        return { events: [], hasVisibleContent: false };
-      }
-      return {
-        events: [{
-          type: 'tool_end',
-          toolCallId: update.toolCall.toolCallId,
-          output: sanitizeToolOutput(update.toolCall.rawOutput ?? ''),
-          isError: update.toolCall.status === 'failed',
-          runtime: 'acp',
-        }],
-        hasVisibleContent: false,
-      };
-
-    case 'permission_request':
-      if (!update.permission) return { events: [], hasVisibleContent: false };
-      return {
-        events: [{
-          type: 'runtime_permission_request',
-          runId: options.permissionRunId ?? update.permission.sessionId,
-          requestId: update.permission.requestId,
-          runtime: 'acp',
-          toolCallId: update.permission.toolCallId,
-          toolName: update.permission.toolName,
-          input: {},
-          options: update.permission.options.map((option) => ({
-            id: option.id,
-            label: option.label,
-            intent: option.kind.startsWith('reject') ? 'deny' : 'allow',
-            scope: option.kind.endsWith('_always') ? 'session' : 'once',
-          })),
-          reason: 'ACP adapter requested permission for a tool call.',
-        }],
-        hasVisibleContent: false,
-      };
-
-    case 'permission_resolved':
-      if (!update.permission) return { events: [], hasVisibleContent: false };
-      return {
-        events: [{
-          type: 'runtime_permission_resolved',
-          runId: options.permissionRunId ?? update.permission.sessionId,
-          requestId: update.permission.requestId,
-          runtime: 'acp',
-          toolCallId: update.permission.toolCallId,
-          decision: update.permission.selectedOptionId ?? update.permission.outcome ?? 'unknown',
-          cancelled: update.permission.outcome === 'cancelled',
-          decisionIntent: update.permission.outcome?.startsWith('reject') ? 'deny' : update.permission.outcome === 'cancelled' ? 'cancel' : 'allow',
-          decisionScope: update.permission.outcome?.endsWith('_always') ? 'session' : 'once',
-        }],
-        hasVisibleContent: false,
-      };
-
-    case 'plan':
-      if (!update.plan?.entries) return { events: [], hasVisibleContent: false };
-      return {
-        events: [{
-          type: 'text_delta',
-          delta: `\n\n${update.plan.entries.map((entry) => `${planEntryIcon(entry.status)} ${entry.content ?? ''}`).join('\n')}\n\n`,
-        }],
-        hasVisibleContent: true,
-      };
-
-    case 'error':
-      if (options.suppressErrors) return { events: [], hasVisibleContent: false };
-      return { events: [{ type: 'error', message: update.error ?? 'ACP agent error' }], hasVisibleContent: false };
-
-    default:
-      return { events: [], hasVisibleContent: false };
-  }
-}
-
-function planEntryIcon(status: string | undefined): string {
-  if (status === 'completed') return '\u2705';
-  if (status === 'in_progress') return '\u26a1';
-  return '\u23f3';
-}
-
-export type MindosAcpAgentTurnSession = {
-  id: string;
-  agentSessionId?: string;
-  agentCapabilities?: { loadSession?: boolean };
-};
-
-export type MindosAcpAgentTurnSessionOptions = {
-  cwd: string;
-  permissionMode?: 'readonly' | 'ask' | 'auto' | 'full';
-};
-
-export type MindosAcpAgentTurnCloseOptions = {
-  closeAgentSession?: boolean;
-};
-
-export type MindosAcpAgentTurnServices = {
-  createSession(agentId: string, options: MindosAcpAgentTurnSessionOptions): Promise<MindosAcpAgentTurnSession>;
-  loadSession?(
-    agentId: string,
-    existingSessionId: string,
-    options: MindosAcpAgentTurnSessionOptions,
-  ): Promise<MindosAcpAgentTurnSession>;
-  promptStream(
-    sessionId: string,
-    prompt: string,
-    onUpdate: (update: MindosAcpSessionUpdate) => void,
-    signal?: AbortSignal,
-  ): Promise<void>;
-  cancelPrompt?(sessionId: string): Promise<void>;
-  closeSession(sessionId: string, options?: MindosAcpAgentTurnCloseOptions): Promise<void>;
-};
-
-export type MindosAcpAgentTurnOptions = MindosAcpAgentTurnServices & {
-  agentId: string;
-  cwd: string;
-  prompt: string;
-  maxRetries?: number;
-  timeoutMs?: number;
-  signal?: AbortSignal;
-  hasContent(): boolean;
-  onVisibleContent?(): void;
-  send(event: MindOSSSEvent): void;
-  permissionRunId?: string;
-  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
-  retryDelay?: (attempt: number) => number;
-  timeoutMessage?: (timeoutMs: number) => string;
-  errorMessage?: (error: Error) => string;
-  externalSessionId?: string;
-  onSessionReady?(
-    session: MindosAcpAgentTurnSession,
-    details: { resumed: boolean; externalSessionId?: string },
-  ): void | Promise<void>;
-};
-
-export type MindosAcpAgentTurnResult = {
-  error?: Error;
-};
-
-export async function runMindosAcpAgentTurn(options: MindosAcpAgentTurnOptions): Promise<MindosAcpAgentTurnResult> {
-  let sessionId: string | undefined;
-  let closeAgentSessionOnCleanup = true;
-
-  const closeCurrentSession = async () => {
-    if (!sessionId) return;
-    const id = sessionId;
-    const closeAgentSession = closeAgentSessionOnCleanup;
-    sessionId = undefined;
-    closeAgentSessionOnCleanup = true;
-    await options.closeSession(id, { closeAgentSession }).catch(() => {});
-  };
-
-  try {
-    const timeoutMs = options.timeoutMs ?? resolveMindosAgentTimeoutMs();
-    const lastError = await runMindosAgentTurnWithRetry({
-      maxRetries: options.maxRetries,
-      signal: options.signal,
-      hasContent: options.hasContent,
-      send: options.send,
-      sleep: options.sleep,
-      retryDelay: options.retryDelay,
-      onAttemptError: closeCurrentSession,
-      execute: async () => {
-        await closeCurrentSession();
-        const sessionOpen = await openAcpTurnSession(options);
-        const session = sessionOpen.session;
-        sessionId = session.id;
-        closeAgentSessionOnCleanup = true;
-        const externalSessionId = resumableAcpSessionId(
-          session,
-          sessionOpen.resumed ? options.externalSessionId : undefined,
-        );
-        closeAgentSessionOnCleanup = !externalSessionId;
-        await options.onSessionReady?.(session, {
-          resumed: sessionOpen.resumed,
-          ...(externalSessionId ? { externalSessionId } : {}),
-        });
-        if (externalSessionId) {
-          options.send({
-            type: 'runtime_binding',
-            runtime: 'acp',
-            externalSessionId,
-            cwd: options.cwd,
-            status: 'active',
-          });
-        }
-        let removeAbortListener: (() => void) | undefined;
-        const abortPrompt = new Promise<never>((_resolve, reject) => {
-          if (!options.signal) return;
-          const abortReason = () => options.signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError');
-          if (options.signal.aborted) {
-            void options.cancelPrompt?.(session.id).catch(() => {});
-            reject(abortReason());
-            return;
-          }
-          const onAbort = () => {
-            void options.cancelPrompt?.(session.id).catch(() => {});
-            reject(abortReason());
-          };
-          options.signal.addEventListener('abort', onAbort, { once: true });
-          removeAbortListener = () => options.signal?.removeEventListener('abort', onAbort);
-        });
-        await runMindosWithTimeout(
-          Promise.race([
-            options.promptStream(sessionId, options.prompt, (update) => {
-              const mapped = mapMindosAcpUpdateToSseEvents(update, {
-                suppressErrors: options.hasContent(),
-                permissionRunId: options.permissionRunId,
-              });
-              if (mapped.hasVisibleContent) options.onVisibleContent?.();
-              for (const event of mapped.events) options.send(event);
-            }, options.signal),
-            abortPrompt,
-          ]).finally(() => removeAbortListener?.()),
-          timeoutMs,
-          options.timeoutMessage?.(timeoutMs) ?? `ACP agent execution timeout after ${timeoutMs / 1000} seconds`,
-        );
-      },
-    });
-
-    if (lastError) {
-      options.send({ type: 'error', message: options.errorMessage?.(lastError) ?? `ACP Agent Error: ${lastError.message}` });
-      return { error: lastError };
-    }
-
-    options.send({ type: 'done' });
-    return {};
-  } finally {
-    await closeCurrentSession();
-  }
-}
-
-async function openAcpTurnSession(
-  options: MindosAcpAgentTurnOptions,
-): Promise<{ session: MindosAcpAgentTurnSession; resumed: boolean }> {
-  const externalSessionId = options.externalSessionId?.trim();
-  if (externalSessionId && options.loadSession) {
-    try {
-      return {
-        session: await options.loadSession(options.agentId, externalSessionId, { cwd: options.cwd }),
-        resumed: true,
-      };
-    } catch {
-      options.send({
-        type: 'status',
-        runtime: 'acp',
-        visible: true,
-        message: 'Could not resume the previous ACP session, so MindOS started a fresh ACP session.',
-      });
-    }
-  }
-
-  return {
-    session: await options.createSession(options.agentId, { cwd: options.cwd }),
-    resumed: false,
-  };
-}
-
-function resumableAcpSessionId(
-  session: MindosAcpAgentTurnSession,
-  fallbackExternalSessionId?: string,
-): string | undefined {
-  const externalSessionId = session.agentSessionId?.trim() || fallbackExternalSessionId?.trim();
-  if (!externalSessionId) return undefined;
-  return session.agentCapabilities?.loadSession ? externalSessionId : undefined;
-}
-
-export async function runMindosWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      const error = new Error(message) as Error & { code?: string };
-      error.code = 'TIMEOUT';
-      reject(error);
-    }, timeoutMs);
-  });
-
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
 export function detectMindosAgentLoop(history: MindosAgentStepEntry[], threshold = 3): boolean {
   if (history.length < threshold) return false;
 
@@ -1231,166 +547,27 @@ export function detectMindosAgentLoop(history: MindosAgentStepEntry[], threshold
   return false;
 }
 
-export type MindosUiImagePart = {
-  type: 'image';
-  data?: string;
-  mimeType?: string;
-};
+// UI message types + the UI-message → model-history conversion live in a
+// sibling module; re-exported explicitly so the barrel surface is unchanged.
+export { toMindosAgentMessages } from './ui-messages.js';
+export type {
+  MindosAgentHistoryMessage,
+  MindosUiAgentMessage,
+  MindosUiImagePart,
+  MindosUiMessagePart,
+  MindosUiReasoningPart,
+  MindosUiRuntimeStatusPart,
+  MindosUiTextPart,
+  MindosUiToolCallPart,
+} from './ui-messages.js';
 
-export type MindosUiTextPart = {
-  type: 'text';
-  text?: string;
-};
-
-export type MindosUiReasoningPart = {
-  type: 'reasoning';
-  text?: string;
-};
-
-export type MindosUiToolCallPart = {
-  type: 'tool-call';
-  toolCallId: string;
-  toolName: string;
-  input?: unknown;
-  output?: string;
-  state?: 'pending' | 'running' | 'done' | 'error';
-};
-
-export type MindosUiRuntimeStatusPart = {
-  type: 'runtime-status';
-  message: string;
-  runtime?: 'mindos' | 'acp' | 'codex' | 'claude';
-};
-
-export type MindosUiMessagePart =
-  | MindosUiImagePart
-  | MindosUiTextPart
-  | MindosUiReasoningPart
-  | MindosUiToolCallPart
-  | MindosUiRuntimeStatusPart;
-
-export type MindosUiAgentMessage = {
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp?: number;
-  skillName?: string;
-  parts?: MindosUiMessagePart[];
-  images?: MindosUiImagePart[];
-};
-
-export type MindosAgentHistoryMessage = Record<string, unknown>;
-
-export function toMindosAgentMessages(messages: MindosUiAgentMessage[]): MindosAgentHistoryMessage[] {
-  const result: MindosAgentHistoryMessage[] = [];
-
-  for (const msg of messages) {
-    const timestamp = msg.timestamp ?? Date.now();
-
-    if (msg.role === 'user') {
-      result.push({
-        role: 'user',
-        content: buildMindosUserContent(msg.content, msg.images),
-        timestamp,
-      });
-      continue;
-    }
-
-    if (msg.content.startsWith('__error__')) continue;
-
-    if (!msg.parts || msg.parts.length === 0) {
-      if (msg.content) {
-        result.push(createMindosAssistantHistoryMessage({
-          content: [{ type: 'text', text: msg.content }],
-          stopReason: 'stop',
-          timestamp,
-        }));
-      }
-      continue;
-    }
-
-    const assistantContent: Array<Record<string, unknown>> = [];
-    const toolCalls: MindosUiToolCallPart[] = [];
-
-    for (const part of msg.parts) {
-      if (part.type === 'text') {
-        if (part.text) assistantContent.push({ type: 'text', text: part.text });
-      } else if (part.type === 'tool-call') {
-        assistantContent.push({
-          type: 'toolCall',
-          id: part.toolCallId,
-          name: part.toolName,
-          arguments: part.input ?? {},
-        });
-        toolCalls.push(part);
-      } else if (part.type === 'runtime-status') {
-        // UI-only runtime diagnostics should not become model conversation history.
-      }
-    }
-
-    if (assistantContent.length > 0) {
-      result.push(createMindosAssistantHistoryMessage({
-        content: assistantContent,
-        stopReason: toolCalls.length > 0 ? 'toolUse' : 'stop',
-        timestamp,
-      }));
-    }
-
-    for (const toolCall of toolCalls) {
-      result.push({
-        role: 'toolResult',
-        toolCallId: toolCall.toolCallId,
-        toolName: toolCall.toolName,
-        content: [{ type: 'text', text: toolCall.output ?? '' }],
-        isError: toolCall.state === 'error',
-        timestamp,
-      });
-    }
-  }
-
-  return result;
-}
-
-function buildMindosUserContent(text: string, images?: MindosUiImagePart[]): string | Array<Record<string, unknown>> {
-  const validImages = images?.filter((image) => image.data);
-  if (!validImages || validImages.length === 0) return text;
-
-  const parts: Array<Record<string, unknown>> = validImages.map((image) => ({
-    type: 'image',
-    data: image.data,
-    mimeType: image.mimeType,
-  }));
-  if (text) parts.push({ type: 'text', text });
-  return parts;
-}
-
-function createMindosAssistantHistoryMessage(input: {
-  content: Array<Record<string, unknown>>;
-  stopReason: 'stop' | 'toolUse';
-  timestamp: number;
-}): MindosAgentHistoryMessage {
-  return {
-    role: 'assistant',
-    content: input.content,
-    api: 'anthropic-messages',
-    provider: 'anthropic',
-    model: '',
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: input.stopReason,
-    timestamp: input.timestamp,
-  };
-}
-
+export { detectMindosAgentLoop as detectLoop };
 export {
-  detectMindosAgentLoop as detectLoop,
   isMindosRetryableError as isRetryableError,
   isMindosTransientError as isTransientError,
   mindosRetryDelay as retryDelay,
   sleepMindos as sleep,
-};
+} from './retry.js';
+
+export { executeAgentTurn, executeMindosPiRuntimeTurn } from './execute.js';
+export type { AgentTurnResult } from './execute.js';

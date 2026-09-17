@@ -4,6 +4,21 @@ export * as core from './foundation/core/index.js';
 export type { AsyncResult, DeepPartial, DeepReadonly, JsonValue, Optional, Result } from './foundation/shared/index.js';
 export { err, generateUUID, ok } from './foundation/shared/index.js';
 export {
+  createGlobMatcher,
+  expandHome,
+  expandWindowsEnvVars,
+  isGlobPattern,
+  parseJsonc,
+  parseJsoncDocument,
+  removeJsoncValue,
+  setJsoncValue,
+  stripBom,
+  toPosixPath,
+  type GlobMatcher,
+  type GlobMatcherOptions,
+  type JsoncDocument,
+} from './foundation/shared/index.js';
+export {
   AppError,
   ConflictError,
   ForbiddenError,
@@ -25,4 +40,5 @@ export * from './foundation/config/index.js';
 export * from './foundation/logger/index.js';
 export * from './foundation/mind-root/index.js';
 export * from './foundation/permissions/index.js';
+export * from './foundation/plugins/index.js';
 export * from './foundation/security/index.js';

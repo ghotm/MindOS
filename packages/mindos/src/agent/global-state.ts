@@ -37,10 +37,10 @@ export function deleteProcessGlobal(key: symbol): void {
 export const AGENT_FILE_WRITE_LOCKS_KEY = Symbol.for('mindos.agentFileWriteLocks');
 
 /**
- * In-memory run ledger store (run-ledger.ts). The ledger is hydrated from
- * disk once per process; a forked store would double-hydrate and the two
- * copies would diverge as runs progress (UI reads one, runtime writes the
- * other).
+ * Per-process run ledger state (run-ledger.ts): the open sqlite handle for
+ * the current mind root plus amortized prune counters. A forked copy would
+ * open a second handle and prune on its own schedule; sharing keeps one
+ * handle per process.
  */
 export const AGENT_RUN_LEDGER_STORE_KEY = Symbol.for('mindos.agentRunLedger');
 
@@ -52,28 +52,22 @@ export const AGENT_RUN_LEDGER_STORE_KEY = Symbol.for('mindos.agentRunLedger');
 export const AGENT_RUN_LEDGER_SUBSCRIBERS_KEY = Symbol.for('mindos.agentRunLedger.subscribers');
 
 /**
- * Per-process ledger shard identity (run-ledger.ts). Every module copy must
- * agree on the one `agent-run-ledger.<pid>-<startTs>.jsonl` file this
- * process owns; two copies computing their own start timestamp would write
- * two shards for one process and break the single-writer-per-shard
- * invariant.
+ * Per-process ledger owner identity (run-ledger.ts): `{ pid, startTs }`
+ * stamped on every run row this process writes, and used at read time to
+ * decide whether a non-terminal run's owner is still alive. Every module copy
+ * must agree on one start timestamp, or a process would look like two
+ * writers (and a recycled pid could not be told apart from itself).
  */
 export const AGENT_RUN_LEDGER_SHARD_KEY = Symbol.for('mindos.agentRunLedger.shard');
 
 /**
- * In-memory artifact pointer ledger store (artifact-ledger.ts). Runtime
- * archives, generated files, diffs, branches, PRs, and preview artifacts are
- * represented as pointer records only; sharing the store prevents the UI and
- * runtime module graphs from seeing different artifact indexes.
+ * Per-process artifact ledger bookkeeping (artifact-ledger.ts): which
+ * database handles already had their legacy JSONL shards imported, plus the
+ * amortized prune counter. The rows themselves live in the shared run ledger
+ * database (spec-ledger-write-cost P2); sharing the bookkeeping keeps every
+ * module copy from re-importing the same shards.
  */
 export const AGENT_ARTIFACT_LEDGER_STORE_KEY = Symbol.for('mindos.agentArtifactLedger');
-
-/**
- * Per-process artifact ledger shard identity (artifact-ledger.ts). Mirrors
- * the run ledger's single-writer shard model so every module copy in one
- * process appends to the same `agent-artifact-ledger.<pid>-<startTs>.jsonl`.
- */
-export const AGENT_ARTIFACT_LEDGER_SHARD_KEY = Symbol.for('mindos.agentArtifactLedger.shard');
 
 /**
  * Request-scoped AgentRunContext by pi runtime resource
@@ -106,6 +100,25 @@ export const RUNTIME_PERMISSION_BRIDGE_KEY = Symbol.for('mindos.runtimePermissio
  * separate route.
  */
 export const ASK_USER_QUESTION_BRIDGE_KEY = Symbol.for('mindos.askUserQuestionBridge');
+
+/**
+ * Cross-process pending prompt store state (pending-prompt-store.ts): the open
+ * sqlite handle, the amortized prune counter, the change-listener set and the
+ * decision tail timer. Bridges exist in several module copies inside Next
+ * (server bundle vs node_modules); a forked listener set would make
+ * `run.pending-actions.changed` fire for only some copies, and a forked tail
+ * timer would drain each decision more than once.
+ */
+export const AGENT_PENDING_PROMPTS_KEY = Symbol.for('mindos.agentPendingPrompts');
+
+/**
+ * Turn-deadline registry by bridge run id (turn/turn-deadline.ts). The lane
+ * caller pauses the turn clock while permission / question bridge requests
+ * are pending; out-of-band resolvers (the Claude MCP shim's HTTP route) run
+ * outside the lane's AsyncLocalStorage, so bridges and the lane caller meet
+ * through this realm-wide map instead.
+ */
+export const AGENT_TURN_DEADLINE_REGISTRY_KEY = Symbol.for('mindos.agentTurnDeadlineRegistry');
 
 /**
  * Request-scoped KB permission policy storage (kb-extension.ts). The pi
@@ -145,6 +158,16 @@ export const KB_EXTENSION_HOST_KEY = Symbol.for('mindos.kbExtensionHost');
  * predates the consolidation — keep it stable.
  */
 export const SUBAGENT_EARLY_ASYNC_COMPLETIONS_KEY = Symbol.for('mindos.subagentEarlyAsyncCompletions');
+
+/**
+ * asyncId → ledger run id for detached subagent runs
+ * (subagent-ledger-extension.ts), registered when the tool wrapper marks a
+ * run streaming so the upstream async-complete event finalizes it by primary
+ * key instead of listing the newest 500 runs (spec-ledger-write-cost P3).
+ * Shared because the event listener may live in a different module copy
+ * than the wrapper that registered the run.
+ */
+export const SUBAGENT_ASYNC_RUN_IDS_KEY = Symbol.for('mindos.subagentAsyncRunIds');
 
 /**
  * Unsubscribe handle for the subagent async-complete event listener

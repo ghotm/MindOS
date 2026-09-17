@@ -51,7 +51,7 @@ import {
   resolveSessionContext,
   SessionContextResolutionError,
 } from '@/lib/session-context-server';
-import { omitEnvKeys } from './turn-sse';
+import { omitEnvKeys, prependMindosSseStatusEvent } from './turn-sse';
 import {
   getLastUserContent,
   getLastUserImages,
@@ -96,6 +96,7 @@ import {
   sessionContextRunMetadata,
   shouldInjectFileContext,
   shouldInjectSessionContext,
+  type ContextSignatureTarget,
 } from './turn-context';
 import { capsuleRuntimeBinding, type AgentTurnCapsuleSeed } from './turn-capsule';
 
@@ -116,9 +117,6 @@ function permissionModeForRequest(
 // → @/lib/agent/skill-resolver
 
 // toPiCustomToolDefinitions adapter removed — KB tools now registered via kb-extension.ts
-
-// reassembleSSE, piMessagesToOpenAI, runNonStreamingFallback
-// → @/lib/agent/non-streaming
 
 // ---------------------------------------------------------------------------
 // POST /api/agent/sessions/:sessionId/turns
@@ -199,11 +197,13 @@ export async function handleAgentSessionTurnRouteRequest(
     ? { ok: true as const, body: agentRunCapsuleRecoveryPlanToTurnBody(recoveryPlan, sessionId) }
     : normalizeAgentSessionTurnBody(rawBody, sessionId);
   if (!body.ok) return apiError(ErrorCodes.INVALID_REQUEST, body.message, 400);
+  const effortNotice = 'effortNotice' in body ? body.effortNotice : undefined;
 
   return runAgentTurnRequestBody(body.body, {
     headers: req.headers,
     signal: req.signal,
     request: req,
+    ...(effortNotice ? { effortNotice } : {}),
     ...(recoveryPlan ? {
       capsuleRecovery: {
         planId: recoveryPlan.id,
@@ -314,6 +314,14 @@ export async function runAgentTurnRequestBody(
     && body.runtimeBinding.externalSessionId.trim()
     ? body.runtimeBinding.externalSessionId.trim()
     : undefined;
+  // Context omission is keyed on the runtime session this turn will resume:
+  // native/ACP lanes through the request binding, the embedded Pi lane
+  // through the chat session (its runtime session is resumed server-side).
+  const contextSignatureTarget: ContextSignatureTarget = {
+    runtimeId: selectedNativeRuntime?.id ?? selectedAcpAgent?.id ?? 'mindos',
+    ...(requestExternalSessionId ? { externalSessionId: requestExternalSessionId } : {}),
+    ...(!selectedNativeRuntime && !selectedAcpAgent ? { resumesChatSession: true } : {}),
+  };
   let sessionContext: ReturnType<typeof resolveSessionContext>;
   try {
     sessionContext = resolveSessionContext({
@@ -343,6 +351,7 @@ export async function runAgentTurnRequestBody(
     chatSessionId,
     signature: sessionContextSignature,
     priorRuns: recentSessionRuns,
+    target: contextSignatureTarget,
   });
 
   // Diagnostic: log attached files so silent failures are visible
@@ -383,6 +392,12 @@ export async function runAgentTurnRequestBody(
     verifiedNativeRuntime,
     selectedAcpAgent,
   });
+
+  // Surface the reasoning-effort fallback notice (session-turn normalisation)
+  // as one visible SSE `status` frame ahead of the lane's own output.
+  const finishLane = (lane: Promise<Response>): Promise<Response> => lane.then(
+    (response) => prependMindosSseStatusEvent(response, requestContext.effortNotice),
+  );
 
   const capsuleSeed = (retrievalMetadata: Record<string, unknown>): AgentTurnCapsuleSeed => {
     const runtime = runtimeLane.kind === 'native'
@@ -426,7 +441,7 @@ export async function runAgentTurnRequestBody(
         ...(currentFile ? { currentFile } : {}),
         attachedFiles: Array.isArray(attachedFiles) ? [...attachedFiles] : [],
         uploadedFiles: Array.isArray(uploadedFiles) ? structuredClone(uploadedFiles) : [],
-        receiptIds: receiptId ? [receiptId] : [],
+        receiptIds: [...new Set([...(receiptId ? [receiptId] : []), ...(Array.isArray(retrievalMetadata.retrievalReceiptIds) ? retrievalMetadata.retrievalReceiptIds.filter((value): value is string => typeof value === 'string') : [])])],
         assetIds,
       },
       options: {
@@ -509,6 +524,7 @@ export async function runAgentTurnRequestBody(
     chatSessionId,
     signature: fileContextSignature,
     priorRuns: recentSessionRuns,
+    target: contextSignatureTarget,
   });
   const promptFileContext = fileContextForPrompt(loadedFileContext, includeFileContext);
   const fileContextMetadata = fileContextRunMetadata(fileContextSignature, includeFileContext, loadedFileContext);
@@ -522,6 +538,7 @@ export async function runAgentTurnRequestBody(
       attachedFiles,
       sessionSpaces: sessionContext.resolvedSelection.spaces,
       activeRecall: agentConfig.activeRecall,
+      fileContext: promptFileContext,
     });
     const externalPromptBase = await buildMindosContextPrompt({
       prompt: resolvedAgentMode.prompt,
@@ -563,23 +580,23 @@ export async function runAgentTurnRequestBody(
     if (runtimeLane.kind === 'native') {
       const recoveryConflict = claimRecoveryPlan();
       if (recoveryConflict) return recoveryConflict;
-      return runtimeLane.runTurn({
+      return finishLane(runtimeLane.runTurn({
         ...externalTurnBase,
         nativePermissionMode,
         nativeRuntimeOptions,
         nativeRuntimeEnv,
         requestContext,
-      });
+      }));
     }
 
     const recoveryConflict = claimRecoveryPlan();
     if (recoveryConflict) return recoveryConflict;
-    return runtimeLane.runTurn({
+    return finishLane(runtimeLane.runTurn({
       ...externalTurnBase,
       acpRuntimeOptions,
       acpRuntimeEnvOverlay,
       runtimeBinding: selectedAcpAgent ? body.runtimeBinding ?? null : null,
-    });
+    }));
   }
 
   let agentInitialization: MindosAgentInitializationContext | undefined;
@@ -691,6 +708,7 @@ export async function runAgentTurnRequestBody(
     attachedFiles,
     sessionSpaces: sessionContext.resolvedSelection.spaces,
     activeRecall: agentConfig.activeRecall,
+    fileContext: promptFileContext,
   });
   const systemPromptBase = buildMindosSystemPrompt({
     mindRoot,
@@ -725,7 +743,7 @@ export async function runAgentTurnRequestBody(
   const sessionContextMetadata = sessionContextRunMetadata(sessionContextSignature, includeSessionContext);
   const recoveryConflict = claimRecoveryPlan();
   if (recoveryConflict) return recoveryConflict;
-  return runtimeLane.runTurn({
+  return finishLane(runtimeLane.runTurn({
     mindosUiMessages,
     systemPrompt,
     turnPrompt,
@@ -756,5 +774,5 @@ export async function runAgentTurnRequestBody(
     stepLimit,
     t,
     capsule: capsuleSeed(recall.metadata),
-  });
+  }));
 }

@@ -1,4 +1,5 @@
 'use client';
+import { focusIfAvailable } from '@/lib/focus-if-available';
 
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
@@ -9,6 +10,8 @@ import AgentModeCapsule from '@/components/ask/AgentModeCapsule';
 import ModeCapsule, {
   getPersistedPermissionMode,
 } from '@/components/ask/ModeCapsule';
+import { useRuntimeSessionAction } from '@/hooks/useRuntimeSessionAction';
+import { useExternalSessionHistory } from '@/hooks/useExternalSessionHistory';
 import { useAskSession } from '@/hooks/useAskSession';
 import { useFileUpload } from '@/hooks/useFileUpload';
 import { useImageUpload } from '@/hooks/useImageUpload';
@@ -16,6 +19,7 @@ import { useMention } from '@/hooks/useMention';
 import { useSlashCommand } from '@/hooks/useSlashCommand';
 import type { SkillSlashItem, SlashItem } from '@/hooks/useSlashCommand';
 import MessageList from '@/components/ask/MessageList';
+import PendingAgentActions from '@/components/ask/PendingAgentActions';
 import MentionPopover from '@/components/ask/MentionPopover';
 import SlashCommandPopover from '@/components/ask/SlashCommandPopover';
 import SessionHistoryPanel from '@/components/ask/SessionHistoryPanel';
@@ -56,7 +60,7 @@ import { useAcpDetection } from '@/hooks/useAcpDetection';
 import { useNativeRuntimeDetection } from '@/hooks/useNativeRuntimeDetection';
 import { useRuntimeReadiness } from '@/hooks/useRuntimeReadiness';
 import type { AcpAgentSelection } from '@/hooks/useAskModal';
-import { compactRuntimeDisplayReason } from '@/lib/agent/runtime-error-display';
+import { compactRuntimeFailureMessage as compactRuntimeDisplayReason } from '@geminilight/mindos/agent/runtime/runtime-errors';
 import type { AskContextRequest } from '@/lib/ask-context-events';
 import type { MindosThinkingLevel } from '@/lib/agent/thinking';
 import {
@@ -80,7 +84,6 @@ import {
   forkRuntimeSession,
   getRuntimeSessionAdapterCapabilities,
   importBoundRuntimeSessionHistory,
-  listRuntimeSessions,
   readRuntimeSessionHistory,
 } from '@/lib/runtime-session-history';
 import {
@@ -196,10 +199,6 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
   const [showHistory, setShowHistory] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
-  const [runtimeSessions, setRuntimeSessions] = useState<RuntimeSessionEntry[]>([]);
-  const [runtimeSessionsLoading, setRuntimeSessionsLoading] = useState(false);
-  const [runtimeSessionsError, setRuntimeSessionsError] = useState<string | null>(null);
-  const [runtimeSessionActionId, setRuntimeSessionActionId] = useState<string | null>(null);
   const attachButtonRef = useRef<HTMLButtonElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
   const [attachMenuPos, setAttachMenuPos] = useState<{ top: number; left: number } | null>(null);
@@ -212,7 +211,6 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
   const [queueDrainSignal, setQueueDrainSignal] = useState(0);
   const queuedFollowUpsRef = useRef<QueuedFollowUp[]>([]);
   const drainingQueuedFollowUpRef = useRef(false);
-  const runtimeSessionsRequestSeqRef = useRef(0);
   const chatContentRootRef = useRef<HTMLDivElement>(null);
   const [homeHistoryMinHeight, setHomeHistoryMinHeight] = useState<number | null>(null);
 
@@ -504,40 +502,15 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     () => getRuntimeSessionAdapterCapabilities(selectedAgentRuntime),
     [selectedAgentRuntime?.id, selectedAgentRuntime?.kind, selectedAgentRuntime?.name],
   );
-  const loadRuntimeSessions = useCallback(async () => {
-    const runtime = selectedAgentRuntimeRef.current;
-    const capabilities = getRuntimeSessionAdapterCapabilities(runtime);
-    if (!runtime || !capabilities.supportsList) {
-      setRuntimeSessions([]);
-      setRuntimeSessionsError(null);
-      setRuntimeSessionsLoading(false);
-      setRuntimeSessionActionId(null);
-      return;
-    }
-
-    const seq = runtimeSessionsRequestSeqRef.current + 1;
-    runtimeSessionsRequestSeqRef.current = seq;
-    setRuntimeSessionsLoading(true);
-    setRuntimeSessionsError(null);
-
-    try {
-      const entries = await listRuntimeSessions(runtime, { cwd: runtimeSessionListCwd(sessionRef.current.activeSession) });
-      if (runtimeSessionsRequestSeqRef.current === seq) {
-        setRuntimeSessions(entries);
-      }
-    } catch (error) {
-      if (runtimeSessionsRequestSeqRef.current === seq) {
-        const message = error instanceof Error && error.message
-          ? error.message
-          : 'Failed to load runtime sessions.';
-        setRuntimeSessionsError(message);
-      }
-    } finally {
-      if (runtimeSessionsRequestSeqRef.current === seq) {
-        setRuntimeSessionsLoading(false);
-      }
-    }
-  }, []);
+  const externalHistory = useExternalSessionHistory(
+    selectedAgentRuntime, runtimeSessionListCwd(session.activeSession),
+    visible && showHistory && runtimeSessionCapabilities.supportsList,
+  );
+  const { actionId: runtimeSessionActionId, execute: executeRuntimeSessionAction } = useRuntimeSessionAction(
+    `${selectedAgentRuntime?.kind}:${selectedAgentRuntime?.id}:${session.activeSessionId}:${visible}:${showHistory}`,
+  );
+  const { entries: runtimeSessions, setEntries: setRuntimeSessions, loading: runtimeSessionsLoading,
+    error: runtimeSessionsError, setError: setRuntimeSessionsError, refresh: loadRuntimeSessions } = externalHistory;
 
   const imageUploadRef = useRef(imageUploadRuntime);
   const mentionRef = useRef(mention);
@@ -559,17 +532,6 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     queuedFollowUpsRef.current = queuedFollowUps;
   }, [queuedFollowUps]);
 
-  useEffect(() => {
-    if (!visible || !showHistory) return;
-    if (runtimeSessionCapabilities.supportsList) {
-      void loadRuntimeSessions();
-      return;
-    }
-    setRuntimeSessions([]);
-    setRuntimeSessionsError(null);
-    setRuntimeSessionsLoading(false);
-    setRuntimeSessionActionId(null);
-  }, [loadRuntimeSessions, runtimeSessionCapabilities.supportsList, selectedAgentRuntime?.id, selectedAgentRuntime?.kind, showHistory, visible]);
 
   const resetInputState = useCallback(() => {
     setComposerValueWithAgentModeSync('');
@@ -590,7 +552,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
       slashRef.current.resetSlash();
     }
     updateSelectedAgentRuntime(getMessageAgentRuntime(userMessage));
-    setTimeout(() => inputRef.current?.focus(), 50);
+    setTimeout(() => focusIfAvailable(inputRef.current), 50);
   }, [setComposerValueWithAgentModeSync, updateSelectedAgentRuntime]);
 
   const chatRefs = useMemo(() => ({
@@ -653,7 +615,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     pendingOpenAgentRef.current = null;
     setShowHistory(false);
     chat.firstMessageFired.current = false;
-    setTimeout(() => inputRef.current?.focus(), 0);
+    setTimeout(() => focusIfAvailable(inputRef.current), 0);
   }, [chat.firstMessageFired, currentFile, setComposerValueWithAgentModeSync]);
 
   const bindActiveSessionToRuntime = useCallback((agent: AgentRuntimeIdentity | null) => {
@@ -761,7 +723,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     mentionRef.current.resetMention();
     slashRef.current.resetSlash();
     setSelectedSkill(null);
-    setTimeout(() => inputRef.current?.focus(), 0);
+    setTimeout(() => focusIfAvailable(inputRef.current), 0);
     return true;
   }, [currentFile, queuedFollowUpTextOnly, setComposerValueWithAgentModeSync, t.ask.uploadsProcessing]);
 
@@ -906,7 +868,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
       setSelectedSkill(null);
       setShowHistory(false);
       setComposerValueWithAgentModeSync(detail.text);
-      setTimeout(() => inputRef.current?.focus(), 50);
+      setTimeout(() => focusIfAvailable(inputRef.current), 50);
     };
     window.addEventListener(RUNTIME_COMMAND_INSERT_EVENT, handler);
     return () => window.removeEventListener(RUNTIME_COMMAND_INSERT_EVENT, handler);
@@ -957,7 +919,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
       const text = (e as CustomEvent).detail?.text;
       if (typeof text === 'string') {
         setComposerValueWithAgentModeSync(text);
-        setTimeout(() => inputRef.current?.focus(), 50);
+        setTimeout(() => focusIfAvailable(inputRef.current), 50);
       }
     };
     window.addEventListener('mindos:home-suggestion', handler);
@@ -982,7 +944,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
       const preferredRuntime = openerRuntime ?? loadLastSelectedAgentRuntime();
       pendingOpenAgentRef.current = preferredRuntime;
       if (openerRuntime) persistLastSelectedAgentRuntime(openerRuntime);
-      setTimeout(() => inputRef.current?.focus(), 50);
+      setTimeout(() => focusIfAvailable(inputRef.current, variant === 'home'), 50);
       if (initialNewSession) {
         session.resetSession(preferredRuntime ?? undefined);
       } else if (initialSessionId) {
@@ -1011,7 +973,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     }
     // Home variant: auto-focus on mount
     if (variant === 'home' && visible && !prevVisibleRef.current) {
-      setTimeout(() => inputRef.current?.focus(), 150);
+      setTimeout(() => focusIfAvailable(inputRef.current, true), 150);
     }
     prevVisibleRef.current = visible;
     prevFileRef.current = currentFile;
@@ -1023,7 +985,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     if (!visible || !contextRequest) return;
     const path = contextRequest.path;
     setAttachedFiles(prev => prev.includes(path) ? prev : [...prev, path]);
-    setTimeout(() => inputRef.current?.focus(), 50);
+    setTimeout(() => focusIfAvailable(inputRef.current), 50);
   }, [contextRequest, visible]);
 
   useEffect(() => {
@@ -1125,7 +1087,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
       setAttachedFiles(prev => [...prev, filePath]);
     }
     setTimeout(() => {
-      inputRef.current?.focus();
+      focusIfAvailable(inputRef.current);
       inputRef.current?.setSelectionRange(atIdx, atIdx);
     }, 0);
   }, [setComposerValueWithAgentModeSync]);
@@ -1144,7 +1106,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
       setSelectedSkill(null);
       slashRef.current.resetSlash();
       setTimeout(() => {
-        inputRef.current?.focus();
+        focusIfAvailable(inputRef.current);
         inputRef.current?.setSelectionRange(nextCursor, nextCursor);
       }, 0);
       return;
@@ -1154,7 +1116,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     setSelectedSkill(item);
     slashRef.current.resetSlash();
     setTimeout(() => {
-      inputRef.current?.focus();
+      focusIfAvailable(inputRef.current);
       inputRef.current?.setSelectionRange(slashIdx, slashIdx);
     }, 0);
   }, [setComposerValueWithAgentModeSync]);
@@ -1349,7 +1311,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     updateSelectedAgentRuntime(targetRuntime);
     persistLastSelectedAgentRuntime(targetRuntime);
     importBoundRuntimeSessionHistoryIfNeeded(targetSession, targetRuntime);
-    setTimeout(() => inputRef.current?.focus(), 0);
+    setTimeout(() => focusIfAvailable(inputRef.current), 0);
     return true;
   }, [chat.isLoadingRef, currentFile, importBoundRuntimeSessionHistoryIfNeeded, session.sessions, setComposerValueWithAgentModeSync, updateSelectedAgentRuntime]);
 
@@ -1412,10 +1374,8 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     const runtime = selectedAgentRuntimeRef.current;
     if (!runtime || runtime.kind !== entry.runtime.kind || runtime.id !== entry.runtime.id) return;
 
-    setRuntimeSessionActionId(entry.id);
     setRuntimeSessionsError(null);
-    try {
-      const { entry: readEntry, messages: importedMessages } = await readRuntimeSessionHistory(entry);
+    await executeRuntimeSessionAction(entry.id, () => readRuntimeSessionHistory(entry), ({ entry: readEntry, messages: importedMessages }) => {
       const attachRuntime = compactAgentRuntimeIdentity(readEntry.runtime) ?? readEntry.runtime;
       const attached = sessionRef.current.attachRuntimeSession(attachRuntime, runtimeSessionEntryAttachBinding(readEntry), {
         title: runtimeSessionEntryTitle(readEntry, 42),
@@ -1430,24 +1390,15 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
       setRuntimeSessions((prev) => [readEntry, ...prev.filter((item) => item.id !== readEntry.id)]);
       updateSelectedAgentRuntime(attachRuntime);
       clearTransientComposerState();
-    } catch (error) {
-      const message = error instanceof Error && error.message
-        ? error.message
-        : 'Failed to load runtime session history.';
-      setRuntimeSessionsError(message);
-    } finally {
-      setRuntimeSessionActionId(null);
-    }
-  }, [chat.isLoadingRef, clearTransientComposerState, runtimeSessionActionId, t.ask.sessionRunningRetry, updateSelectedAgentRuntime]);
+    }, setRuntimeSessionsError);
+  }, [executeRuntimeSessionAction, chat.isLoadingRef, clearTransientComposerState, runtimeSessionActionId, t.ask.sessionRunningRetry, updateSelectedAgentRuntime]);
 
   const handleForkRuntimeSession = useCallback(async (entry: RuntimeSessionEntry) => {
     if (chat.isLoadingRef.current || runtimeSessionActionId) return;
     const runtime = selectedAgentRuntimeRef.current;
     if (!runtime || runtime.kind !== entry.runtime.kind || runtime.id !== entry.runtime.id) return;
-    setRuntimeSessionActionId(entry.id);
     setRuntimeSessionsError(null);
-    try {
-      const forked = await forkRuntimeSession(entry);
+    await executeRuntimeSessionAction(entry.id, () => forkRuntimeSession(entry), (forked) => {
       setRuntimeSessions((prev) => [forked, ...prev.filter((item) => item.id !== forked.id)]);
       const attachRuntime = compactAgentRuntimeIdentity(forked.runtime) ?? forked.runtime;
       const attached = sessionRef.current.attachRuntimeSession(attachRuntime, runtimeSessionEntryAttachBinding(forked), {
@@ -1459,24 +1410,15 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
       }
       updateSelectedAgentRuntime(attachRuntime);
       clearTransientComposerState();
-    } catch (error) {
-      const message = error instanceof Error && error.message
-        ? error.message
-        : 'Failed to fork runtime session.';
-      setRuntimeSessionsError(message);
-    } finally {
-      setRuntimeSessionActionId(null);
-    }
-  }, [chat.isLoadingRef, clearTransientComposerState, runtimeSessionActionId, t.ask.sessionRunningRetry, updateSelectedAgentRuntime]);
+    }, setRuntimeSessionsError);
+  }, [executeRuntimeSessionAction, chat.isLoadingRef, clearTransientComposerState, runtimeSessionActionId, t.ask.sessionRunningRetry, updateSelectedAgentRuntime]);
 
   const handleArchiveRuntimeSession = useCallback(async (entry: RuntimeSessionEntry) => {
     if (chat.isLoadingRef.current || runtimeSessionActionId) return;
     const runtime = selectedAgentRuntimeRef.current;
     if (!runtime || runtime.kind !== entry.runtime.kind || runtime.id !== entry.runtime.id) return;
-    setRuntimeSessionActionId(entry.id);
     setRuntimeSessionsError(null);
-    try {
-      await archiveRuntimeSession(entry);
+    await executeRuntimeSessionAction(entry.id, () => archiveRuntimeSession(entry), () => {
       setRuntimeSessions((prev) => prev.filter((item) => item.id !== entry.id));
       const activeBinding = getMatchingRuntimeSessionBinding(sessionRef.current.activeSession, runtime);
       if (activeBinding?.externalSessionId === entry.id) {
@@ -1488,15 +1430,8 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
           updatedAt: Date.now(),
         });
       }
-    } catch (error) {
-      const message = error instanceof Error && error.message
-        ? error.message
-        : 'Failed to archive runtime session.';
-      setRuntimeSessionsError(message);
-    } finally {
-      setRuntimeSessionActionId(null);
-    }
-  }, [chat.isLoadingRef, runtimeSessionActionId]);
+    }, setRuntimeSessionsError);
+  }, [executeRuntimeSessionAction, chat.isLoadingRef, runtimeSessionActionId]);
 
   const captureHomeHistoryHeight = useCallback(() => {
     if (!isHome || maximized) return;
@@ -1534,6 +1469,35 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     regenerateMessage: t.ask.regenerateMessage,
   }), [t, reconnectAttempt, reconnectMax]);
 
+  const pendingActionLabels = useMemo(() => ({
+    title: t.ask.pendingActionsTitle,
+    answer: t.ask.pendingActionAnswer,
+    cancel: t.ask.pendingActionCancel,
+    approve: t.ask.pendingActionApprove,
+    deny: t.ask.pendingActionDeny,
+  }), [t]);
+
+  /**
+   * Prompts already rendered inline in the current message stream (waiting
+   * permission / question tool-call parts) must not appear a second time in
+   * the pending list (spec-cross-process-run-events H, duplicate-UI rule).
+   */
+  const inlinePendingRunIds = useMemo(() => {
+    const runIds = new Set<string>();
+    for (const message of session.messages) {
+      for (const part of message.parts ?? []) {
+        if (part.type !== 'tool-call') continue;
+        if (part.runtimePermission?.status === 'waiting' && part.runtimePermission.runId) {
+          runIds.add(part.runtimePermission.runId);
+        }
+        if (part.userQuestion?.status === 'waiting' && part.userQuestion.runId) {
+          runIds.add(part.userQuestion.runId);
+        }
+      }
+    }
+    return runIds;
+  }, [session.messages]);
+
   /** Edit: pre-fill composer with the user message content, truncate history after it */
   const handleEditMessage = useCallback((index: number) => {
     const currentSession = sessionRef.current;
@@ -1542,7 +1506,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     // Truncate: keep messages up to (not including) the edited message
     currentSession.setMessages(currentSession.messages.slice(0, index));
     setComposerValueWithAgentModeSync(msg.content);
-    setTimeout(() => inputRef.current?.focus(), 50);
+    setTimeout(() => focusIfAvailable(inputRef.current), 50);
   }, [setComposerValueWithAgentModeSync]);
 
   /** Resend / Regenerate: truncate after user message, auto-submit same content */
@@ -1675,18 +1639,30 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
           onClose={closeHistory}
           onNewChat={handleResetSession}
           onRefreshRuntimeSessions={loadRuntimeSessions}
+          externalScope={externalHistory.scope}
+          onExternalScopeChange={externalHistory.setScope}
+          externalProjectAvailable={Boolean(runtimeSessionListCwd(session.activeSession))}
+          onExternalQueryChange={externalHistory.setQuery}
+          externalQuery={externalHistory.query}
+          externalHasMore={Boolean(externalHistory.cursor)}
+          onLoadMoreExternal={externalHistory.loadMore}
+          externalArchived={externalHistory.archived}
+          onExternalArchivedChange={externalHistory.setArchived}
           onAttachRuntimeSession={handleAttachRuntimeSession}
-          onForkRuntimeSession={handleForkRuntimeSession}
-          onArchiveRuntimeSession={handleArchiveRuntimeSession}
+          onForkRuntimeSession={runtimeSessionCapabilities.supportsFork ? handleForkRuntimeSession : undefined}
+          onArchiveRuntimeSession={runtimeSessionCapabilities.supportsArchive ? handleArchiveRuntimeSession : undefined}
         />
       )}
 
       {!showHistory && (
         <>
+      {/* Cross-process pending prompts (any host), above the message list; hidden when empty */}
+      <PendingAgentActions excludeRunIds={inlinePendingRunIds} labels={pendingActionLabels} />
       {/* Messages — home variant hides empty state unless maximized (suggestions rendered externally in normal mode) */}
       <div className="flex-1 min-h-0 flex flex-col">
         {!isHome && (
           <MessageList
+            sessionId={session.activeSessionId ?? undefined}
             messages={session.messages}
             isLoading={isLoading}
             loadingPhase={loadingPhase}
@@ -1703,6 +1679,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
         )}
         {isHome && (session.messages.length > 0 || maximized) && (
           <MessageList
+            sessionId={session.activeSessionId ?? undefined}
             messages={session.messages}
             isLoading={isLoading}
             loadingPhase={loadingPhase}
@@ -1885,7 +1862,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
                   <FileChip
                     path={selectedSkill.name}
                     variant="skill"
-                    onRemove={() => { setSelectedSkill(null); inputRef.current?.focus(); }}
+                    onRemove={() => { setSelectedSkill(null); focusIfAvailable(inputRef.current); }}
                   />
                 )}
               </div>
@@ -1895,7 +1872,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
                   {providerNotConfigured && (
                     <button
                       type="button"
-                      className="font-medium underline underline-offset-2 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                      className="min-h-11 rounded-lg bg-[var(--amber-action)] px-4 text-sm font-medium text-[var(--amber-foreground)] transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                       onClick={openAiSettings}
                     >
                       {t.ask.configureProvider}

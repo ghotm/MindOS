@@ -1,13 +1,20 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync, rmSync, symlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   appendContentChange,
+  getContentChangeSummary,
   listContentChanges,
+  markContentChangesSeen,
   appendAgentAuditEvent,
   listAgentAuditEvents
 } from './index';
+import { closeAllMindosDatabases } from '../../foundation/storage/sqlite.js';
+// Wires the knowledge/audit content-change facade to the SQLite store through
+// the ContentChangeLogStore port (spec-knowledge-layering-and-export-surface);
+// the barrel does the same for production consumers.
+import '../../server/handlers/change-log-store.js';
 import { LocalFileSystem } from '../storage/local.js';
 import type { IFileSystem, Result, FileEntry } from '../storage/index.js';
 import { readStudioAutomationState } from '../../server/automations/store.js';
@@ -64,11 +71,19 @@ class MockFileSystem implements IFileSystem {
 }
 
 describe('Content Change Log', () => {
-  let fs: MockFileSystem;
-  const mindRoot = '/test/root';
+  // The change log is SQLite-backed (spec-sqlite-derived-stores); the
+  // IFileSystem argument is a compatibility parameter, so these tests run
+  // against a real temporary mind root instead of the in-memory mock.
+  const fs = new LocalFileSystem();
+  let mindRoot = '';
 
   beforeEach(() => {
-    fs = new MockFileSystem();
+    mindRoot = mkdtempSync(join(tmpdir(), 'mindos-knowledge-change-log-'));
+  });
+
+  afterEach(() => {
+    closeAllMindosDatabases();
+    rmSync(mindRoot, { recursive: true, force: true });
   });
 
   it('should append a change entry', async () => {
@@ -87,6 +102,8 @@ describe('Content Change Log', () => {
       expect(queryResult.value[0].path).toBe('test.md');
       expect(queryResult.value[0].op).toBe('create');
     }
+    expect(existsSync(join(mindRoot, '.mindos', 'db', 'change_log_1.sqlite'))).toBe(true);
+    expect(existsSync(join(mindRoot, '.mindos', 'change-log.json'))).toBe(false);
   });
 
   it('should list all changes', async () => {
@@ -108,6 +125,15 @@ describe('Content Change Log', () => {
     if (result.ok) {
       expect(result.value.length).toBe(2);
     }
+  });
+
+  it('marks changes seen and reports the summary through the facade', async () => {
+    await appendContentChange(fs, mindRoot, { op: 'create', path: 'a.md', source: 'user', summary: 'Created' });
+    const before = await getContentChangeSummary(fs, mindRoot);
+    expect(before.ok && before.value.unreadCount).toBe(1);
+    expect((await markContentChangesSeen(fs, mindRoot)).ok).toBe(true);
+    const after = await getContentChangeSummary(fs, mindRoot);
+    expect(after.ok && after.value.unreadCount).toBe(0);
   });
 
   it('should reject change log writes through symlinked .mindos directories outside the root', async () => {

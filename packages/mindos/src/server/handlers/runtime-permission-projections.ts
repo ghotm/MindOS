@@ -1,21 +1,33 @@
+import { RUNTIME_APPROVAL_CAPABILITIES, runtimeApprovalRequirements } from '../../agent/runtime/approval-capabilities.js';
 import {
   createMindosAgentPermissionPolicy,
   type MindosAgentPermissionPolicy,
 } from '../../agent/mindos-pi/permission/policy.js';
 import {
-  isMindosPermissionMode,
   MINDOS_PERMISSION_MODES,
   type MindosPermissionMode,
 } from '../../agent/permission/index.js';
 import type {
-  AgentRuntimeCompatibilityOwner,
-  AgentRuntimeCompatibilityRequirementStatus,
   AgentRuntimeDescriptor,
   AgentRuntimeKind,
   AgentRuntimeOwner,
   AgentRuntimeStatus,
 } from '../../agent/runtime/registry.js';
 import { errorResponse, json, type MindosServerResponse } from '../response.js';
+import {
+  filterProjectionsByRuntime,
+  parsePermissionMode,
+  reason,
+  runtimeAvailableReason,
+  runtimeKey,
+  uniqSorted,
+  type AgentRuntimeProjectionReason,
+} from './runtime-projection-shared.js';
+
+const PERMISSION_AVAILABILITY_WORDING = {
+  available: 'is available for permission projection diagnostics.',
+  unavailable: 'is not available, so permission readiness cannot be trusted.',
+};
 
 export type AgentRuntimePermissionProjectionStatus =
   | 'ready'
@@ -38,12 +50,7 @@ export type AgentRuntimePermissionUnattendedStatus =
   | 'blocked'
   | 'unknown';
 
-export type AgentRuntimePermissionProjectionReason = {
-  id: string;
-  status: AgentRuntimeCompatibilityRequirementStatus;
-  owner: AgentRuntimeCompatibilityOwner;
-  summary: string;
-};
+export type AgentRuntimePermissionProjectionReason = AgentRuntimeProjectionReason;
 
 export type AgentRuntimePermissionPolicyProjection = {
   permissionMode: MindosPermissionMode;
@@ -74,7 +81,7 @@ export type AgentRuntimePermissionProjection = {
   interactiveApproval: {
     supported: boolean;
     route: AgentRuntimePermissionApprovalRoute;
-    scope: 'turn-policy' | 'in-process-run' | 'runtime-native' | 'adapter-specific' | 'none' | 'unknown';
+    scope: 'turn-policy' | 'cross-process-run' | 'runtime-native' | 'adapter-specific' | 'none' | 'unknown';
     summary: string;
   };
   unattendedApproval: {
@@ -112,10 +119,7 @@ export async function handleAgentRuntimePermissionProjectionsGet(
       runtimes,
       permissionMode: permissionModeResult.permissionMode,
     });
-    const runtimeFilter = searchParams.get('runtime')?.trim();
-    const projections = runtimeFilter
-      ? payload.projections.filter((projection) => projection.runtimeId === runtimeFilter || projection.runtimeKind === runtimeFilter)
-      : payload.projections;
+    const projections = filterProjectionsByRuntime(payload.projections, searchParams.get('runtime'));
     return json(
       { ...payload, projections },
       { headers: { 'Cache-Control': 'no-store' } },
@@ -152,10 +156,10 @@ function buildMindosPermissionProjection(
   runtime: AgentRuntimeDescriptor,
   requestedPermissionMode: MindosPermissionMode,
 ): AgentRuntimePermissionProjection {
-  const policy = createMindosAgentPermissionPolicy(requestedPermissionMode);
-  const policyProjection = projectMindosPolicy(policy);
+  const policyProjection = MINDOS_POLICY_PROJECTION_BY_MODE.get(requestedPermissionMode)
+    ?? projectMindosPolicy(createMindosAgentPermissionPolicy(requestedPermissionMode));
   const reasons: AgentRuntimePermissionProjectionReason[] = [
-    runtimeAvailableReason(runtime),
+    runtimeAvailableReason(runtime, PERMISSION_AVAILABILITY_WORDING),
     reason('permission-owner', 'satisfied', 'mindos', 'MindOS owns permission policy inside the Pi runtime lane.'),
     reason('turn-policy', 'satisfied', 'mindos', 'The selected read/ask/auto/full mode maps to a deterministic Pi tool policy.'),
   ];
@@ -166,7 +170,7 @@ function buildMindosPermissionProjection(
 
   return {
     schemaVersion: 1,
-    runtimeId: runtime.runtimeId ?? runtime.id,
+    runtimeId: runtimeKey(runtime),
     runtimeName: runtime.name,
     runtimeKind: runtime.kind,
     runtimeStatus: runtime.status,
@@ -182,7 +186,7 @@ function buildMindosPermissionProjection(
     },
     unattendedApproval: unattended,
     policy: policyProjection,
-    policyModes: MINDOS_PERMISSION_MODES.map((mode) => projectMindosPolicy(createMindosAgentPermissionPolicy(mode))),
+    policyModes: MINDOS_POLICY_MODE_PROJECTIONS,
     reasons,
     ...(blockers.length > 0 ? { blockers: uniqSorted(blockers) } : {}),
   };
@@ -197,14 +201,14 @@ function buildNativePermissionProjection(
   const blockers: string[] = [];
   if (runtime.status !== 'available') blockers.push('runtime-available');
   if (!supportsApprovals) blockers.push('runtime-approval-contract');
-  blockers.push('durable-approval-queue', 'approval-timeout-recovery');
+  blockers.push(...RUNTIME_APPROVAL_CAPABILITIES.blockers);
   const status: AgentRuntimePermissionProjectionStatus = runtime.status !== 'available'
     ? 'blocked'
     : supportsApprovals ? 'interactive-only' : 'unknown';
 
   return {
     schemaVersion: 1,
-    runtimeId: runtime.runtimeId ?? runtime.id,
+    runtimeId: runtimeKey(runtime),
     runtimeName: runtime.name,
     runtimeKind: runtime.kind,
     runtimeStatus: runtime.status,
@@ -215,7 +219,7 @@ function buildNativePermissionProjection(
     interactiveApproval: {
       supported: supportsApprovals,
       route: supportsApprovals ? 'runtime-permission-bridge' : 'external-runtime',
-      scope: supportsApprovals ? 'in-process-run' : 'runtime-native',
+      scope: supportsApprovals ? RUNTIME_APPROVAL_CAPABILITIES.scope : 'runtime-native',
       summary: supportsApprovals
         ? 'MindOS can surface native runtime permission prompts while the run is active, using the runtime permission bridge.'
         : 'MindOS does not have a declared interactive permission bridge for this runtime.',
@@ -223,11 +227,11 @@ function buildNativePermissionProjection(
     unattendedApproval: {
       status: runtime.status === 'available' && supportsApprovals ? 'limited' : 'unknown',
       supported: false,
-      summary: 'Native runtime approvals are currently interactive and in-process; unattended work needs a durable approval queue and timeout recovery.',
-      blockers: ['durable-approval-queue', 'approval-timeout-recovery'],
+      summary: RUNTIME_APPROVAL_CAPABILITIES.recoverySummary,
+      blockers: [...RUNTIME_APPROVAL_CAPABILITIES.blockers],
     },
     reasons: [
-      runtimeAvailableReason(runtime),
+      runtimeAvailableReason(runtime, PERMISSION_AVAILABILITY_WORDING),
       reason(
         'runtime-approval-contract',
         supportsApprovals ? 'satisfied' : 'unknown',
@@ -236,8 +240,8 @@ function buildNativePermissionProjection(
           ? `${runtime.name} declares permission events that MindOS can bridge into the product stream.`
           : `${runtime.name} has not declared a bridgeable permission event stream.`,
       ),
-      reason('mindos-permission-bridge', supportsApprovals ? 'satisfied' : 'unknown', 'mindos', 'MindOS routes supported native permission requests through an in-process run bridge.'),
-      reason('durable-approval-queue', 'missing', 'mindos', 'Approvals are not persisted in a durable queue for headless or resumed runs yet.'),
+      reason('mindos-permission-bridge', supportsApprovals ? 'satisfied' : 'unknown', 'mindos', RUNTIME_APPROVAL_CAPABILITIES.summary),
+      ...runtimeApprovalRequirements(),
     ],
     blockers: uniqSorted(blockers),
   };
@@ -247,36 +251,63 @@ function buildAcpPermissionProjection(
   runtime: AgentRuntimeDescriptor,
   requestedPermissionMode: MindosPermissionMode,
 ): AgentRuntimePermissionProjection {
-  const blockers = runtime.status === 'available'
-    ? ['adapter-approval-contract']
-    : ['runtime-available', 'adapter-approval-contract'];
+  // Derived from the descriptor (`acpCapabilitiesFromHandshake`): the MindOS ACP
+  // client answers `session/request_permission`, so approvals are bridged for
+  // every ACP agent unless the capability table says otherwise.
+  const hasPermissionStream = runtime.harnessCapabilities?.eventStream.includes('permissions') === true;
+  const supportsApprovals = runtime.capabilities.supportsApprovals && hasPermissionStream;
+  const blockers: string[] = [];
+  if (runtime.status !== 'available') blockers.push('runtime-available');
+  if (supportsApprovals) blockers.push(...RUNTIME_APPROVAL_CAPABILITIES.blockers);
+  else blockers.push('adapter-approval-contract');
+  const status: AgentRuntimePermissionProjectionStatus = runtime.status !== 'available'
+    ? 'blocked'
+    : supportsApprovals ? 'interactive-only' : 'unknown';
+
   return {
     schemaVersion: 1,
-    runtimeId: runtime.runtimeId ?? runtime.id,
+    runtimeId: runtimeKey(runtime),
     runtimeName: runtime.name,
     runtimeKind: runtime.kind,
     runtimeStatus: runtime.status,
     permissionOwner: runtime.permissionOwner,
     requestedPermissionMode,
-    status: runtime.status === 'available' ? 'unknown' : 'blocked',
+    status,
     harnessPermissionModel: runtime.harnessCapabilities?.permissions ?? 'unknown',
     interactiveApproval: {
-      supported: false,
-      route: 'unknown',
+      supported: supportsApprovals,
+      route: supportsApprovals ? 'adapter-protocol' : 'unknown',
       scope: 'adapter-specific',
-      summary: 'Generic ACP descriptors do not expose a shared approval prompt contract yet.',
+      summary: supportsApprovals
+        ? 'MindOS answers ACP session/request_permission prompts from the selected permission mode or the user while the session is active.'
+        : 'Generic ACP descriptors do not expose a shared approval prompt contract yet.',
     },
     unattendedApproval: {
-      status: 'unknown',
+      status: runtime.status === 'available' && supportsApprovals ? 'limited' : 'unknown',
       supported: false,
-      summary: 'ACP unattended approval readiness depends on adapter-specific permission semantics.',
-      blockers: ['adapter-approval-contract'],
+      summary: supportsApprovals
+        ? RUNTIME_APPROVAL_CAPABILITIES.recoverySummary
+        : 'ACP unattended approval readiness depends on adapter-specific permission semantics.',
+      blockers: supportsApprovals ? [...RUNTIME_APPROVAL_CAPABILITIES.blockers] : ['adapter-approval-contract'],
     },
     reasons: [
-      runtimeAvailableReason(runtime),
-      reason('adapter-approval-contract', 'unknown', 'external', 'ACP adapters need to declare approval behavior before MindOS can route or preauthorize actions safely.'),
+      runtimeAvailableReason(runtime, PERMISSION_AVAILABILITY_WORDING),
+      reason(
+        'adapter-approval-contract',
+        supportsApprovals ? 'satisfied' : 'unknown',
+        'external',
+        supportsApprovals
+          ? 'The ACP protocol routes approval prompts through session/request_permission, which MindOS bridges into permission events.'
+          : 'ACP adapters need to declare approval behavior before MindOS can route or preauthorize actions safely.',
+      ),
+      ...(supportsApprovals
+        ? [
+            reason('mindos-permission-bridge', 'satisfied', 'mindos', 'MindOS resolves ACP permission requests through the ACP client bridge and surfaces them in the session projection.'),
+            ...runtimeApprovalRequirements(),
+          ]
+        : []),
     ],
-    blockers,
+    blockers: uniqSorted(blockers),
   };
 }
 
@@ -296,7 +327,7 @@ function mindosUnattendedApproval(
       status: 'limited',
       supported: false,
       summary: 'Ask mode is safe for interactive work, but unattended use needs a durable approval queue before user decisions can survive background execution.',
-      blockers: ['durable-approval-queue'],
+      blockers: [...RUNTIME_APPROVAL_CAPABILITIES.blockers],
     };
   }
   const highRisk = [
@@ -315,6 +346,12 @@ function mindosUnattendedApproval(
   };
 }
 
+/** The four MindOS policy projections are pure functions of the mode; build them once instead of per request. */
+const MINDOS_POLICY_PROJECTION_BY_MODE: ReadonlyMap<MindosPermissionMode, AgentRuntimePermissionPolicyProjection> = new Map(
+  MINDOS_PERMISSION_MODES.map((mode) => [mode, projectMindosPolicy(createMindosAgentPermissionPolicy(mode))]),
+);
+const MINDOS_POLICY_MODE_PROJECTIONS: AgentRuntimePermissionPolicyProjection[] = [...MINDOS_POLICY_PROJECTION_BY_MODE.values()];
+
 function projectMindosPolicy(policy: MindosAgentPermissionPolicy): AgentRuntimePermissionPolicyProjection {
   return {
     permissionMode: policy.permissionMode,
@@ -331,36 +368,4 @@ function projectMindosPolicy(policy: MindosAgentPermissionPolicy): AgentRuntimeP
     userExtensions: policy.toolScope.userExtensions,
     extensionScopes: [...policy.extensionScopes],
   };
-}
-
-function runtimeAvailableReason(runtime: AgentRuntimeDescriptor): AgentRuntimePermissionProjectionReason {
-  return reason(
-    'runtime-available',
-    runtime.status === 'available' ? 'satisfied' : 'missing',
-    runtime.status === 'available' ? 'mindos' : 'shared',
-    runtime.status === 'available'
-      ? `${runtime.name} is available for permission projection diagnostics.`
-      : `${runtime.name} is not available, so permission readiness cannot be trusted.`,
-  );
-}
-
-function reason(
-  id: string,
-  status: AgentRuntimeCompatibilityRequirementStatus,
-  owner: AgentRuntimeCompatibilityOwner,
-  summary: string,
-): AgentRuntimePermissionProjectionReason {
-  return { id, status, owner, summary };
-}
-
-function parsePermissionMode(value: string | null):
-  | { permissionMode: MindosPermissionMode }
-  | { error: string } {
-  if (!value) return { permissionMode: 'ask' };
-  if (isMindosPermissionMode(value)) return { permissionMode: value };
-  return { error: `Unsupported permissionMode: ${value}` };
-}
-
-function uniqSorted(values: string[]): string[] {
-  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).sort();
 }

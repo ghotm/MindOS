@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useTransition, useCallback, useEffect, useRef, useSyncExternalStore, useMemo, Suspense } from 'react';
+import { useState, useTransition, useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore, useMemo, Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Edit3, Save, X, Loader2, LayoutTemplate, ArrowLeft, Share2, FileText, Code, MoreHorizontal, Copy, Pencil, Trash2, Star, Download, Eye, PanelLeft, PanelRightOpen, Puzzle, ChevronDown, History, ListChecks, Wand2 } from 'lucide-react';
@@ -47,6 +47,13 @@ import {
 } from '@/lib/obsidian-compat/linter-adapter';
 import { useObsidianLinterProfile } from '@/lib/stores/obsidian-linter-profile-store';
 import type { PluginSurface } from '@/lib/plugins/surfaces';
+import type { BrowserEditorSandboxContribution } from '@/lib/obsidian-compat/browser-editor-sandbox';
+
+// Stable empty default so the CodeMirror sandbox compartment is not
+// reconfigured on every keystroke when the linter preview is off.
+const EMPTY_CONTRIBUTIONS: BrowserEditorSandboxContribution[] = [];
+
+import { useNoteDraft } from '@/lib/hooks/useNoteDraft';
 
 interface ViewPageClientProps {
   filePath: string;
@@ -56,6 +63,7 @@ interface ViewPageClientProps {
   appendRowAction?: (newRow: string[]) => Promise<{ newContent: string }>;
   initialEditing?: boolean;
   isDraft?: boolean;
+  draftScope?: string;
   draftDirectories?: string[];
   createDraftAction?: (targetPath: string, content: string) => Promise<void>;
 }
@@ -136,24 +144,35 @@ function normalizeMarkdownModePreference(value: string | null): MdViewMode {
 
 function readMarkdownModePreference(): MdViewMode {
   if (typeof window === 'undefined') return 'wysiwyg';
-  return normalizeMarkdownModePreference(window.localStorage.getItem(MARKDOWN_VIEW_MODE_STORAGE_KEY));
+  try {
+    return normalizeMarkdownModePreference(window.localStorage.getItem(MARKDOWN_VIEW_MODE_STORAGE_KEY));
+  } catch {
+    // Storage blocked (e.g. Safari "block all cookies"); use the default mode.
+    return 'wysiwyg';
+  }
 }
 
 function hasUnsafeMarkdownFrontmatterFence(content: string): boolean {
   return hasMarkdownFrontmatterFence(content) && splitMarkdownFrontmatter(content).frontmatter === null;
 }
 
+/**
+ * Initial editing/mode state for a file. `preferredMode` is passed in rather
+ * than read here: the first render must use the server-stable default
+ * (`'wysiwyg'`) so SSR HTML and the hydration render agree; the stored
+ * preference is applied afterwards (see the layout effect in the component).
+ */
 function resolveMarkdownStartState(
   isBinaryFile: boolean,
   isMarkdown: boolean,
   initialEditing: boolean,
   content: string,
+  preferredMode: MdViewMode,
 ): { editing: boolean; mode: MdViewMode } {
   if (isBinaryFile || !isMarkdown) {
     return { editing: !isBinaryFile && (initialEditing || content === ''), mode: 'wysiwyg' };
   }
 
-  const preferredMode = readMarkdownModePreference();
   const hasUnsafeFrontmatter = hasUnsafeMarkdownFrontmatterFence(content);
   const mustEdit = initialEditing || content === '';
 
@@ -190,6 +209,7 @@ export default function ViewPageClient({
   appendRowAction,
   initialEditing = false,
   isDraft = false,
+  draftScope,
   draftDirectories = [],
   createDraftAction,
 }: ViewPageClientProps) {
@@ -221,7 +241,7 @@ export default function ViewPageClient({
   const fileBodyReady = useDeferredFileBodyReady(filePath);
   const [editing, setEditing] = useState(() => {
     if (isCsvLiveSurface) return false;
-    return resolveMarkdownStartState(isBinaryFile, isMarkdown, initialEditing, content).editing;
+    return resolveMarkdownStartState(isBinaryFile, isMarkdown, initialEditing, content, 'wysiwyg').editing;
   });
   const [editContent, setEditContent] = useState(content);
   const [savedContent, setSavedContent] = useState(content);
@@ -271,10 +291,23 @@ export default function ViewPageClient({
   const autoSavingRef = useRef(false);
   const mountedRef = useRef(true);
   const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  // Latest values for the unmount flush (effects capture stale closures).
+  const autoSaveSnapshotRef = useRef({ editContent, savedContent, editing, isMarkdown, isDraft, saveAction });
+  useEffect(() => {
+    autoSaveSnapshotRef.current = { editContent, savedContent, editing, isMarkdown, isDraft, saveAction };
+  }, [editContent, savedContent, editing, isMarkdown, isDraft, saveAction]);
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+      // Navigating away with a pending debounce would silently drop the last
+      // edit; fire a final fire-and-forget save with the latest content.
+      const latest = autoSaveSnapshotRef.current;
+      if (latest.isMarkdown && latest.editing && !latest.isDraft && latest.editContent !== latest.savedContent) {
+        void latest.saveAction(twemojiToNative(latest.editContent)).catch(() => {});
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -282,8 +315,12 @@ export default function ViewPageClient({
       return;
     }
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-    autoSaveTimerRef.current = setTimeout(async () => {
-      if (autoSavingRef.current) return;
+    const run = async () => {
+      if (autoSavingRef.current) {
+        // A save is still in flight; try again shortly instead of dropping this edit.
+        autoSaveTimerRef.current = setTimeout(run, 1000);
+        return;
+      }
       autoSavingRef.current = true;
       try {
         if (!mountedRef.current) return;
@@ -293,27 +330,49 @@ export default function ViewPageClient({
         await saveAction(cleanContent);
         if (!mountedRef.current) return;
         setSavedContent(cleanContent);
+        setSaveError(null);
         notifySelfSavedFile();
         setAutoSaveStatus('saved');
         setTimeout(() => {
           if (mountedRef.current) setAutoSaveStatus('idle');
         }, 1500);
-      } catch {
-        if (mountedRef.current) setAutoSaveStatus('idle');
+      } catch (err) {
+        if (mountedRef.current) {
+          setAutoSaveStatus('idle');
+          setSaveError(err instanceof Error ? err.message : 'Failed to save');
+        }
       } finally {
         autoSavingRef.current = false;
       }
-    }, 1000);
+    };
+    autoSaveTimerRef.current = setTimeout(run, 1000);
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
   }, [editContent, savedContent, editing, isMarkdown, isDraft, saveAction, keepCurrentTab, notifySelfSavedFile]);
   const [mdViewMode, setMdViewModeState] = useState<MdViewMode>(() => {
-    return resolveMarkdownStartState(isBinaryFile, isMarkdown, initialEditing, content).mode;
+    return resolveMarkdownStartState(isBinaryFile, isMarkdown, initialEditing, content, 'wysiwyg').mode;
   });
+  // Apply the stored mode preference once, after mount. A layout effect runs
+  // before paint, so a "preview" user never sees the editor flash, while the
+  // SSR HTML and the hydration render stay identical (no localStorage in render).
+  const storedPreferenceAppliedRef = useRef(false);
+  useLayoutEffect(() => {
+    if (storedPreferenceAppliedRef.current) return;
+    storedPreferenceAppliedRef.current = true;
+    const preferredMode = readMarkdownModePreference();
+    if (preferredMode === 'wysiwyg') return;
+    const next = resolveMarkdownStartState(isBinaryFile, isMarkdown, initialEditing, content, preferredMode);
+    setMdViewModeState(next.mode);
+    if (!isCsvLiveSurface) setEditing(next.editing);
+  }, [content, initialEditing, isBinaryFile, isCsvLiveSurface, isMarkdown]);
   const setMdViewMode = useCallback((mode: MdViewMode) => {
     setMdViewModeState(mode);
-    localStorage.setItem(MARKDOWN_VIEW_MODE_STORAGE_KEY, mode);
+    try {
+      localStorage.setItem(MARKDOWN_VIEW_MODE_STORAGE_KEY, mode);
+    } catch {
+      // Persisting the preference is best-effort.
+    }
   }, []);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const modeButtonRef = useRef<HTMLButtonElement>(null);
@@ -335,7 +394,7 @@ export default function ViewPageClient({
     setModeMenuOpen(false);
     setLinterPreviewEnabled(false);
     setLinterFixReviewOpen(false);
-    const nextMarkdownState = resolveMarkdownStartState(isBinaryFile, isMarkdown, initialEditing, content);
+    const nextMarkdownState = resolveMarkdownStartState(isBinaryFile, isMarkdown, initialEditing, content, readMarkdownModePreference());
     setMdViewModeState(nextMarkdownState.mode);
     setEditing(isCsvLiveSurface ? false : nextMarkdownState.editing);
   }, [content, filePath, initialEditing, isBinaryFile, isCsvLiveSurface, isMarkdown]);
@@ -353,6 +412,9 @@ export default function ViewPageClient({
   const [showSaveAs, setShowSaveAs] = useState(isDraft);
   const [saveDir, setSaveDir] = useState('');
   const [saveName, setSaveName] = useState(inferredName);
+  const noteDraft = useNoteDraft(isDraft, draftScope, { content: editContent, name: saveName, directory: saveDir }, draft => {
+    setEditContent(draft.content); setSaveName(draft.name); setSaveDir(draft.directory);
+  });
 
   // Close more menu on outside click
   useEffect(() => {
@@ -406,6 +468,8 @@ export default function ViewPageClient({
         router.push(`/view/${encodePath(result.newPath)}`);
         refreshCurrentView();
         notifyFilesChanged([filePath, result.newPath]);
+      } else if (!result.success) {
+        toast.error(result.error ?? 'Rename failed');
       }
     });
   }, [renameValue, filePath, router, retargetKeptDocTab, refreshCurrentView]);
@@ -431,6 +495,8 @@ export default function ViewPageClient({
         router.push('/');
         refreshCurrentView();
         notifyFilesChanged([filePath]);
+      } else {
+        toast.error(result.error ?? 'Delete failed');
       }
     });
   }, [filePath, router, t, refreshCurrentView]);
@@ -516,7 +582,9 @@ export default function ViewPageClient({
     setSaveError(null);
   }, [isDraft, filePath, router]);
 
+  const draftSavingRef = useRef(false);
   const handleConfirmDraftSave = useCallback(() => {
+    if (draftSavingRef.current) return;
     const trimmed = saveName.trim();
     if (!trimmed) {
       setSaveError('Please enter a file name');
@@ -534,11 +602,13 @@ export default function ViewPageClient({
 
     const finalName = trimmed.endsWith('.md') || trimmed.endsWith('.csv') ? trimmed : `${trimmed}.md`;
     const targetPath = saveDir ? `${saveDir}/${finalName}` : finalName;
+    draftSavingRef.current = true;
 
     setSaveError(null);
     startTransition(async () => {
       try {
         await createDraftAction(targetPath, editContent);
+        noteDraft.clear();
         retargetKeptDocTab(filePath, targetPath);
         setSavedContent(editContent);
         setEditing(false);
@@ -550,9 +620,9 @@ export default function ViewPageClient({
         notifyFilesChanged([targetPath]);
       } catch (err) {
         setSaveError(err instanceof Error ? err.message : 'Failed to save');
-      }
+      } finally { draftSavingRef.current = false; }
     });
-  }, [saveName, createDraftAction, saveDir, editContent, filePath, router, retargetKeptDocTab, refreshCurrentView]);
+  }, [saveName, createDraftAction, saveDir, editContent, filePath, router, retargetKeptDocTab, refreshCurrentView, noteDraft.clear]);
 
   const handleSave = useCallback(() => {
     if (isCsvLiveSurface) {
@@ -610,12 +680,19 @@ export default function ViewPageClient({
         setMdViewMode('preview');
         if (editing) {
           const clean = twemojiToNative(editContent);
+          const previousSaved = savedContent;
           setSavedContent(clean);
           if (clean !== savedContent) {
             keepCurrentTab();
+            setSaveError(null);
             saveAction(clean)
               .then(() => notifySelfSavedFile())
-              .catch(() => {});
+              .catch((err) => {
+                if (!mountedRef.current) return;
+                // The optimistic content never reached disk; show what is really saved.
+                setSavedContent(previousSaved);
+                setSaveError(err instanceof Error ? err.message : 'Failed to save');
+              });
           }
           setEditing(false);
         }
@@ -656,7 +733,7 @@ export default function ViewPageClient({
       profile: obsidianLinterProfile,
     });
   }, [canShowLinterPreview, editContent, linterPreviewEnabled, obsidianLinterProfile]);
-  const linterSandboxContributions = linterPreview?.contributions ?? [];
+  const linterSandboxContributions = linterPreview?.contributions ?? EMPTY_CONTRIBUTIONS;
   const linterIssueCountLabel = linterPreview
     ? `${linterPreview.issues.length}${linterPreview.skipped.length > 0 ? '+' : ''}`
     : '';
@@ -849,9 +926,6 @@ export default function ViewPageClient({
                 <span className="hidden sm:inline">saved</span>
               </span>
             )}
-            {saveError && (
-              <span className="text-xs text-error hidden sm:inline">{saveError}</span>
-            )}
 
             <div className="view-header-actions flex items-center gap-1.5 md:gap-2 shrink-0">
               {/* Renderer toggle — only shown when a custom renderer exists (excludes graph-mode override and binary files) */}
@@ -983,6 +1057,7 @@ export default function ViewPageClient({
                 <>
                   <button
                     onClick={handleCancel}
+                    aria-label={t.view.cancel ?? 'Cancel'}
                     disabled={isPending}
                     className="inline-flex h-8 min-w-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-75 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
                     style={{ background: 'var(--muted)', color: 'var(--muted-foreground)' }}
@@ -990,16 +1065,17 @@ export default function ViewPageClient({
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--muted)'; }}
                   >
                     <X size={13} />
-                    <span className="hidden sm:inline">Cancel</span>
+                    <span className="hidden sm:inline">{t.view.cancel ?? 'Cancel'}</span>
                   </button>
                   <button
                     onClick={isDraft && showSaveAs ? handleConfirmDraftSave : handleSave}
+                    aria-label={t.view.save ?? 'Save'}
                     disabled={isPending}
                     className="inline-flex h-8 min-w-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
                     style={{ background: 'var(--amber)', color: 'var(--amber-foreground)' }}
                   >
                     {isPending ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                    <span className="hidden sm:inline">Save</span>
+                    <span className="hidden sm:inline">{t.view.save ?? 'Save'}</span>
                   </button>
                 </>
               )}
@@ -1008,6 +1084,7 @@ export default function ViewPageClient({
                 <>
                   <button
                     onClick={handleCancel}
+                    aria-label={t.view.cancel ?? 'Cancel'}
                     disabled={isPending}
                     className="inline-flex h-8 min-w-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-75 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
                     style={{ background: 'var(--muted)', color: 'var(--muted-foreground)' }}
@@ -1015,16 +1092,17 @@ export default function ViewPageClient({
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--muted)'; }}
                   >
                     <X size={13} />
-                    <span className="hidden sm:inline">Cancel</span>
+                    <span className="hidden sm:inline">{t.view.cancel ?? 'Cancel'}</span>
                   </button>
                   <button
                     onClick={showSaveAs ? handleConfirmDraftSave : handleSave}
+                    aria-label={t.view.save ?? 'Save'}
                     disabled={isPending}
                     className="inline-flex h-8 min-w-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring touch-manipulation"
                     style={{ background: 'var(--amber)', color: 'var(--amber-foreground)' }}
                   >
                     {isPending ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                    <span className="hidden sm:inline">Save</span>
+                    <span className="hidden sm:inline">{t.view.save ?? 'Save'}</span>
                   </button>
                 </>
               )}
@@ -1082,6 +1160,18 @@ export default function ViewPageClient({
         </div>
       </div>
 
+      {saveError && (
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-3 border-b border-error/20 bg-error/5 px-4 py-3 md:px-6">
+          <p className="min-w-0 break-words text-sm text-error">{saveError}</p>
+          {editing && (
+            <button type="button" disabled={isPending} onClick={isDraft ? handleConfirmDraftSave : handleSave}
+              className="shrink-0 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
+              {t.view?.retrySave ?? 'Retry save'}
+            </button>
+          )}
+        </div>
+      )}
+
       {shouldShowPluginViewEntry && (
         <div className="border-b border-border/70 bg-muted/20 px-4 py-2 md:px-6">
           <div
@@ -1126,6 +1216,11 @@ export default function ViewPageClient({
         </div>
       )}
 
+      {isDraft && editing && (
+        <p role={noteDraft.error ? 'alert' : 'status'} className={`px-4 pt-3 text-xs md:px-6 ${noteDraft.error ? 'text-error' : 'text-muted-foreground'}`}>
+          {noteDraft.error ? t.view?.draftUnavailable : noteDraft.recovered ? t.view?.draftRecovered : t.view?.draftLocal}
+        </p>
+      )}
       {/* Content */}
       <div className="flex-1 py-6 md:py-8">
         {!fileBodyReady ? (
@@ -1134,7 +1229,7 @@ export default function ViewPageClient({
           <>
             {editing && (
               <div className={markdownFrameClassName} data-markdown-view-frame>
-                <div className={markdownBodyClassName}>
+                <div className={markdownBodyClassName} inert={isDraft && isPending ? true : undefined} aria-busy={isDraft && isPending}>
                   {isDraft && showSaveAs && (
                     <div className="mb-3 rounded-lg border border-border bg-card p-3 flex flex-col gap-2">
                       <div>
@@ -1149,10 +1244,11 @@ export default function ViewPageClient({
                         </div>
                       </div>
                       <div>
-                        <label className="text-xs text-muted-foreground">{t.view?.saveFileName ?? 'File name'}</label>
+                        <label htmlFor="note-draft-name" className="text-xs text-muted-foreground">{t.view?.saveFileName ?? 'File name'}</label>
                         <input
+                          id="note-draft-name"
                           value={saveName}
-                          onChange={(e) => setSaveName(e.target.value)}
+                          onChange={(e) => { if (!draftSavingRef.current) setSaveName(e.target.value); }}
                           onKeyDown={(e) => { if (e.key === 'Enter') handleConfirmDraftSave(); }}
                           className="mt-1 w-full px-2.5 py-1.5 text-sm bg-background border border-border rounded-lg text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
                           placeholder="Untitled.md"
@@ -1172,7 +1268,7 @@ export default function ViewPageClient({
                   )}
                   <MarkdownEditor
                     value={editContent}
-                    onChange={setEditContent}
+                    onChange={value => { if (!isDraft || !draftSavingRef.current) setEditContent(value); }}
                     viewMode={mdViewMode}
                     editorKey={filePath}
                     sourcePath={filePath}
@@ -1184,7 +1280,7 @@ export default function ViewPageClient({
             )}
             {!editing && (
               <div ref={contentRef} className={markdownFrameClassName} data-markdown-view-frame>
-                <div className={markdownBodyClassName}>
+                <div className={markdownBodyClassName} inert={isDraft && isPending ? true : undefined} aria-busy={isDraft && isPending}>
                   {findOpen && <FindInPage containerRef={contentRef} onClose={() => setFindOpen(false)} />}
                   <MarkdownView content={normalizedSavedMarkdown} sourcePath={filePath} highlightLines={changedLines} onDismissHighlight={() => setChangedLines([])} emptyPlaceholder={t.view?.emptyNote} />
                   <Backlinks filePath={filePath} />
@@ -1228,7 +1324,7 @@ export default function ViewPageClient({
                 }}
               />
             ) : (
-              <EditorWrapper value={editContent} onChange={setEditContent} language="plain" />
+              <EditorWrapper value={editContent} onChange={value => { if (!isDraft || !draftSavingRef.current) setEditContent(value); }} language="plain" />
             )}
           </div>
         ) : (

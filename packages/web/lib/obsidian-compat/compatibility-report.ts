@@ -8,6 +8,7 @@ import {
   isPartiallySupportedObsidianApi,
   isUnsupportedObsidianApi,
 } from './capability-matrix';
+import { getObsidianApiSurface } from './api-surface';
 
 export type CompatibilityLevel = 'compatible' | 'partial' | 'blocked';
 
@@ -22,11 +23,127 @@ export interface PluginCompatibilityReport {
   nodeModules: string[];
   supportedModules?: string[];
   unsupportedModules: string[];
+  /** Reserved for proven internal bundle modules; unknown imports are never assumed bundled. */
+  bundledModules?: string[];
   platformRequirements?: PluginPlatformRequirements;
   supportedApis: string[];
   partialApis: string[];
   unsupportedApis: string[];
   blockers: string[];
+  runtimeTier?: PluginRuntimeTierRequirement;
+}
+
+/**
+ * MindOS runs Obsidian plugins in one of three tiers:
+ * - `server`: the snapshot runtime (fake DOM, safe hosts, MCP/headless).
+ * - `browser`: an isolated realm with real DOM and the shared CodeMirror 6 instance.
+ * - `native`: the Desktop broker that exposes Node / Electron capabilities per plugin.
+ */
+export type ObsidianRuntimeTier = 'server' | 'browser' | 'native';
+export type ObsidianRuntimeModuleTier = 'supported' | 'browser' | 'native' | 'unknown';
+
+export interface PluginRuntimeTierRequirement {
+  /** Lowest tier in which every detected feature can run end-to-end. */
+  required: ObsidianRuntimeTier;
+  /** True when no blocker prevents loading in the server tier (features may still be catalog-only there). */
+  loadsInServerTier: boolean;
+  browserModules: string[];
+  nativeModules: string[];
+  unknownModules: string[];
+  browserApis: string[];
+  reasons: string[];
+}
+
+const BROWSER_TIER_MODULE_PREFIXES = ['@codemirror/', '@lezer/', 'prosemirror-'];
+const BROWSER_TIER_MODULES = new Set(['codemirror', 'codemirror5']);
+const NATIVE_TIER_EXTRA_MODULES = new Set(['@electron/remote', 'electron/main', 'electron/renderer']);
+/** Node builtins outside the supported set that the static scanner does not list in NODE_RUNTIME_MODULES. */
+const NATIVE_TIER_BUILTIN_MODULES = new Set([
+  'async_hooks', 'child_process', 'cluster', 'constants', 'dgram', 'diagnostics_channel', 'dns', 'domain', 'fs', 'http2',
+  'inspector', 'module', 'perf_hooks', 'process', 'punycode', 'readline', 'repl', 'sys', 'tty', 'v8', 'vm', 'wasi',
+  'worker_threads', 'zlib',
+]);
+const NATIVE_TIER_MODULE_PREFIXES = ['fs/', 'dns/', 'readline/', 'stream/', 'util/', 'path/'];
+
+function isRelativeModule(moduleName: string): boolean {
+  return moduleName.startsWith('.') || moduleName.startsWith('/');
+}
+
+/** Obsidian APIs whose full behaviour needs a real DOM or the live editor, even though the server tier catalogs them. */
+const BROWSER_TIER_APIS = new Set([
+  'registerEditorExtension',
+  'registerEditorSuggest',
+  'registerMarkdownPostProcessor',
+  'registerMarkdownCodeBlockProcessor',
+  'registerView',
+  'MarkdownRenderer',
+  'CodeMirror',
+  'CodeMirrorAdapter.commands',
+  'Workspace.iterateCodeMirrors',
+  'Workspace.getLeaf',
+  'Workspace.splitActiveLeaf',
+  'Workspace.getLeftLeaf',
+  'Workspace.getRightLeaf',
+  'Workspace.revealLeaf',
+]);
+
+export function classifyRuntimeModuleTier(moduleName: string): ObsidianRuntimeModuleTier {
+  if (SUPPORTED_RUNTIME_MODULES.has(moduleName)) return 'supported';
+  const normalized = moduleName.replace(/^node:/, '');
+  if (SUPPORTED_RUNTIME_MODULES.has(normalized)) return 'supported';
+  if (
+    NODE_RUNTIME_MODULES.has(moduleName)
+    || NODE_RUNTIME_MODULES.has(normalized)
+    || NATIVE_TIER_EXTRA_MODULES.has(moduleName)
+    || NATIVE_TIER_BUILTIN_MODULES.has(normalized)
+    || NATIVE_TIER_MODULE_PREFIXES.some((prefix) => normalized.startsWith(prefix))
+    || moduleName.startsWith('node:')
+  ) {
+    return 'native';
+  }
+  if (BROWSER_TIER_MODULES.has(moduleName) || BROWSER_TIER_MODULE_PREFIXES.some((prefix) => moduleName.startsWith(prefix))) {
+    return 'browser';
+  }
+  return 'unknown';
+}
+
+export function classifyPluginRuntimeTier(
+  report: Pick<PluginCompatibilityReport, 'obsidianApis' | 'unsupportedModules' | 'blockers'>,
+): PluginRuntimeTierRequirement {
+  const browserModules: string[] = [];
+  const nativeModules: string[] = [];
+  const unknownModules: string[] = [];
+  for (const moduleName of report.unsupportedModules) {
+    // Relative specifiers are bundler leftovers, not a runtime capability; they stay in blockers only.
+    if (isRelativeModule(moduleName)) continue;
+    const tier = classifyRuntimeModuleTier(moduleName);
+    if (tier === 'native') nativeModules.push(moduleName);
+    else if (tier === 'browser') browserModules.push(moduleName);
+    else if (tier === 'unknown') unknownModules.push(moduleName);
+  }
+  const browserApis = report.obsidianApis.filter((api) => BROWSER_TIER_APIS.has(api));
+
+  const reasons: string[] = [];
+  if (nativeModules.length > 0) reasons.push(`Native modules need the Desktop broker tier: ${unique(nativeModules).join(', ')}.`);
+  if (browserModules.length > 0) reasons.push(`Editor modules need the browser tier with shared CodeMirror 6: ${unique(browserModules).join(', ')}.`);
+  if (browserApis.length > 0) reasons.push(`DOM / editor APIs are catalog-only in the server tier: ${unique(browserApis).join(', ')}.`);
+  if (unknownModules.length > 0) reasons.push(`Unrecognized modules block every tier until classified: ${unique(unknownModules).join(', ')}.`);
+
+  const required: ObsidianRuntimeTier = nativeModules.length > 0
+    ? 'native'
+    : browserModules.length > 0 || browserApis.length > 0
+      ? 'browser'
+      : 'server';
+
+  return {
+    required,
+    loadsInServerTier: report.blockers.length === 0,
+    browserModules: unique(browserModules),
+    nativeModules: unique(nativeModules),
+    unknownModules: unique(unknownModules),
+    browserApis: unique(browserApis),
+    reasons,
+  };
 }
 
 const NODE_RUNTIME_MODULES = new Set([
@@ -210,6 +327,21 @@ function collectObsidianNamespaceAliases(code: string): string[] {
   return unique(aliases);
 }
 
+let obsidianApiExportNamesCache: ReadonlySet<string> | null = null;
+/**
+ * Bundled plugin code reuses short alias names for local arrays (`const t =
+ * require('obsidian')` plus `t.push(...)` in another scope), so alias member
+ * access only counts as API usage when the official obsidian.d.ts snapshot
+ * declares the export. Undeclared members (`push`, `length`, `default`) are
+ * analysis noise, not missing host capability.
+ */
+function getObsidianApiExportNames(): ReadonlySet<string> {
+  if (obsidianApiExportNamesCache === null) {
+    obsidianApiExportNamesCache = new Set(getObsidianApiSurface().exports.map((entry) => entry.name));
+  }
+  return obsidianApiExportNamesCache;
+}
+
 function collectObsidianImports(code: string): string[] {
   const apis: string[] = [];
 
@@ -321,9 +453,10 @@ function collectObsidianImports(code: string): string[] {
 
   for (const alias of collectObsidianNamespaceAliases(code)) {
     const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const declaredExports = getObsidianApiExportNames();
     const namespaceMatches = code.matchAll(new RegExp(`\\b${escapedAlias}\\.([A-Za-z_$][\\w$]*)`, 'g'));
     for (const match of namespaceMatches) {
-      if (match[1]) {
+      if (match[1] && declaredExports.has(match[1])) {
         apis.push(match[1]);
       }
     }
@@ -334,7 +467,9 @@ function collectObsidianImports(code: string): string[] {
 
 function collectModuleImports(code: string): string[] {
   const modules: string[] = [];
-  const requireMatches = code.matchAll(/\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g);
+  // A member such as lodash's guarded localModule.require('util') probe is
+  // not a call to the injected host require. Keep actual bare externals strict.
+  const requireMatches = code.matchAll(/(?<![.$\w\\])require\s*\(\s*['"]([^'"]+)['"]\s*\)/g);
   for (const match of requireMatches) {
     const moduleName = match[1];
     if (moduleName && moduleName !== 'obsidian') {
@@ -385,9 +520,9 @@ function collectSupportedModules(moduleImports: string[]): string[] {
   return unique(moduleImports.filter((moduleName) => SUPPORTED_RUNTIME_MODULES.has(moduleName)));
 }
 
-function collectUnsupportedModules(moduleImports: string[], supportedModules: string[]): string[] {
-  const supported = new Set(supportedModules);
-  return unique(moduleImports.filter((moduleName) => !supported.has(moduleName)));
+function collectUnsupportedModules(moduleImports: string[], supportedModules: string[], bundledModules: string[]): string[] {
+  const excluded = new Set([...supportedModules, ...bundledModules]);
+  return unique(moduleImports.filter((moduleName) => !excluded.has(moduleName)));
 }
 
 function collectDynamicModuleBlockers(code: string): string[] {
@@ -407,7 +542,9 @@ export function analyzePluginCompatibility(code: string, manifest?: { isDesktopO
   const moduleImports = collectModuleImports(code);
   const nodeModules = collectNodeModules(moduleImports);
   const supportedModules = collectSupportedModules(moduleImports);
-  const unsupportedModules = collectUnsupportedModules(moduleImports, supportedModules);
+  // A package name alone cannot prove its external require was bundled.
+  const bundledModules: string[] = [];
+  const unsupportedModules = collectUnsupportedModules(moduleImports, supportedModules, bundledModules);
   const platformRequirements: PluginPlatformRequirements = {
     desktop: manifest?.isDesktopOnly === true,
     reasons: manifest?.isDesktopOnly === true
@@ -419,22 +556,24 @@ export function analyzePluginCompatibility(code: string, manifest?: { isDesktopO
   const partialApis = obsidianApis.filter(isPartiallySupportedObsidianApi);
   const unsupportedApis = obsidianApis.filter(isUnsupportedObsidianApi);
 
-  const blockers = [
+  const blockers = unique([
     ...unsupportedModules.map((moduleName) => `Requires unsupported runtime module: ${moduleName}`),
     ...collectDynamicModuleBlockers(code),
-  ];
+  ]);
 
   return {
     obsidianApis,
     moduleImports,
     nodeModules,
     supportedModules,
+    bundledModules,
     unsupportedModules,
     platformRequirements,
     supportedApis: unique(supportedApis),
     partialApis: unique(partialApis),
     unsupportedApis: unique(unsupportedApis),
-    blockers: unique(blockers),
+    blockers,
+    runtimeTier: classifyPluginRuntimeTier({ obsidianApis, unsupportedModules, blockers }),
   };
 }
 

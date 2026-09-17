@@ -27,7 +27,6 @@ import {
   handleMcpAgentsGet,
   handleMcpInstallPost,
   handleMcpInstallSkillPost,
-  resolveNpxInvocation,
   findMcpProcessIdsByPort,
   handleMcpRestartPost,
   handleMcpUninstallPost,
@@ -219,11 +218,12 @@ describe('MindOS server contract: skills, custom agents, MCP management', () => 
     });
     expect(settings.disabledSkills).toContain('user-skill');
 
+    // The legacy copy ledger is gone: links on disk are the only truth (spec-skill-management-fix).
     expect(handleSkillsPost({ action: 'record-install', name: 'user-skill', agentKey: 'codex', installPath: '/tmp/skill' }, services)).toMatchObject({
-      status: 200,
-      body: { ok: true },
+      status: 400,
+      body: { error: 'Unknown action: record-install' },
     });
-    expect(settings.installedSkillAgents).toEqual([{ agent: 'codex', skill: 'user-skill', path: '/tmp/skill' }]);
+    expect(settings.installedSkillAgents).toBeUndefined();
 
     expect(handleSkillsPost({ action: 'delete', name: 'user-skill' }, services)).toMatchObject({
       status: 200,
@@ -1013,7 +1013,7 @@ describe('MindOS server contract: skills, custom agents, MCP management', () => 
     });
   });
 
-  it('marks installed HTTP MCP agents inactive when endpoint verification fails', async () => {
+  it('keeps HTTP MCP configuration present when endpoint verification fails', async () => {
     const response = await handleMcpAgentsGet({
       agents: {
         'claude-code': {
@@ -1036,7 +1036,8 @@ describe('MindOS server contract: skills, custom agents, MCP management', () => 
     expect(response.status).toBe(200);
     expect(response.body.agents[0]).toMatchObject({
       key: 'claude-code',
-      installed: false,
+      installed: true,
+      connection: { status: 'unreachable' },
     });
   });
 
@@ -1146,80 +1147,39 @@ describe('MindOS server contract: skills, custom agents, MCP management', () => 
     expect(readFileSync(join(home, '.claude', 'skills', 'mindos', 'SKILL.md'), 'utf-8')).toContain('name: mindos');
   });
 
-  it('falls back to argv-safe npx skill installation when no local skill source exists', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mindos-install-skill-fallback-'));
+  it('reports a missing packaged skill without running any subprocess', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-install-skill-missing-'));
     const commands: Array<{ command: string; args: string[] }> = [];
 
-    expect(handleMcpInstallSkillPost({
+    const res = handleMcpInstallSkillPost({
       skill: 'mindos-zh',
-      agents: ['cursor', 'claude-code', 'unknown-agent'],
+      agents: ['cursor', 'claude-code'],
     }, {
       projectRoot: root,
       skillAgentRegistry: {
         cursor: { mode: 'universal' },
         'claude-code': { mode: 'additional', skillAgentName: 'claude-code' },
       },
-      runCommand: (command, args) => {
-        commands.push({ command, args });
-        return 'Done!\n';
-      },
-    })).toMatchObject({
-      status: 200,
-      body: {
-        ok: true,
-        method: 'npx',
-        skill: 'mindos-zh',
-        agents: ['claude-code', 'unknown-agent'],
-        stdout: 'Done!',
-      },
-    });
-
-    expect(commands).toEqual([{
-      command: 'npx',
-      args: ['skills', 'add', 'GeminiLight/MindOS', '--skill', 'mindos-zh', '-a', 'claude-code', '-a', 'unknown-agent', '-g', '-y'],
-    }]);
-  });
-
-  it('runs MindOS skill installation through argv-safe subprocess args', () => {
-    const calls: Array<{ command: string; args: string[] }> = [];
-
-    expect(handleMcpInstallSkillPost({ skill: 'mindos', agents: ['claude-code'] }, {
-      skillAgentRegistry: { 'claude-code': { mode: 'additional', skillAgentName: 'claude-code' } },
       pathExists: () => false,
-      runCommand: (command, args) => {
-        calls.push({ command, args });
-        return 'Done!\n';
-      },
-    })).toMatchObject({
-      status: 200,
-      body: {
-        ok: true,
-        cmd: 'npx skills add "GeminiLight/MindOS" --skill mindos -a claude-code -g -y',
-      },
     });
 
-    expect(calls).toEqual([{
-      command: 'npx',
-      args: ['skills', 'add', 'GeminiLight/MindOS', '--skill', 'mindos', '-a', 'claude-code', '-g', '-y'],
-    }]);
-
-    const source = readFileSync(join(__dirname, 'server', 'handlers', 'mcp-install-skill.ts'), 'utf-8');
-    expect(source).not.toContain('execSync(cmd');
-    expect(source).toContain('execFileSync(invocation.command, invocation.args');
+    expect(res).toMatchObject({
+      status: 200,
+      body: { ok: false, method: 'local-copy', skill: 'mindos-zh' },
+    });
+    expect((res.body as { stderr: string }).stderr).toMatch(/not found/i);
+    // The POST handler must never shell out to the network (`npx skills add`):
+    // a 30 s remote code execution inside an API request is not an install path.
+    expect(commands).toEqual([]);
   });
 
-  it('resolves npx through the npm CLI on Windows without shell shims', () => {
-    const npxCliPath = '/node/node_modules/npm/bin/npx-cli.js';
-
-    expect(resolveNpxInvocation(['skills', 'add', 'GeminiLight/MindOS'], {
-      platform: 'win32',
-      nodeExecPath: '/node/node.exe',
-      pathExists: (path) => path === npxCliPath,
-      env: {},
-    })).toEqual({
-      command: '/node/node.exe',
-      args: [npxCliPath, 'skills', 'add', 'GeminiLight/MindOS'],
-    });
+  it('keeps the install-skill handler free of subprocess and network install paths', () => {
+    const source = readFileSync(join(__dirname, 'server', 'handlers', 'mcp-install-skill.ts'), 'utf-8');
+    expect(source).not.toContain('execFileSync');
+    expect(source).not.toContain('execSync');
+    expect(source).not.toContain('npx');
+    expect(source).not.toContain('GeminiLight/MindOS');
+    expect(source).not.toContain('runCommand');
   });
 
   it('restarts MCP through the product process-control handler', async () => {
@@ -1233,7 +1193,9 @@ describe('MindOS server contract: skills, custom agents, MCP management', () => 
       readSettings: () => ({ mcpPort: 9991, authToken: 'from-settings' }),
       env: { MINDOS_MANAGED: '1' } as NodeJS.ProcessEnv,
       projectRoot: root,
+      homeDir: root,
       killByPort: (port) => { killedPorts.push(port); },
+      waitForMcpHealth: async () => true,
     })).resolves.toMatchObject({
       status: 200,
       body: { ok: true, port: 9991, note: 'ProcessManager will respawn' },
@@ -1270,6 +1232,7 @@ describe('MindOS server contract: skills, custom agents, MCP management', () => 
       execPath: '/node',
       killByPort: (port) => { killedPorts.push(port); },
       waitForPortFree: async () => true,
+      waitForMcpHealth: async () => true,
       pathExists: (path) => path === bundlePath,
       spawnDetached: (command, args, options) => {
         spawned.push({ command, args, cwd: options.cwd, env: options.env });
@@ -1287,6 +1250,7 @@ describe('MindOS server contract: skills, custom agents, MCP management', () => 
       execPath: '/node',
       killByPort: (port) => { killedPorts.push(port); },
       waitForPortFree: async () => true,
+      waitForMcpHealth: async () => true,
       pathExists: (path) => path === bundlePath,
       spawnDetached: (command, args, options) => {
         spawned.push({ command, args, cwd: options.cwd, env: options.env });
@@ -1315,10 +1279,58 @@ describe('MindOS server contract: skills, custom agents, MCP management', () => 
       env: expect.objectContaining({
         MCP_TRANSPORT: 'http',
         MCP_PORT: '9995',
-        MCP_HOST: '0.0.0.0',
+        // No auth token anywhere: an unauthenticated MCP must stay on loopback.
+        MCP_HOST: '127.0.0.1',
         MINDOS_URL: 'http://127.0.0.1:5678',
       }),
     }]);
+    expect(spawned[1]?.env.AUTH_TOKEN).toBeUndefined();
+  });
+
+  it('never spawns an unauthenticated MCP on a LAN host but honours MCP_HOST once a token exists', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mindos-mcp-restart-host-'));
+    const bundlePath = join(root, 'packages', 'mindos', 'dist', 'protocols', 'mcp-server', 'index.cjs');
+    const spawnedHosts: Array<{ host: string | undefined; token: string | undefined }> = [];
+    const services = {
+      projectRoot: root,
+      execPath: '/node',
+      killByPort: () => {},
+      waitForPortFree: async () => true,
+      waitForMcpHealth: async () => true,
+      pathExists: (path: string) => path === bundlePath,
+      spawnDetached: (_command: string, _args: string[], options: { env: NodeJS.ProcessEnv }) => {
+        spawnedHosts.push({ host: options.env.MCP_HOST, token: options.env.AUTH_TOKEN });
+        return { pid: 1, unref: () => {} };
+      },
+    };
+
+    await handleMcpRestartPost({
+      ...services,
+      readSettings: () => ({ mcpPort: 9996 }),
+      env: { MCP_HOST: '0.0.0.0' } as NodeJS.ProcessEnv,
+    });
+    await handleMcpRestartPost({
+      ...services,
+      readSettings: () => ({ mcpPort: 9997 }),
+      env: { MCP_HOST: '192.168.1.20' } as NodeJS.ProcessEnv,
+    });
+    await handleMcpRestartPost({
+      ...services,
+      readSettings: () => ({ mcpPort: 9998, authToken: 'from-settings' }),
+      env: { MCP_HOST: '0.0.0.0' } as NodeJS.ProcessEnv,
+    });
+    await handleMcpRestartPost({
+      ...services,
+      readSettings: () => ({ mcpPort: 9999 }),
+      env: { MCP_HOST: '0.0.0.0', AUTH_TOKEN: 'from-env' } as NodeJS.ProcessEnv,
+    });
+
+    expect(spawnedHosts).toEqual([
+      { host: '127.0.0.1', token: undefined },
+      { host: '127.0.0.1', token: undefined },
+      { host: '0.0.0.0', token: 'from-settings' },
+      { host: '0.0.0.0', token: 'from-env' },
+    ]);
   });
 
   it('finds MCP restart port owners without shell-interpolated process lookup', () => {

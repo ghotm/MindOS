@@ -9,17 +9,37 @@ describe('pending agent action sheet contract', () => {
   it('mounts one global authorization surface from the root layout', () => {
     const layout = read('app/_layout.tsx');
     expect(layout).toContain("import PendingAgentActionSheet from '@/components/agent/PendingAgentActionSheet'");
-    expect(layout).toContain('<PendingAgentActionSheet />');
+    expect(layout.match(/<PendingAgentActionSheet\b/g)).toHaveLength(1);
+    expect(layout).toContain('key={workspace}');
   });
 
-  it('polls only while connected and active, then refreshes after decisions', () => {
+  it('refreshes on pending-action and agent-run events, keeps the 2.5s poll only as a fallback, and refreshes after decisions', () => {
     const hook = read('hooks/usePendingAgentActions.ts');
-    expect(hook).toContain('AppState.addEventListener');
+    // Foreground gating and the fallback poll now live in useEventDrivenRefresh
+    // (see event-driven-refresh.test.ts); the hook must wire it rather than
+    // own a setInterval or AppState listener again.
+    expect(hook).toContain('useEventDrivenRefresh({');
+    expect(hook).toContain("'agent-run.event'");
+    expect(hook).toContain("'run.pending-actions.changed'");
+    expect(hook).toContain('accept: acceptPendingAgentActionEvent');
+    expect(hook).toContain('fallbackPollMs: pollIntervalMs');
+    expect(hook).not.toMatch(/connectedPollMs/);
+    expect(hook).not.toMatch(/\bsetInterval\s*\(/);
+    expect(hook).not.toContain('AppState.addEventListener');
     expect(hook).toContain('getPendingAgentActions');
     expect(hook).toContain('resolveRuntimePermission');
     expect(hook).toContain('resolveAutomationApproval');
     expect(hook).toContain('resolveUserQuestion');
     expect(hook).toContain('pollIntervalMs = 2500');
+  });
+
+  it('consumes the server-normalized action keys instead of deriving them locally', () => {
+    const hook = read('hooks/usePendingAgentActions.ts');
+    expect(hook).toContain('item.key !== key');
+    expect(hook).not.toContain('pendingAgentActionKey');
+    const sheet = read('components/agent/PendingAgentActionSheet.tsx');
+    expect(sheet).toContain('action.key');
+    expect(sheet).not.toContain('pendingAgentActionKey');
   });
 
   it('supports server-provided permission choices and complete question answers', () => {

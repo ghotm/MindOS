@@ -1,17 +1,22 @@
 /**
- * JSONC parser — strips BOM and comments before JSON.parse.
+ * JSONC helpers for the CLI.
  *
- * VS Code-based editors (Cursor, Windsurf, Cline) use JSONC for config files.
- * Windows editors (Notepad) may prepend a UTF-8 BOM (\uFEFF).
+ * Generated-bundle mirror: the implementation lives in
+ * `src/foundation/shared/utils/jsonc.ts` (jsonc-parser inlined by esbuild, so
+ * the Bun single binary needs no bare-specifier resolution) and reaches the
+ * CLI through `bin/lib/generated/agent-config.mjs` (see `agent-config.js`).
+ *
+ * VS Code-based editors (Cursor, Windsurf, Cline, Kilo) use JSONC for config
+ * files; Windows editors (Notepad) may prepend a UTF-8 BOM. Reads tolerate
+ * comments, trailing commas and a BOM; writes edit the original text in place
+ * so user comments and formatting survive.
  */
+import { loadAgentConfigBundle } from './agent-config.js';
 
-export function stripBom(text) {
-  return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
-}
-
-export const parseJsonc = (text) => {
-  let stripped = stripBom(text).replace(/\\"|"(?:\\"|[^"])*"|(\/\/.*$)/gm, (m, g) => g ? '' : m);
-  stripped = stripped.replace(/\/\*[\s\S]*?\*\//g, '');
-  if (!stripped.trim()) return {};
-  return JSON.parse(stripped);
-};
+export const {
+  parseJsonc,
+  parseJsoncDocument,
+  removeJsoncValue,
+  setJsoncValue,
+  stripBom,
+} = await loadAgentConfigBundle();

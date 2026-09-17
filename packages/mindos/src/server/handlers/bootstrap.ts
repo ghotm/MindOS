@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { json, publicCacheHeaders, type MindosServerResponse } from '../response.js';
+import { json, revalidateCacheHeaders, type MindosServerResponse } from '../response.js';
 
 export type BootstrapHandlerServices = {
   collectAllFiles(): string[];
@@ -48,13 +48,13 @@ export function handleBootstrapGet(
   };
 
   if (targetDir) {
-    payload.target_readme = tryRead(services, path.join(targetDir, 'README.md'));
-    payload.target_instruction = tryRead(services, path.join(targetDir, 'INSTRUCTION.md'));
-    payload.target_config_json = tryRead(services, path.join(targetDir, 'CONFIG.json'));
+    payload.target_readme = tryRead(services, path.posix.join(targetDir, 'README.md'));
+    payload.target_instruction = tryRead(services, path.posix.join(targetDir, 'INSTRUCTION.md'));
+    payload.target_config_json = tryRead(services, path.posix.join(targetDir, 'CONFIG.json'));
   }
 
   return json(payload, {
-    headers: publicCacheHeaders(300, weakJsonEtag(payload)),
+    headers: revalidateCacheHeaders(weakJsonEtag(payload)),
   });
 }
 
@@ -107,6 +107,10 @@ type BootstrapTreeNode = {
   children?: BootstrapTreeNode[];
 };
 
+// Directory lookup per sibling list; `nodes.find` made a flat 5000-file root
+// cost ~12M comparisons per /api/bootstrap call.
+const directoryIndex = new WeakMap<BootstrapTreeNode[], Map<string, BootstrapTreeNode>>();
+
 function addFile(nodes: BootstrapTreeNode[], segments: string[]) {
   const [head, ...tail] = segments;
   if (!head) return;
@@ -115,10 +119,16 @@ function addFile(nodes: BootstrapTreeNode[], segments: string[]) {
     return;
   }
 
-  let dir = nodes.find((node) => node.type === 'directory' && node.name === head);
+  let index = directoryIndex.get(nodes);
+  if (!index) {
+    index = new Map();
+    directoryIndex.set(nodes, index);
+  }
+  let dir = index.get(head);
   if (!dir) {
     dir = { name: head, type: 'directory', children: [] };
     nodes.push(dir);
+    index.set(head, dir);
   }
   addFile(dir.children ?? [], tail);
 }

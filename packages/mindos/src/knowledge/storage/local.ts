@@ -11,11 +11,12 @@ import {
   rm as fsRm,
   copyFile as fsCopyFile,
   rename as fsRename,
+  unlink as fsUnlink,
   access,
 } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { watch as chokidarWatch } from 'chokidar'
+import { startLocalWatch } from './local-watch.js'
 import type { Result } from '../../foundation/shared/index.js'
 import { ok, err } from '../../foundation/shared/index.js'
 import { createError } from '../../foundation/errors/index.js'
@@ -59,7 +60,15 @@ export class LocalFileSystem implements IFileSystem {
       const dir = dirname(path)
       await fsMkdir(dir, { recursive: true })
 
-      await fsWriteFile(path, content, encoding)
+      // temp + rename: a crash mid-write must never leave a truncated file
+      const temp = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`
+      try {
+        await fsWriteFile(temp, content, encoding)
+        await fsRename(temp, path)
+      } catch (error) {
+        await fsUnlink(temp).catch(() => undefined)
+        throw error
+      }
       this.logger?.debug(`Wrote file: ${path}`)
       return ok(undefined)
     } catch (error) {
@@ -197,61 +206,16 @@ export class LocalFileSystem implements IFileSystem {
     callback: (event: FileSystemEvent) => void
   ): Promise<Result<() => void>> {
     try {
-      const watcher = chokidarWatch(path, {
-        ignored: options.ignored,
-        persistent: options.persistent ?? true,
-        ignoreInitial: options.ignoreInitial ?? true,
-        depth: options.depth,
+      const handle = await startLocalWatch(path, options, {
+        onEvent: callback,
+        onError: (error) => this.logger?.error(`Watcher error: ${path}`, error),
       })
-
-      watcher
-        .on('add', (filePath, stats) => {
-          callback({
-            type: 'add',
-            path: filePath,
-            stats: stats
-              ? {
-                  path: filePath,
-                  size: stats.size,
-                  createdAt: stats.birthtime,
-                  modifiedAt: stats.mtime,
-                  isDirectory: false,
-                  isFile: true,
-                }
-              : undefined,
-          })
-        })
-        .on('change', (filePath, stats) => {
-          callback({
-            type: 'change',
-            path: filePath,
-            stats: stats
-              ? {
-                  path: filePath,
-                  size: stats.size,
-                  createdAt: stats.birthtime,
-                  modifiedAt: stats.mtime,
-                  isDirectory: false,
-                  isFile: true,
-                }
-              : undefined,
-          })
-        })
-        .on('unlink', (filePath) => {
-          callback({ type: 'unlink', path: filePath })
-        })
-        .on('addDir', (dirPath) => {
-          callback({ type: 'addDir', path: dirPath })
-        })
-        .on('unlinkDir', (dirPath) => {
-          callback({ type: 'unlinkDir', path: dirPath })
-        })
 
       this.logger?.info(`Started watching: ${path}`)
 
       // Return cleanup function
       const cleanup = () => {
-        watcher.close()
+        handle.close()
         this.logger?.info(`Stopped watching: ${path}`)
       }
 

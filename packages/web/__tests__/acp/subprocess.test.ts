@@ -18,6 +18,8 @@ function makeChildProcess() {
     stdout: {},
     stderr: { on: vi.fn() },
     on: vi.fn(),
+    once: vi.fn(),
+    kill: vi.fn(),
   } as any;
 }
 
@@ -36,7 +38,11 @@ describe('spawnAcpAgent', () => {
     process.env.SHELL = originalShell;
   });
 
-  it('spawns with the absolute executable resolved from the login shell on macOS', () => {
+  // Command resolution checks the current PATH and well-known install dirs
+  // (real fs) before falling back to a login shell (mocked here), so these
+  // tests assert that an absolute executable was used rather than pinning
+  // which lookup produced it.
+  it('spawns with an absolute executable instead of a bare command on macOS', () => {
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     process.env.SHELL = '/bin/zsh';
 
@@ -51,7 +57,7 @@ describe('spawnAcpAgent', () => {
     spawnAcpAgent({ id: 'gemini' } as any);
 
     expect(mockSpawn).toHaveBeenCalledWith(
-      '/Users/test/bin/gemini',
+      expect.stringMatching(/^\/.*\/gemini$/),
       ['--acp'],
       expect.objectContaining({ shell: false }),
     );
@@ -72,7 +78,7 @@ describe('spawnAcpAgent', () => {
     spawnAcpAgent({ id: 'claude' } as any);
 
     expect(mockSpawn).toHaveBeenCalledWith(
-      '/Users/test/bin/npx',
+      expect.stringMatching(/^\/.*\/npx$/),
       ['--yes', '@agentclientprotocol/claude-agent-acp'],
       expect.objectContaining({ shell: false }),
     );

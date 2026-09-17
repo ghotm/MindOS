@@ -20,7 +20,21 @@ import type {
   AcpPromptCapabilities,
   AcpSessionCapabilities,
 } from '../../protocols/acp/index.js';
+import { applyAcpHandshakeToRuntime } from '../../agent/runtime/descriptors.js';
 import { errorResponse, json, type MindosServerResponse } from '../response.js';
+import {
+  filterProjectionsByRuntime,
+  reason,
+  runtimeAvailableReason,
+  runtimeKey,
+  uniqSorted,
+  type AgentRuntimeProjectionReason,
+} from './runtime-projection-shared.js';
+
+const ADAPTER_AVAILABILITY_WORDING = {
+  available: 'is available for adapter contract diagnostics.',
+  unavailable: 'is not available, so adapter contract readiness cannot be trusted.',
+};
 
 export type AgentRuntimeAdapterProjectionStatus =
   | 'ready'
@@ -34,12 +48,7 @@ export type AgentRuntimeAdapterFacetStatus =
   | 'blocked'
   | 'unknown';
 
-export type AgentRuntimeAdapterProjectionReason = {
-  id: string;
-  status: AgentRuntimeCompatibilityRequirementStatus;
-  owner: AgentRuntimeCompatibilityOwner;
-  summary: string;
-};
+export type AgentRuntimeAdapterProjectionReason = AgentRuntimeProjectionReason;
 
 type AdapterFacetBase = {
   status: AgentRuntimeAdapterFacetStatus;
@@ -164,10 +173,7 @@ export async function handleAgentRuntimeAdapterProjectionsGet(
       force: searchParams.get('force') === '1',
     }) ?? [];
     const payload = buildAgentRuntimeAdapterProjectionsPayload({ runtimes, acpHandshakeHealth });
-    const runtimeFilter = searchParams.get('runtime')?.trim();
-    const projections = runtimeFilter
-      ? payload.projections.filter((projection) => projection.runtimeId === runtimeFilter || projection.runtimeKind === runtimeFilter)
-      : payload.projections;
+    const projections = filterProjectionsByRuntime(payload.projections, searchParams.get('runtime'));
     return json(
       { ...payload, projections },
       { headers: { 'Cache-Control': 'no-store' } },
@@ -184,7 +190,11 @@ export function buildAgentRuntimeAdapterProjectionsPayload(input: {
   const handshakeByRuntime = byAcpHandshake(input.acpHandshakeHealth ?? []);
   return {
     schemaVersion: 1,
-    projections: input.runtimes.map((runtime) => buildRuntimeAdapterProjection(runtime, handshakeByRuntime.get(runtimeKey(runtime)))),
+    projections: input.runtimes.map((runtime) => {
+      const handshake = handshakeByRuntime.get(runtimeKey(runtime));
+      // The cached initialize handshake refines the descriptor (declared capabilities, signed-out) before projecting it.
+      return buildRuntimeAdapterProjection(applyAcpHandshakeToRuntime(runtime, handshake), handshake);
+    }),
   };
 }
 
@@ -222,7 +232,7 @@ function buildRuntimeAdapterProjection(
     output,
     protocol,
     reasons: [
-      runtimeAvailableReason(runtime),
+      runtimeAvailableReason(runtime, ADAPTER_AVAILABILITY_WORDING),
       ...facets.flatMap((facet) => facet.reasons),
     ],
     ...(blockers.length > 0 ? { blockers } : {}),
@@ -438,8 +448,10 @@ function buildHealthProjection(
   const blockers: string[] = [];
   const handshakeFailed = runtime.kind === 'acp' && handshake?.status === 'failed';
   const handshakeReady = runtime.kind === 'acp' && handshake?.status === 'ready';
+  const signedOut = handshakeFailed && handshake?.stage === 'authenticate';
   if (runtime.status !== 'available') blockers.push('runtime-available');
   if (handshakeFailed) blockers.push('acp-handshake');
+  if (signedOut) blockers.push('runtime-signed-out');
   if (!handshakeReady && (contract.mode === 'unknown' || contract.mode === 'unsupported')) blockers.push('adapter-health-contract');
   const status = runtime.status !== 'available'
     ? 'blocked'
@@ -482,6 +494,12 @@ function buildHealthProjection(
             ? `${runtime.name} completed ACP handshake stage ${handshake.stage}.`
             : `${runtime.name} failed ACP handshake stage ${handshake.stage}${handshake.message ? `: ${handshake.message}` : '.'}`,
       )] : []),
+      ...(signedOut ? [reason(
+        'runtime-signed-out',
+        'missing',
+        'external',
+        `${runtime.name} is installed but demanded sign-in that MindOS could not complete; sign in to the agent in a terminal from the environment that starts MindOS, then retry.`,
+      )] : []),
     ],
     ...(blockers.length > 0 ? { blockers: uniqSorted(blockers) } : {}),
   };
@@ -510,6 +528,9 @@ function handshakeProjection(handshake: AcpHandshakeHealthResult | undefined): N
 function acpHandshakeSummary(runtimeName: string, handshake: AcpHandshakeHealthResult): string {
   if (handshake.status === 'ready') {
     return `${runtimeName} completed a cached ACP ${handshake.stage} handshake.`;
+  }
+  if (handshake.stage === 'authenticate') {
+    return `${runtimeName} is signed out: the agent required authentication that MindOS could not complete.`;
   }
   return `${runtimeName} failed a cached ACP ${handshake.stage} handshake.`;
 }
@@ -664,34 +685,9 @@ function commandDiscoverySummary(
   return `${runtimeName} does not declare a command discovery contract yet.`;
 }
 
-function runtimeAvailableReason(runtime: AgentRuntimeDescriptor): AgentRuntimeAdapterProjectionReason {
-  return reason(
-    'runtime-available',
-    runtime.status === 'available' ? 'satisfied' : 'missing',
-    runtime.status === 'available' ? 'mindos' : 'shared',
-    runtime.status === 'available'
-      ? `${runtime.name} is available for adapter contract diagnostics.`
-      : `${runtime.name} is not available, so adapter contract readiness cannot be trusted.`,
-  );
-}
 
-function reason(
-  id: string,
-  status: AgentRuntimeCompatibilityRequirementStatus,
-  owner: AgentRuntimeCompatibilityOwner,
-  summary: string,
-): AgentRuntimeAdapterProjectionReason {
-  return { id, status, owner, summary };
-}
 
-function runtimeKey(runtime: AgentRuntimeDescriptor): string {
-  return runtime.runtimeId ?? runtime.id;
-}
 
 function byAcpHandshake(results: AcpHandshakeHealthResult[]): Map<string, AcpHandshakeHealthResult> {
   return new Map(results.map((result) => [result.agentId, result]));
-}
-
-function uniqSorted<T extends string>(values: T[]): T[] {
-  return [...new Set(values)].sort();
 }

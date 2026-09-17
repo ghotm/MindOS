@@ -23,8 +23,9 @@ import { registerShortcuts, unregisterShortcuts } from './shortcuts';
 import { restoreWindowState, saveWindowState, saveWindowStateNow } from './window-state';
 import { isSafeExternalUrl } from './open-external-guard';
 import { planUninstall } from './uninstall-plan';
-import { rewriteMcpClientConfig } from './mcp-config-rewrite';
+import { rewriteMcpClientConfigFile } from './mcp-config-rewrite';
 import { setupUpdater } from './updater';
+import { ensureInstallLocation } from './install-location';
 import { setupAppMenu } from './app-menu';
 import { ConnectionMonitor } from './connection-monitor';
 import { showConnectWindow, showModeSelectWindow, getActiveRemoteConnection, getLastSshConnection, setActiveRemoteConnection, loadPassword, clearActiveTunnel, adoptActiveTunnel } from './connect-window';
@@ -44,11 +45,12 @@ import { ensureMindosCliShim, refreshMindosCliAndNotify, scheduleCliShimInstall 
 import { verifyMindOsWebHealth, verifyMindOsWebListening } from './mindos-web-health';
 import { resolvePreferUnpacked } from './resolve-packaged-asset';
 import { registerMindosConnectSchemePrivileged, registerMindosConnectProtocol } from './mindos-connect-protocol';
-import { CoreUpdater } from './core-updater';
+import { CoreUpdater, resolveCoreDownloadRequest } from './core-updater';
 import { authenticateRemoteWebSession } from './remote-auth';
 import { getAppConfigStore } from './app-config-store';
 import { desktopTelemetry } from './telemetry';
 import { startObsidianSecretStorageBroker, type ObsidianSecretStorageBrokerHandle } from './obsidian-secret-storage-broker';
+import { createObsidianEditorLauncher } from './obsidian-editor-launcher';
 import {
   CONFIG_DIR,
   DEFAULT_MCP_PORT,
@@ -108,6 +110,8 @@ const MAIN_PRELOAD = resolvePreferUnpacked('dist-electron', 'preload', 'index.js
 let splashWindow: BrowserWindow | null = null;
 let mainWindow: BrowserWindow | null = null;
 let processManager: ProcessManager | null = null;
+/** In-flight `npm install` / `next build` child (not owned by ProcessManager) — killed on quit. */
+let activeBuildChild: ChildProcess | null = null;
 let obsidianSecretStorageBroker: ObsidianSecretStorageBrokerHandle | null = null;
 let connectionMonitor: ConnectionMonitor | null = null;
 let isQuitting = false;
@@ -958,11 +962,15 @@ function updateMcpClientConfigs(oldPort: number, newPort: number): void {
   for (const rel of configPaths) {
     const abs = resolve(rel);
     try {
-      if (!existsSync(abs)) continue;
-      const raw = readFileSync(abs, 'utf-8');
-      const replaced = rewriteMcpClientConfig(raw, oldPort, newPort);
-      if (replaced === null) continue;
-      writeFileSync(abs, replaced, 'utf-8');
+      // Third-party files: validated as JSON and written via temp file + rename
+      // so a crash mid-write can never leave the user's other tools with a
+      // truncated config.
+      const result = rewriteMcpClientConfigFile(abs, oldPort, newPort);
+      if (result === 'invalid') {
+        console.warn(`[MindOS] Skipped ${rel}: rewritten MCP config is not valid JSON, leaving file untouched`);
+        continue;
+      }
+      if (result !== 'updated') continue;
       updated++;
       console.info(`[MindOS] Updated MCP port in ${rel}: ${oldPort} → ${newPort}`);
     } catch (err) {
@@ -1404,6 +1412,7 @@ function spawnWithEnv(bin: string, args: string[], cwd: string, env: Record<stri
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     });
+    activeBuildChild = proc;
     let settled = false;
 
     // Log last output for diagnostics on failure
@@ -1415,16 +1424,22 @@ function spawnWithEnv(bin: string, args: string[], cwd: string, env: Record<stri
       if (settled) return;
       settled = true;
       forceTerminateProcessTree(proc);
+      if (activeBuildChild === proc) activeBuildChild = null;
       reject(new Error(`${path.basename(bin)} ${args[0] || ''} timed out after ${Math.round(timeoutMs / 1000)}s\nLast output: ${lastOutput}`));
     }, timeoutMs);
     proc.on('exit', (code: number | null) => {
       clearTimeout(timer);
+      if (activeBuildChild === proc) activeBuildChild = null;
       if (settled) return;
       settled = true;
       if (code === 0) resolve();
       else reject(new Error(`${path.basename(bin)} ${args[0] || ''} exited with code ${code}\n${lastOutput}`));
     });
-    proc.on('error', (err: Error) => { clearTimeout(timer); if (!settled) { settled = true; reject(err); } });
+    proc.on('error', (err: Error) => {
+      clearTimeout(timer);
+      if (activeBuildChild === proc) activeBuildChild = null;
+      if (!settled) { settled = true; reject(err); }
+    });
   });
 }
 
@@ -1716,22 +1731,21 @@ function installMainWindowNavigationGuard(win: BrowserWindow): void {
   });
 }
 
-function parseCoreDownloadArgs(
-  urls: unknown,
-  version: unknown,
-  size: unknown,
-  sha256: unknown,
-): { urls: string[]; version: string; size: number; sha256: string } {
-  if (!Array.isArray(urls) || urls.some((url) => typeof url !== 'string')) {
-    throw new Error('Invalid core update URLs');
-  }
-  if (typeof version !== 'string' || !version.trim()) throw new Error('Invalid core update version');
-  if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) throw new Error('Invalid core update size');
-  if (typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(sha256)) throw new Error('Invalid core update SHA-256');
-  return { urls, version, size, sha256 };
-}
+const obsidianEditorLauncher = createObsidianEditorLauncher(() => {
+  const owner = mainWindow;
+  const port = currentWebPort;
+  if (!owner || owner.isDestroyed() || currentMode !== 'local' || !port || isQuitting || isRestarting || isUpdating) return null;
+  const token = loadConfig().authToken;
+  if (typeof token !== 'string' || !token) return null;
+  return {
+    window: owner, baseUrl: new URL(owner.webContents.getURL()).origin, token,
+    isCurrent: () => mainWindow === owner && currentMode === 'local' && currentWebPort === port
+      && !isQuitting && !isRestarting && !isUpdating,
+  };
+}, path.join(__dirname, '../obsidian'), path.join(app.getPath('userData'), 'obsidian-drafts'));
 
 function setupIPC(): void {
+  handleLocalOnly('obsidian:open-editor', (event, request: unknown) => obsidianEditorLauncher.open(event, request));
   handleActiveMainWindowOnly('get-app-info', () => ({
     version: app.getVersion(),
     platform: process.platform,
@@ -1784,8 +1798,12 @@ function setupIPC(): void {
     return coreUpdater.check(versionToCheck);
   });
 
-  handleLocalOnly('download-core-update', async (_e, urls: unknown, version: unknown, size: unknown, sha256: unknown) => {
-    const download = parseCoreDownloadArgs(urls, version, size, sha256);
+  // The renderer names only the version; urls/size/sha256 come from the manifest
+  // cached by the last check() so a compromised page cannot pick the tarball and
+  // its hash. The legacy (urls, version, size, sha256) call shape still works —
+  // everything but `version` is ignored.
+  handleLocalOnly('download-core-update', async (_e, ...args: unknown[]) => {
+    const download = resolveCoreDownloadRequest(args, coreUpdater.getLastCheck());
     // Forward progress events to renderer
     const onProgress = (p: { percent: number; transferred: number; total: number }) => {
       const wins = BrowserWindow.getAllWindows();
@@ -2009,6 +2027,16 @@ async function handleSplashAction(actionId: string): Promise<void> {
       shell.openExternal('https://nodejs.org/');
       break;
     case 'switch-remote': {
+      // A failed local boot can leave a ProcessManager with half-started web/MCP
+      // children; remote mode never touches them, so release them here.
+      if (processManager) {
+        const pm = processManager;
+        processManager = null;
+        pm.removeAllListeners();
+        await pm.stop().catch((err) => {
+          console.warn('[MindOS] Failed to stop local services before switching to remote:', err instanceof Error ? err.message : err);
+        });
+      }
       currentMode = 'remote';
       saveDesktopMode('remote');
       closeSplash();
@@ -2127,7 +2155,11 @@ async function bootApp(): Promise<void> {
   mainWindow.webContents.removeAllListeners('did-fail-load');
   mainWindow.webContents.removeAllListeners('did-finish-load');
 
-  mainWindow.webContents.on('did-fail-load', (_event, code, desc, failedUrl) => {
+  mainWindow.webContents.on('did-fail-load', (_event, code, desc, failedUrl, isMainFrame) => {
+    // Sub-frame failures (embedded iframes) and ERR_ABORTED (-3: a navigation
+    // superseded by a newer loadURL, e.g. right after apply-core-update) are not
+    // main-page failures — surfacing them closed the splash and raised a modal.
+    if (!isMainFrame || code === -3) return;
     console.error('[MindOS] main window did-fail-load', code, desc, failedUrl);
     closeSplash();
     const zh = navigator_lang() === 'zh';
@@ -2148,6 +2180,11 @@ async function bootApp(): Promise<void> {
   // Show main + hide splash on each navigation (not just the first)
   let firstLoad = true;
   mainWindow.webContents.on('did-finish-load', () => {
+    if (process.env.MINDOS_DESKTOP_CI_LOG && currentMode === 'local') {
+      void mainWindow?.webContents.executeJavaScript('Boolean(window.mindos && document.body && document.body.innerText.trim())')
+        .then(ready => { if (ready) console.info('[MindOS] Desktop renderer ready'); })
+        .catch(error => console.error('[MindOS] Desktop renderer smoke failed:', error));
+    }
     if (firstLoad) {
       mainWindow?.show();
       closeSplash();
@@ -2177,6 +2214,14 @@ async function bootApp(): Promise<void> {
 app.whenReady().then(async () => {
   // Second instance: app.quit() is already queued — don't start servers or heal
   if (!hasSingleInstanceLock) return;
+
+  if (!await ensureInstallLocation({
+    platform: process.platform, packaged: app.isPackaged, exe: app.getPath('exe'),
+    locale: app.getLocale(), smoke: Boolean(process.env.MINDOS_DESKTOP_CI_LOG),
+    move: () => app.moveToApplicationsFolder(), quit: () => app.quit(),
+    prompt: async options => (await dialog.showMessageBox({ type: 'question', ...options })).response,
+    showError: async message => { await dialog.showMessageBox({ type: 'error', title: 'MindOS', message }); },
+  })) return;
 
   registerMindosConnectProtocol();
 
@@ -2247,21 +2292,36 @@ app.on('before-quit', (e) => {
     // Synchronous save — the debounced saveWindowState timer never fires before app.exit
     if (mainWindow && !mainWindow.isDestroyed()) saveWindowStateNow(mainWindow);
     const cleanup = async () => {
+      await obsidianEditorLauncher.flush().catch(() => console.error('[Obsidian] Could not flush all recovery drafts before quit.'));
+      // An in-flight `npm install` / `next build` is not owned by ProcessManager
+      // and would otherwise outlive the app.
+      if (activeBuildChild) {
+        forceTerminateProcessTree(activeBuildChild);
+        activeBuildChild = null;
+      }
+      // lastCleanExit lets the next boot skip the heal path. It must only be
+      // recorded when every child confirmed exit: stop() resolves false when a
+      // force-killed child never reported exit, and the 8s race rejects on hang.
+      let childrenStopped = true;
       try {
         if (processManager) {
-          // Timeout: force exit if stop() hangs (child process not responding)
-          await Promise.race([
+          const stopped = await Promise.race([
             processManager.stop(),
-            new Promise<void>((_, reject) => setTimeout(() => reject(new Error('stop timeout')), 8000)),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('stop timeout')), 8000)),
           ]);
+          if (stopped === false) childrenStopped = false;
         }
-      } catch { /* best-effort */ }
+      } catch { childrenStopped = false; }
       await stopObsidianSecretStorageBroker();
       if (connectionMonitor) connectionMonitor.stop();
       if (activeRecoveryPoll) { clearInterval(activeRecoveryPoll); activeRecoveryPoll = null; }
       if (cleanupUpdater) { cleanupUpdater(); cleanupUpdater = null; }
       clearActiveTunnel();
-      try { getAppConfigStore().set('lastCleanExit', Date.now()); } catch { /* best-effort */ }
+      if (childrenStopped) {
+        try { getAppConfigStore().set('lastCleanExit', Date.now()); } catch { /* best-effort */ }
+      } else {
+        console.warn('[MindOS] Child processes did not confirm exit — not recording a clean exit, next launch will run the full heal path');
+      }
       app.exit(0);
     };
     // Must use .then() — event handler cannot be async, but cleanup must complete before exit
