@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo, useTransition, useDeferredValue, memo, type ReactNode } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useTransition, useDeferredValue, memo, type ReactNode, type RefObject } from 'react';
 import { AlertCircle, Loader2, RefreshCw, Search, Link2, MessageSquare, SquarePen, X } from 'lucide-react';
 import type { AgentRuntimeIdentity, ChatSession } from '@/lib/types';
+import { getDisplayRuntimeSessionBinding } from '@/lib/ask-agent';
+import { getEffectiveSessionWorkDir } from '@/lib/session-context';
 import { sessionTitle } from '@/hooks/useAskSession';
 import { useRunSummary } from '@/lib/agent-run-store';
 import { useLocale } from '@/lib/stores/locale-store';
@@ -20,8 +22,13 @@ import {
 } from '@/lib/session-list-entry';
 import { SessionHistoryRow } from './SessionHistoryRow';
 
+export type HistoryScrollState = { key: string; top: number };
+
 interface SessionHistoryPanelProps {
+  scrollStateRef?: RefObject<HistoryScrollState>;
   externalScope?: 'all' | 'project';
+  externalCwd?: string;
+  onRetryRuntimeSessions?: () => void;
   onExternalScopeChange?: (scope: 'all' | 'project') => void;
   externalProjectAvailable?: boolean;
   externalQuery?: string;
@@ -65,8 +72,8 @@ function compareHistoryRows(a: HistoryRow, b: HistoryRow): number {
 // ── Main Component ──
 
 function SessionHistoryPanel({
-  sessions, activeSessionId,
-  externalScope = 'all', onExternalScopeChange, externalProjectAvailable = false,
+  sessions, activeSessionId, scrollStateRef,
+  externalScope = 'all', externalCwd, onExternalScopeChange, externalProjectAvailable = false,
   externalQuery, onExternalQueryChange, externalHasMore = false, onLoadMoreExternal,
   externalArchived = false, onExternalArchivedChange,
   selectedAgentRuntime,
@@ -78,7 +85,7 @@ function SessionHistoryPanel({
   onLoad, onDelete, onRename, onTogglePin,
   onForkSession,
   onClose, onNewChat,
-  onRefreshRuntimeSessions, onAttachRuntimeSession, onForkRuntimeSession, onArchiveRuntimeSession,
+  onRefreshRuntimeSessions, onRetryRuntimeSessions, onAttachRuntimeSession, onForkRuntimeSession, onArchiveRuntimeSession,
 }: SessionHistoryPanelProps) {
   const { t } = useLocale();
   const [, startTransition] = useTransition();
@@ -88,18 +95,29 @@ function SessionHistoryPanel({
   // re-render the list (spec-chat-session-concurrency.md performance bar).
   const runSummary = useRunSummary();
   const [localQuery, setLocalQuery] = useState('');
-  const query = externalQuery ?? localQuery;
+  const [composition, setComposition] = useState<string | null>(null);
+  const composingRef = useRef(false);
+  const committedQuery = externalQuery ?? localQuery;
+  const query = composition ?? committedQuery;
   const setQuery = (value: string) => { setLocalQuery(value); onExternalQueryChange?.(value); };
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const normalizedQuery = query.trim().toLowerCase();
+  const normalizedQuery = committedQuery.trim().toLowerCase();
+  const listRef = useRef<HTMLDivElement>(null);
+  const scrollKey = JSON.stringify([selectedAgentRuntime?.kind, selectedAgentRuntime?.id, externalScope, externalScope === 'project' ? externalCwd : undefined, committedQuery.trim(), externalArchived]);
+  useLayoutEffect(() => {
+    if (!listRef.current || !scrollStateRef) return;
+    if (scrollStateRef.current.key !== scrollKey) scrollStateRef.current = { key: scrollKey, top: 0 };
+    listRef.current.scrollTop = scrollStateRef.current.top;
+  }, [scrollKey, scrollStateRef]);
+  const resultRows = () => Array.from(listRef.current?.querySelectorAll<HTMLElement>('[data-runtime-session-row][tabindex="0"], [data-session-history-row][tabindex="0"]') ?? []);
   const deferredNormalizedQuery = useDeferredValue(normalizedQuery);
   const searchQuery = normalizedQuery ? deferredNormalizedQuery : '';
 
   // Focus search on mount
-  useEffect(() => { searchRef.current?.focus(); }, []);
+  useEffect(() => { searchRef.current?.focus({ preventScroll: true }); }, []);
 
   // Focus rename input
   useEffect(() => { if (editingId) setTimeout(() => inputRef.current?.focus(), 0); }, [editingId]);
@@ -120,21 +138,27 @@ function SessionHistoryPanel({
     return index;
   }, [runtimeSessions]);
 
-  // A native session already bound to a local chat is one conversation.
-  const unboundRuntimeSessions = useMemo(() => {
-    const bound = new Set(sessions.filter(s => s.runtimeSessionBinding?.runtime === selectedAgentRuntime?.kind
-      && s.runtimeSessionBinding?.runtimeId === selectedAgentRuntime?.id).map(s => s.runtimeSessionBinding?.externalSessionId));
-    return runtimeSessions.filter(entry => !bound.has(entry.id));
-  }, [sessions, runtimeSessions, selectedAgentRuntime?.id, selectedAgentRuntime?.kind]);
+  const showRuntimeSessions = Boolean(selectedAgentRuntime && runtimeSessionsSupported);
+  // Apply the same scope to native and saved rows. Deduplicate only after filtering:
+  // a locally renamed copy must not hide a native search hit that still matches.
+  const filtered = useMemo(() => sessions.filter(session => {
+    if (showRuntimeSessions) {
+      if (externalScope === 'project' && getEffectiveSessionWorkDir(session).path?.trim() !== externalCwd?.trim()) return false;
+      if (selectedAgentRuntime?.kind === 'codex') {
+        const archived = getDisplayRuntimeSessionBinding(session)?.status === 'archived';
+        if (archived !== externalArchived) return false;
+      }
+    }
+    const entry = sessionEntryById.get(session.id);
+    return !searchQuery || (entry ? sessionListEntryMatchesSearch(entry, searchQuery) : false);
+  }), [sessions, showRuntimeSessions, externalScope, externalCwd, selectedAgentRuntime?.kind, externalArchived, searchQuery, sessionEntryById]);
 
-  // Filter sessions by search query
-  const filtered = useMemo(() => {
-    if (!searchQuery) return sessions;
-    return sessions.filter((session) => {
-      const entry = sessionEntryById.get(session.id);
-      return entry ? sessionListEntryMatchesSearch(entry, searchQuery) : false;
-    });
-  }, [sessions, searchQuery, sessionEntryById]);
+  const unboundRuntimeSessions = useMemo(() => {
+    const bound = new Set(filtered.map(getDisplayRuntimeSessionBinding)
+      .filter(binding => binding?.runtime === selectedAgentRuntime?.kind && binding?.runtimeId === selectedAgentRuntime?.id)
+      .map(binding => binding?.externalSessionId));
+    return runtimeSessions.filter(entry => !bound.has(entry.id));
+  }, [filtered, runtimeSessions, selectedAgentRuntime?.id, selectedAgentRuntime?.kind]);
 
   const filteredRuntimeSessions = useMemo(() => {
     if (!runtimeSessionsSupported) return [];
@@ -145,15 +169,7 @@ function SessionHistoryPanel({
     });
   }, [runtimeSessionEntryById, unboundRuntimeSessions, runtimeSessionsSupported, searchQuery]);
 
-  const pinnedCount = useMemo(() => sessions.filter(s => s.pinned).length, [sessions]);
-  const totalCount = useMemo(() => {
-    let count = 0;
-    for (const session of sessions) {
-      if (sessionEntryById.get(session.id)?.hasListContent) count += 1;
-    }
-    return count;
-  }, [sessions, sessionEntryById]);
-  const showRuntimeSessions = Boolean(selectedAgentRuntime && runtimeSessionsSupported);
+  const pinnedCount = filtered.filter(session => session.pinned).length;
   const historyRows = useMemo<HistoryRow[]>(() => {
     const rows: HistoryRow[] = filtered.map((session) => {
       const listEntry = sessionEntryById.get(session.id) ?? buildChatSessionListEntry(session);
@@ -184,7 +200,7 @@ function SessionHistoryPanel({
     rows.sort(compareHistoryRows);
     return rows;
   }, [filtered, filteredRuntimeSessions, runtimeSessionEntryById, sessionEntryById, showRuntimeSessions]);
-  const totalHistoryCount = totalCount + (showRuntimeSessions ? unboundRuntimeSessions.length : 0);
+
 
   const handleLoad = useCallback((id: string) => {
     startTransition(() => {
@@ -217,19 +233,24 @@ function SessionHistoryPanel({
   // Keyboard: Esc to close
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !editingId) onClose();
+      if (e.key === 'Escape' && !e.defaultPrevented && !e.isComposing && e.keyCode !== 229 && !composingRef.current && !editingId) {
+        e.preventDefault(); e.stopPropagation(); onClose();
+      }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
   }, [onClose, editingId]);
 
   const hasAnyResults = historyRows.length > 0 || (showRuntimeSessions && (runtimeSessionsLoading || Boolean(runtimeSessionsError)));
+  const count = historyRows.length;
   const statsLabel = showRuntimeSessions
-    ? pluralizeSessionListCount(totalHistoryCount, 'session', 'sessions')
-    : (ask?.historyStats?.(totalCount) ?? `${totalCount} conversations`);
+    ? searchQuery
+      ? (ask.externalSessions?.matchingCount?.(count, externalHasMore) ?? `${count} matching session${count === 1 ? '' : 's'}${externalHasMore ? ' loaded' : ''}`)
+      : (ask.externalSessions?.loadedCount?.(count, externalHasMore) ?? `${count} session${count === 1 ? '' : 's'}${externalHasMore ? ' loaded' : ''}`)
+    : (ask?.historyStats?.(count) ?? `${count} conversations`);
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 animate-in fade-in-0 duration-150">
+    <div aria-busy={runtimeSessionsLoading} className="flex flex-col flex-1 min-h-0 animate-in fade-in-0 duration-150">
       {showRuntimeSessions && onExternalScopeChange && (
         <div className="px-4 pt-3 pb-1 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -256,21 +277,33 @@ function SessionHistoryPanel({
       {/* Search bar */}
       <div className="px-4 pt-2.5 pb-1.5 shrink-0">
         <div className="relative">
-          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50" />
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
             ref={searchRef}
             type="text"
+            aria-label={ask?.historySearch ?? 'Search conversations'}
             value={query}
-            onChange={e => setQuery(e.target.value)}
+            onCompositionStart={event => { composingRef.current = true; setComposition(event.currentTarget.value); }}
+            onCompositionEnd={event => { composingRef.current = false; setComposition(null); setQuery(event.currentTarget.value); }}
+            onChange={event => { if (composingRef.current) setComposition(event.target.value); else setQuery(event.target.value); }}
+            onKeyDown={event => {
+              if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) { event.stopPropagation(); return; }
+              if (event.key === 'Escape' && committedQuery) {
+                event.preventDefault(); event.stopPropagation(); setQuery('');
+              } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                const rows = resultRows(); const row = event.key === 'ArrowDown' ? rows[0] : rows.at(-1);
+                if (row) { event.preventDefault(); row.focus(); }
+              }
+            }}
             placeholder={ask?.historySearch ?? 'Search conversations...'}
-            className="h-8 w-full rounded-md border border-border bg-background pl-8 pr-8 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/40 focus-visible:border-[var(--amber)]/40 focus-visible:ring-2 focus-visible:ring-ring/20"
+            className="h-8 w-full rounded-md border border-border bg-background pl-8 pr-8 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-[var(--amber)]/40 focus-visible:ring-2 focus-visible:ring-ring/20"
           />
           {query && (
             <button
               type="button"
-              onClick={() => setQuery('')}
+              onClick={() => { setComposition(null); composingRef.current = false; setQuery(''); searchRef.current?.focus(); }}
               aria-label={ask.externalSessions?.clearSearch ?? 'Clear search'}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground/40 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="hit-target-box absolute right-1 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <X size={12} />
             </button>
@@ -280,8 +313,8 @@ function SessionHistoryPanel({
 
       {/* Stats bar */}
       <div className="flex items-center justify-between px-4 pb-1.5 shrink-0">
-        <span className="flex min-w-0 items-center gap-1.5 text-2xs text-muted-foreground/60">
-          <span className="min-w-0 truncate">
+        <span className="flex min-w-0 items-center gap-1.5 text-2xs text-muted-foreground">
+          <span className="min-w-0 truncate" role="status" aria-live="polite" aria-atomic="true">
             {statsLabel}
             {pinnedCount > 0 && <> &middot; {pinnedCount} {ask?.historyPinned ?? 'pinned'}</>}
           </span>
@@ -308,17 +341,36 @@ function SessionHistoryPanel({
         </button>
       </div>
 
+      {showRuntimeSessions && runtimeSessionsError && (
+        <div className="shrink-0 px-3 pb-2">
+          <RuntimeHistoryNotice
+            tone="error"
+            icon={<AlertCircle size={12} className="mt-0.5 shrink-0 text-error" />}
+            text={runtimeSessionsError}
+            action={onRetryRuntimeSessions ? (
+              <button type="button" onClick={onRetryRuntimeSessions} disabled={runtimeSessionsLoading}
+                className="shrink-0 rounded-md border border-current px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
+                {ask.externalSessions?.retry ?? 'Retry'}
+              </button>
+            ) : undefined}
+          />
+        </div>
+      )}
+
       {/* Scrollable list */}
-      <div className="flex-1 overflow-y-auto min-h-0 px-3 pb-3">
+      <div ref={listRef} data-history-scroll className="flex-1 overflow-y-auto min-h-0 px-3 pb-3"
+        onScroll={event => { if (scrollStateRef) scrollStateRef.current = { key: scrollKey, top: event.currentTarget.scrollTop }; }}
+        onKeyDown={event => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229 || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+          const rows = resultRows(); const index = rows.indexOf(event.target as HTMLElement);
+          if (index < 0) return; // Renaming and nested actions keep their own keys.
+          event.preventDefault();
+          if (event.key === 'ArrowUp' && index === 0) { searchRef.current?.focus(); return; }
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : Math.min(rows.length - 1, Math.max(0, index + (event.key === 'ArrowDown' ? 1 : -1)));
+          rows[next]?.focus();
+        }}>
         {hasAnyResults ? (
           <div className="flex flex-col gap-0.5">
-            {showRuntimeSessions && runtimeSessionsError && (
-              <RuntimeHistoryNotice
-                tone="error"
-                icon={<AlertCircle size={12} className="mt-0.5 shrink-0 text-error" />}
-                text={runtimeSessionsError}
-              />
-            )}
             {showRuntimeSessions && runtimeSessionsLoading && filteredRuntimeSessions.length === 0 && (
               <RuntimeHistoryNotice
                 icon={<Loader2 size={12} className="animate-spin text-muted-foreground/50" />}
@@ -368,11 +420,11 @@ function SessionHistoryPanel({
         ) : (
           <div className="flex flex-col items-center justify-center py-12 text-center">
             <MessageSquare size={32} className="text-muted-foreground/20 mb-3" />
-            <p className="text-sm text-muted-foreground/60">
+            <p className="text-sm text-muted-foreground">
               {query ? (ask.externalSessions?.noMatches ?? 'No matching conversations') : (ask?.historyEmpty ?? 'No conversations yet')}
             </p>
             {!query && (
-              <p className="text-2xs text-muted-foreground/40 mt-1">
+              <p className="text-2xs text-muted-foreground mt-1">
                 {ask?.historyEmptyHint ?? 'Start a new chat to begin'}
               </p>
             )}
@@ -400,10 +452,12 @@ function RuntimeHistoryNotice({
   icon,
   text,
   tone = 'muted',
+  action,
 }: {
   icon: ReactNode;
   text: string;
   tone?: 'muted' | 'error';
+  action?: ReactNode;
 }) {
   return (
     <div role={tone === 'error' ? 'alert' : 'status'}
@@ -414,7 +468,8 @@ function RuntimeHistoryNotice({
       }`}
     >
       {icon}
-      <span className="min-w-0">{text}</span>
+      <span className="min-w-0 flex-1">{text}</span>
+      {action}
     </div>
   );
 }
@@ -459,7 +514,7 @@ function RuntimeSessionRow({
         if (!disabled) onAttach?.(entry);
       }}
       onKeyDown={(event) => {
-        if (disabled) return;
+        if (disabled || event.target !== event.currentTarget || event.nativeEvent.isComposing || event.keyCode === 229) return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           onAttach?.(entry);
@@ -530,11 +585,13 @@ function RuntimeSessionRow({
         )}
         <span className="shrink-0 text-muted-foreground/25">·</span>
         <span className="min-w-0 max-w-[8.5rem] truncate font-mono">{listEntry.compactSessionId}</span>
-        <span className="shrink-0 text-muted-foreground/25">·</span>
-        <span className="inline-flex shrink-0 items-center gap-1">
-          <MessageSquare size={9} />
-          {typeof listEntry.messageCount === 'number' ? pluralizeSessionListCount(listEntry.messageCount, 'msg', 'msgs') : '? msgs'}
-        </span>
+        {typeof listEntry.messageCount === 'number' && <>
+          <span className="shrink-0 text-muted-foreground/25">·</span>
+          <span className="inline-flex shrink-0 items-center gap-1">
+            <MessageSquare size={9} />
+            {pluralizeSessionListCount(listEntry.messageCount, 'msg', 'msgs')}
+          </span>
+        </>}
       </div>
     </div>
   );

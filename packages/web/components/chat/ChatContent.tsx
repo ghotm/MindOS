@@ -341,7 +341,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     : null;
   const isNativeRuntime = selectedNativeRuntimeKind !== null;
   const supportsAgentMode = isMindosRuntime || isNativeRuntime;
-  const runtimeSessionProjection = useRuntimeSessionProjection({ visible, runtime: selectedAgentRuntime });
+  const runtimeSessionProjection = useRuntimeSessionProjection({ visible, runtime: selectedAgentRuntime, sessionId: getMatchingRuntimeSessionBinding(session.activeSession, selectedAgentRuntime)?.externalSessionId });
   const acpRuntimeCommands = useMemo(() => (
     isAcpRuntime
       ? runtimeSessionProjection.selectedProjection?.slashCommands.commands ?? []
@@ -502,6 +502,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
     () => getRuntimeSessionAdapterCapabilities(selectedAgentRuntime),
     [selectedAgentRuntime?.id, selectedAgentRuntime?.kind, selectedAgentRuntime?.name],
   );
+  const historyScrollStateRef = useRef({ key: '', top: 0 });
   const externalHistory = useExternalSessionHistory(
     selectedAgentRuntime, runtimeSessionListCwd(session.activeSession),
     visible && showHistory && runtimeSessionCapabilities.supportsList,
@@ -1622,6 +1623,7 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
 
       {showHistory && (
         <SessionHistoryPanel
+          scrollStateRef={historyScrollStateRef}
           sessions={runtimeScopedSessions}
           activeSessionId={runtimeScopedActiveSessionId}
           selectedAgentRuntime={selectedAgentRuntime}
@@ -1639,6 +1641,8 @@ export default function ChatContent({ visible, currentFile, initialMessage, init
           onClose={closeHistory}
           onNewChat={handleResetSession}
           onRefreshRuntimeSessions={loadRuntimeSessions}
+          onRetryRuntimeSessions={externalHistory.canRetry ? externalHistory.retry : undefined}
+          externalCwd={runtimeSessionListCwd(session.activeSession)}
           externalScope={externalHistory.scope}
           onExternalScopeChange={externalHistory.setScope}
           externalProjectAvailable={Boolean(runtimeSessionListCwd(session.activeSession))}

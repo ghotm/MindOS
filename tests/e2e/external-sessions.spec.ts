@@ -1,10 +1,10 @@
 import { test, expect } from '@playwright/test';
 
 // Native stores and Agent turns are fixtures: this never writes an external Agent's files.
-for (const id of ['claude', 'codex', 'opencode']) {
+for (const id of ['claude', 'codex', 'opencode', 'gemini', 'kimi', 'qwen-code', 'codebuddy', 'openclaw']) {
   test(`${id}: browses all projects, retries pages and opens the original session`, async ({ page, context }) => {
     test.setTimeout(90_000);
-    const runtime = { id, name: id === 'claude' ? 'Claude Code' : id === 'codex' ? 'Codex' : 'OpenCode', kind: id === 'opencode' ? 'acp' : id, status: 'available', capabilities: {}, lifecycle: {}, compatibility: {} };
+    const runtime = { id, name: id === 'claude' ? 'Claude Code' : id === 'codex' ? 'Codex' : id === 'opencode' ? 'OpenCode' : id, kind: id === 'claude' || id === 'codex' ? id : 'acp', status: 'available', capabilities: {}, lifecycle: {}, compatibility: {} };
     await context.addInitScript(runtime => {
       localStorage.setItem('theme', 'light'); localStorage.setItem('locale', 'en');
       localStorage.setItem('mindos:last-agent-runtime', JSON.stringify(runtime));
@@ -14,19 +14,22 @@ for (const id of ['claude', 'codex', 'opencode']) {
     await page.route('**/api/**', route => route.fulfill({ json: {} }));
     await page.route('**/api/setup', route => route.fulfill({ json: { setupPending: false, walkthroughCompleted: true, guideState: { active: false, dismissed: true } } }));
     await page.route('**/api/agent-runtimes?*', route => route.fulfill({ json: { runtimes: [runtime], installed: [], notInstalled: [] } }));
+    await page.route('**/api/acp/session', route => route.fulfill({ status: 501, json: { error: 'Agent does not support session/list' } }));
     let saved: { runtimeSessionBinding?: { externalSessionId: string; cwd: string }; messages?: Array<{ content: string }> } | undefined;
     await page.route('**/api/agent/sessions', route => {
       if (route.request().method() === 'POST') { saved = route.request().postDataJSON().session; return route.fulfill({ json: { ok: true } }); }
       return route.fulfill({ json: [] });
     });
-    const entry = (n: number) => ({ id: `${id}-${n}`, title: `${runtime.name} design ${n}`, name: `${runtime.name} design ${n}`, preview: `Design system iteration ${n}`, cwd: '/workspace/original-project', updatedAt: Date.now() - n * 1000 });
+    const entry = (n: number) => ({ source: 'native-transcript', id: `${id}-${n}`, title: `${runtime.name} design ${n}`, name: `${runtime.name} design ${n}`, preview: `Design system iteration ${n}`, cwd: '/workspace/original-project', updatedAt: Date.now() - n * 1000 });
     let failPage = true;
+    let failRefresh = false;
     const listRequests: URL[] = [];
     const listPattern = id === 'codex' ? '**/api/agent-runtimes/codex/threads?*' : '**/api/agent-runtimes/external-sessions?*';
     await page.route(listPattern, route => {
       const url = new URL(route.request().url());
       if (url.searchParams.has('sessionId')) return route.fulfill({ json: { sessions: [{ ...entry(31), turns: [{ role: 'user', content: 'Original design question' }, { role: 'assistant', content: 'Original design answer' }] }] } });
       listRequests.push(url);
+      if (failRefresh) return route.fulfill({ status: 503, json: { error: 'Refresh unavailable. Previous results are still usable.' } });
       if (url.searchParams.has('cursor') && failPage) return route.fulfill({ status: 503, json: { error: 'Session service unavailable. Retry loading this page.' } });
       const query = url.searchParams.get(id === 'codex' ? 'searchTerm' : 'query');
       const second = url.searchParams.has('cursor');
@@ -41,14 +44,22 @@ for (const id of ['claude', 'codex', 'opencode']) {
     expect(listRequests[0].searchParams.has('cwd')).toBe(false);
     await page.screenshot({ animations: 'disabled', path: `/tmp/external-sessions-${id}-desktop.png` });
     await page.getByRole('button', { name: 'Load more sessions', exact: true }).click();
-    await expect(page.getByRole('alert').filter({ hasText: 'Session service unavailable' })).toBeVisible();
+    await expect(page.getByRole('alert').filter({ hasText: 'Session service unavailable' })).toBeInViewport();
     await expect(page.locator('[data-runtime-session-row]')).toHaveCount(30);
+    await page.screenshot({ animations: 'disabled', path: `/tmp/history-craft-${id}-retry.png` });
     failPage = false;
-    await page.getByRole('button', { name: 'Load more sessions', exact: true }).click();
+    await page.getByRole('button', { name: 'Retry', exact: true }).click();
     await expect(page.locator('[data-runtime-session-row]')).toHaveCount(31);
+    failRefresh = true;
+    await page.getByRole('button', { name: 'Refresh sessions', exact: true }).click();
+    await expect(page.getByRole('alert').filter({ hasText: 'Refresh unavailable' })).toBeVisible();
+    await expect(page.locator('[data-runtime-session-row]')).toHaveCount(31);
+    failRefresh = false;
     await page.getByPlaceholder('Search conversations...').fill('design 31');
     await expect(page.locator('[data-runtime-session-row]')).toHaveCount(1);
     expect(listRequests.at(-1)?.searchParams.has('cursor')).toBe(false);
+    await expect(page.getByRole('status').filter({ hasText: '1 matching session' })).toBeVisible();
+    await expect(page.locator('[data-runtime-session-row]')).not.toContainText('? msgs');
     await page.evaluate(() => document.documentElement.classList.add('dark'));
     await page.screenshot({ animations: 'disabled', path: `/tmp/external-sessions-${id}-dark.png` });
     await page.evaluate(() => document.documentElement.classList.remove('dark'));
