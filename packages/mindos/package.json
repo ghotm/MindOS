@@ -160,6 +160,14 @@
       "types": "./dist/knowledge.d.ts",
       "import": "./dist/knowledge.js"
     },
+    "./knowledge/branch-replay/store": {
+      "types": "./dist/knowledge/branch-replay/store.d.ts",
+      "import": "./dist/knowledge/branch-replay/store.js"
+    },
+    "./knowledge/branch-replay": {
+      "types": "./dist/knowledge/branch-replay/index.d.ts",
+      "import": "./dist/knowledge/branch-replay/index.js"
+    },
     "./intelligence": {
       "types": "./dist/intelligence.d.ts",
       "import": "./dist/intelligence.js"
@@ -247,6 +255,10 @@
     "./agent/turn/retry-policy": {
       "types": "./dist/agent/turn/retry-policy.d.ts",
       "import": "./dist/agent/turn/retry-policy.js"
+    },
+    "./knowledge/views": {
+      "types": "./dist/knowledge/views/index.d.ts",
+      "import": "./dist/knowledge/views/index.js"
     }
   },
   "files": [
@@ -279,10 +291,12 @@
     "@hono/node-server": "^1.19.14",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@sinclair/typebox": "^0.34.33",
+    "acorn": "^8.18.0",
     "chokidar": "^5.0.0",
     "diff": "^8.0.4",
     "hono": "^4.12.14",
     "jsonc-parser": "^3.3.1",
+    "papaparse": "^5.5.3",
     "picomatch": "^4.0.4",
     "zod": "^4.3.6"
   },
@@ -299,6 +313,7 @@
   "devDependencies": {
     "@agentclientprotocol/sdk": "^1.0.0",
     "@types/node": "^22.10.5",
+    "@types/papaparse": "^5.5.2",
     "@types/picomatch": "^4.0.3",
     "esbuild": "^0.28.0",
     "typescript": "^5.7.3",

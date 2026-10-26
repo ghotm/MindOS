@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://tianfuwang.tech/MindOS"><img src="https://img.shields.io/badge/Website-MindOS-0ea5e9.svg?style=for-the-badge" alt="Website"></a>
+  <a href="https://mindos.you/"><img src="https://img.shields.io/badge/Website-MindOS-0ea5e9.svg?style=for-the-badge" alt="Website"></a>
   <a href="https://www.npmjs.com/package/@geminilight/mindos"><img src="https://img.shields.io/npm/v/@geminilight/mindos.svg?style=for-the-badge&color=6366f1" alt="npm version"></a>
   <a href="#wechat"><img src="https://img.shields.io/badge/WeChat-Group-07C160.svg?style=for-the-badge&logo=wechat&logoColor=white" alt="WeChat"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-64748b.svg?style=for-the-badge" alt="MIT License"></a>
@@ -104,6 +104,7 @@ MindOS is now organized around a few stable product modules instead of one-off s
 | **MCP + Skills Bridge** | One command installs or repairs both MCP config and the packaged MindOS Skill, then `mindos doctor agents` verifies real agent readiness. |
 | **Native Agent Runtime** | Run agents with resumable sessions, cancellation, reconnect/reattach support, and reviewable output history where the runtime exposes it. |
 | **Workflow & Audit Surfaces** | YAML workflows, Agent Inspector, run ledgers, backlinks, graph views, and importer progress help keep human review in the loop. |
+| **Echo Coevolution Workspace** | Bring Claude/Codex history into a task canvas: decisions, participation modes, confirmed standards, disagreement tests, experience transfer, and collaboration trials. MindOS runs can use these agreements and return attributable outputs for review. |
 | **Cross-platform Delivery** | Install through Desktop releases or `npm install -g @geminilight/mindos@latest`; the npm package includes the CLI and prebuilt local Web runtime. |
 
 ## 🧠 Human-AI Shared Mind
@@ -140,7 +141,7 @@ You express preferences but the next chat often starts from zero, leaving useful
 
 **Option A: Desktop App (macOS / Windows / Linux)**
 
-Download from the [official website](https://tianfuwang.tech/MindOS/#quickstart) or [GitHub Releases](https://github.com/GeminiLight/MindOS/releases/latest) — double-click to install, no terminal needed.
+Download from the [official website](https://mindos.you/#quickstart) or [GitHub Releases](https://github.com/GeminiLight/MindOS/releases/latest) — double-click to install, no terminal needed.
 
 **Option B: npm**
 
@@ -216,6 +217,11 @@ MindOS knowledge doesn't have to start from scratch — bring in what you alread
 **For Humans**
 
 - **GUI Workbench**: browse, edit, search notes with unified search + AI entry (`⌘K` / `⌘/`), designed for human-AI co-creation.
+- **Views (source candidate)**: people Markdown and project TODO.csv share guarded writes across the UI, Codex and Claude Code. Generate list, table and board layouts from validated declarations; [plugin installation and limits](plugins/mindos/README.md). This candidate is not yet published on npm.
+- **Personal work pages (source candidate)**: open **Views → My pages** (`/studio/pages`) to combine live tasks, people, notes and summaries. Describe a change in the page, preview it, then apply and save; select a block for a local change or lock it to keep it unchanged. Saved pages have stable links, drafts and layout history; restoring a layout leaves source records current. AI uses your configured provider, while ordinary page use and manual customization work without AI.
+- **Connected project work (source)**: in **Studio → Projects**, connect existing people and task collections, then open the project work page. Conversations write back to the original person profile with project attribution. Project identity, goals and relationships persist in the library across browsers; existing chat defaults remain browser settings. Refine one region with AI, review the changes, and keep its stable project context. See [project work pages](wiki/refs/project-work-pages.md).
+- **Custom page blocks (source candidate)**: paste HTML/CSS or let AI design a block, bind it to existing data, and add a bounded Worker program for interactive rendering. Source updates stay live; task changes go through the host's confirmation and version checks. The runtime supports HTML/CSS and isolated Worker programs, not arbitrary imported websites, DOM scripts or React projects. These additions are not yet published on npm; [runtime and plugin guide](plugins/mindos/README.md).
+- **People workflow**: the built-in people template links a folder to a focused interface for background, interactions and follow-ups; changes stay in ordinary Markdown. Preview selected records before taking them to an Agent.
 - **Built-in Agent Assistant**: converse with the knowledge base in context; edits seamlessly capture human-curated knowledge.
 - **One-Click Import**: drag-and-drop files with Inline AI Organize — auto-analyzes, categorizes, and writes into the knowledge base with progress tracking and undo support.
 - **Guided Onboarding**: step-by-step first-run experience that helps new users set up their knowledge base and connect their first Agent.
@@ -381,6 +387,24 @@ Join our WeChat group for early access, feedback, and AI workflow discussions:
 ### 🙏 Acknowledgements
 
 This project has been published on the [LINUX DO community](https://linux.do), and we deeply appreciate the community's support and feedback.
+
+---
+
+## 📚 Citation
+
+If you use MindOS in your research, please cite the project:
+
+```bibtex
+@misc{mindos2026,
+  author       = {Wang, Tianfu and Yuan, Nicholas Jing and Xiong, Hui},
+  title        = {{MindOS}: A Shared Mind for Humans and {AI} Agents},
+  year         = {2026},
+  howpublished = {\url{https://github.com/GeminiLight/MindOS}},
+  note         = {Open-source software}
+}
+```
+
+For reproducibility, also report the version or commit used.
 
 ---
 

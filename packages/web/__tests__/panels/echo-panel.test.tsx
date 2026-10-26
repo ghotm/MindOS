@@ -16,6 +16,25 @@ vi.mock('@/lib/stores/locale-store', () => ({
 }));
 
 describe('EchoPanel sidebar navigation', () => {
+  it('opens the co-evolution canvas with one active navigation destination', () => {
+    routeState.pathname = '/echo/workspace';
+    const html = renderToStaticMarkup(<EchoPanel active />);
+    expect(html).toMatch(/<a[^>]*aria-current="page"[^>]*href="\/echo\/workspace"/);
+    expect(html).toContain('Work together');
+    expect(html.match(/aria-current="page"/g)).toHaveLength(1);
+    expect(html).toContain('href="/echo/replay"');
+  });
+  it('does not mark an unrelated route prefix as the co-evolution canvas', () => {
+    routeState.pathname = '/echo/workspaces';
+    const html = renderToStaticMarkup(<EchoPanel active />);
+    expect(html).not.toContain('aria-current="page"');
+  });
+  it('offers the replay page without removing existing Echo destinations',()=>{
+    routeState.pathname='/echo/replay';
+    const html=renderToStaticMarkup(<EchoPanel active/>);
+    expect(html).toMatch(/<a[^>]*aria-current="page"[^>]*href="\/echo\/replay"/);
+    expect(html).toContain('href="/echo/imprint"');expect(html).toContain('href="/echo/growth"');
+  });
   it('marks the active Echo segment with the primary sidebar rail style', () => {
     routeState.pathname = '/echo/imprint';
 

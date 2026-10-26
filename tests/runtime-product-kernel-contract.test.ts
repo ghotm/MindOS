@@ -66,6 +66,8 @@ describe('MindOS runtime product kernel contract', () => {
       '@modelcontextprotocol/sdk',
       // kb-tools value-imports TypeBox at runtime (Wave 3, agent-core consolidation)
       '@sinclair/typebox',
+      // Parse generated page programs without evaluating them in the server.
+      'acorn',
       // bin/lib/sync.js (sync daemon) imports it dynamically; the platform-package
       // closure resolves dependencies from packages/mindos, so it stays declared here.
       'chokidar',
@@ -75,6 +77,7 @@ describe('MindOS runtime product kernel contract', () => {
       // JSONC agent configs (spec-core-consolidation): comment-preserving reads/writes
       'jsonc-parser',
       // .mindosignore / permission globs (spec-core-consolidation)
+      'papaparse',
       'picomatch',
       'zod',
     ]);
@@ -128,6 +131,9 @@ describe('MindOS runtime product kernel contract', () => {
       './foundation/security/redaction',
       './intelligence',
       './knowledge',
+      './knowledge/branch-replay',
+      './knowledge/branch-replay/store',
+      './knowledge/views',
       './plugin',
       './protocols',
       './protocols/acp',
@@ -136,6 +142,16 @@ describe('MindOS runtime product kernel contract', () => {
       './server/projections/*',
       './tool',
     ]);
+  });
+
+  it('exports the file-backed views domain from the product package', () => {
+    const manifest = JSON.parse(read('packages/mindos/package.json'));
+    expect(manifest.exports['./knowledge/views']).toEqual({
+      types: './dist/knowledge/views/index.d.ts',
+      import: './dist/knowledge/views/index.js',
+    });
+    expect(existsSync(resolve(mindosDir, 'src/knowledge/views/index.ts'))).toBe(true);
+    expect(read('packages/web/lib/views/api.ts')).toContain('@geminilight/mindos/knowledge/views');
   });
 
   it('does not let the product main package depend on Web, React, Next, or protocol hosts', () => {

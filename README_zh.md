@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://tianfuwang.tech/MindOS"><img src="https://img.shields.io/badge/Website-MindOS-0ea5e9.svg?style=for-the-badge" alt="Website"></a>
+  <a href="https://mindos.you/"><img src="https://img.shields.io/badge/Website-MindOS-0ea5e9.svg?style=for-the-badge" alt="Website"></a>
   <a href="https://www.npmjs.com/package/@geminilight/mindos"><img src="https://img.shields.io/npm/v/@geminilight/mindos.svg?style=for-the-badge&color=6366f1" alt="npm version"></a>
   <a href="#wechat"><img src="https://img.shields.io/badge/WeChat-群聊-07C160.svg?style=for-the-badge&logo=wechat&logoColor=white" alt="WeChat"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-64748b.svg?style=for-the-badge" alt="MIT License"></a>
@@ -104,6 +104,7 @@ MindOS 现在围绕几个稳定的产品模块展开，而不是一组零散安�
 | **MCP + Skills 桥接** | 一条命令安装或修复 MCP 配置与随包发布的 MindOS Skill，再用 `mindos doctor agents` 验证 Agent 实际可用状态。 |
 | **原生 Agent Runtime** | 支持可恢复会话、取消、重连/重新附着，以及在 runtime 暴露能力时记录可审查的输出历史。 |
 | **工作流与审计面** | YAML 工作流、Agent Inspector、run ledger、反向链接、知识图谱与导入进度，让人类审查保留在流程里。 |
+| **回响共演化画布** | 将 Claude/Codex 历史带入任务画布，支持判断、参与方式、确认标准、分歧验证、经验迁移与协作试验。MindOS 后续运行可携带这些约定，并带回有出处的输出供核对。 |
 | **跨平台交付** | 可通过桌面端 Release 或 `npm install -g @geminilight/mindos@latest` 安装；npm 包内置 CLI 与预构建本地 Web runtime。 |
 
 ## 🧠 人机共享心智
@@ -140,7 +141,7 @@ Agent 记忆锁在黑箱中，推理难以审查，错误也难以纠正。**Min
 
 **方式 A：桌面客户端（macOS / Windows / Linux）**
 
-从[官网](https://tianfuwang.tech/MindOS/#quickstart)或 [GitHub Releases](https://github.com/GeminiLight/MindOS/releases/latest) 下载安装包，双击安装，无需终端。
+从[官网](https://mindos.you/#quickstart)或 [GitHub Releases](https://github.com/GeminiLight/MindOS/releases/latest) 下载安装包，双击安装，无需终端。
 
 **方式 B：npm 安装**
 
@@ -216,6 +217,11 @@ MindOS 的知识不必从零开始——把你已有的信息导入进来：
 **人类侧**
 
 - **GUI 工作台**：浏览、编辑、搜索笔记，统一搜索 + AI 入口（`⌘K` / `⌘/`），专为人机共创设计。
+- **视图（源码候选）**：人脉 Markdown、项目 TODO.csv 共用 UI、Codex、Claude Code 的受控写入；可生成列表、表格和看板。[插件安装与边界](plugins/mindos/README.md)。本候选尚未发布至 npm。
+- **个人工作页面（源码候选）**：从 **视图 → 我的工作页面**（`/studio/pages`）把真实任务、人物、笔记和概览放在一起。在页面内描述调整，先预览，再应用并保存；选择模块可局部修改，锁定模块可保留满意的部分。保存页面有固定地址、草稿与布局历史，恢复布局不会回退原资料。AI 使用已配置的模型，日常页面操作和手动调整无需 AI。
+- **项目工作页（源码能力）**：在 **工作台 → 项目** 关联已有的人物和任务资料，再打开项目工作页。项目沟通写回人物原档案，并标注所属项目。项目身份、目标和关系随知识库保存，可在另一浏览器继续；原有对话默认配置仍是浏览器设置。可直接用 AI 调整一个区域，预览具体变化并保留项目上下文。参见[项目工作页说明](wiki/refs/project-work-pages.md)。
+- **自定义网页模块（源码候选）**：粘贴 HTML/CSS 或让 AI 设计模块，绑定已有资料，用有执行时限的 Worker 程序实现动态呈现。来源更新持续可见，任务修改经过宿主确认与版本校验。运行时支持 HTML/CSS 和隔离 Worker 程序，不直接导入任意外部网站、DOM 脚本或 React 工程。本轮新增能力尚未发布至 npm；[运行边界与插件说明](plugins/mindos/README.md)。
+- **人脉工作流**：内置人脉模板，把资料文件夹关联为背景、互动与跟进的维护界面；修改保留在普通 Markdown 中，选定资料预览后再带给 Agent。
 - **内置 Agent 助手**：在上下文中与知识库对话，编辑无缝沉淀为可管理知识。
 - **一键导入**：拖拽文件即可导入，Inline AI Organize 自动分析、分类、写入知识库，支持进度追踪和撤销。
 - **新手引导**：首次使用的分步引导体验，帮助新用户快速搭建知识库并连接第一个 Agent。
@@ -381,6 +387,24 @@ MindOS/
 ### 🙏 致谢
 
 本项目已在 [LINUX DO 社区](https://linux.do) 发布，感谢社区的支持与反馈。
+
+---
+
+## 📚 引用
+
+如果你在研究中使用 MindOS，请引用本项目：
+
+```bibtex
+@misc{mindos2026,
+  author       = {Wang, Tianfu and Yuan, Nicholas Jing and Xiong, Hui},
+  title        = {{MindOS}: A Shared Mind for Humans and {AI} Agents},
+  year         = {2026},
+  howpublished = {\url{https://github.com/GeminiLight/MindOS}},
+  note         = {Open-source software}
+}
+```
+
+为便于复现，请另外注明实际使用的版本或 commit。
 
 ---
 

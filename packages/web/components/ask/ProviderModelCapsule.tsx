@@ -119,10 +119,12 @@ export default function ProviderModelCapsule({
   // Fetch settings
   useEffect(() => {
     let cancelled = false;
+    let latestSettingsRequest = 0;
     const doFetch = () => {
+      const request = ++latestSettingsRequest;
       fetch('/api/settings', { cache: 'no-store' })
-        .then(r => r.json())
-        .then((d: SettingsData) => { if (!cancelled) setSettingsData(d); })
+        .then(r => { if (!r.ok) throw new Error(`Settings load failed (${r.status})`); return r.json(); })
+        .then((d: SettingsData) => { if (!cancelled && request === latestSettingsRequest) setSettingsData(d); })
         .catch(() => {});
     };
     doFetch();
@@ -439,7 +441,7 @@ export default function ProviderModelCapsule({
       <div
         ref={flyoutRef}
         style={flyoutStyle}
-        className="w-[220px] rounded-lg border border-border bg-card shadow-lg py-1 animate-in fade-in-0 zoom-in-95 duration-100"
+        className="w-[220px] rounded-lg border border-border bg-card shadow-md py-1 animate-in fade-in-0 duration-100"
         onMouseEnter={cancelCloseTimer}
         onMouseLeave={startCloseTimer}
       >
@@ -532,7 +534,7 @@ export default function ProviderModelCapsule({
         ref={providerPanelRef}
         role="listbox"
         aria-label="Model"
-        className="w-full rounded-lg border border-border bg-card shadow-lg py-1 animate-in fade-in-0 zoom-in-95 duration-100"
+        className="w-full rounded-lg border border-border bg-card shadow-md py-1 animate-in fade-in-0 duration-100"
         style={{ maxHeight: '70vh', overflowY: 'auto' }}
       >
         <div className="border-b border-border/40 px-3 py-2">
@@ -635,7 +637,7 @@ export default function ProviderModelCapsule({
         disabled={disabled}
         data-hit-active={providerValue || hasModelOverride || open ? 'true' : undefined}
         className={`
-          hit-target-box relative z-10 inline-flex min-h-6 w-[148px] items-center gap-1 px-2.5 py-0.5
+          hit-target-box relative z-10 inline-flex min-h-11 w-[148px] items-center gap-1 px-2.5 py-0.5 md:min-h-6 [--hit-target-inset-block:10px] md:[--hit-target-inset-block:0px]
           text-2xs font-medium transition-colors select-none sm:w-[164px]
           pointer-events-auto touch-manipulation
           border border-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring

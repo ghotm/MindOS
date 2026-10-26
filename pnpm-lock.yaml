@@ -175,6 +175,9 @@ importers:
       '@sinclair/typebox':
         specifier: ^0.34.33
         version: 0.34.49
+      acorn:
+        specifier: ^8.18.0
+        version: 8.18.0
       chokidar:
         specifier: ^5.0.0
         version: 5.0.0
@@ -187,6 +190,9 @@ importers:
       jsonc-parser:
         specifier: ^3.3.1
         version: 3.3.1
+      papaparse:
+        specifier: ^5.5.3
+        version: 5.5.3
       picomatch:
         specifier: ^4.0.4
         version: 4.0.7
@@ -200,6 +206,9 @@ importers:
       '@types/node':
         specifier: ^22.10.5
         version: 22.19.17
+      '@types/papaparse':
+        specifier: ^5.5.2
+        version: 5.5.2
       '@types/picomatch':
         specifier: ^4.0.3
         version: 4.0.3
