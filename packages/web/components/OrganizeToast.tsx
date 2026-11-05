@@ -15,6 +15,7 @@ import {
   type OrganizeHistoryEntry,
 } from '@/lib/organize-history';
 import { notifyFilesChanged } from '@/lib/files-changed';
+import { AI_ATTACHMENT_MAX_CHARS } from '@/lib/agent/attachment-limits';
 import { useSmoothRouterPush } from '@/hooks/useSmoothRouterPush';
 
 const AUTO_DISMISS_MS = 3 * 60 * 1000; // 3 minutes
@@ -372,6 +373,26 @@ export default function OrganizeToast({
               </div>
             )}
 
+            {/* Skipped oversized attachments */}
+            {aiOrganize.skippedAttachments.length > 0 && (
+              <div className="px-3 py-2.5 rounded-lg bg-[var(--amber-subtle)] border border-[var(--amber-dim)] text-xs text-foreground space-y-1">
+                <p className="font-medium">
+                  {(fi.organizeSkippedOversized as (n: number, limit: number) => string)(
+                    aiOrganize.skippedAttachments.length,
+                    AI_ATTACHMENT_MAX_CHARS,
+                  )}
+                </p>
+                <ul className="list-disc pl-4 space-y-0.5 text-muted-foreground">
+                  {aiOrganize.skippedAttachments.slice(0, 5).map(att => (
+                    <li key={att.name}>{att.name} ({att.chars.toLocaleString('en-US')} chars)</li>
+                  ))}
+                  {aiOrganize.skippedAttachments.length > 5 && (
+                    <li>… {aiOrganize.skippedAttachments.length - 5} more</li>
+                  )}
+                </ul>
+              </div>
+            )}
+
             {/* AI Summary */}
             {(aiOrganize.summary || isOrganizing) && (
               <div>
@@ -446,6 +467,22 @@ export default function OrganizeToast({
             </button>
           </div>
         </div>
+
+        {/* Skipped oversized attachments */}
+        {isDone && aiOrganize.skippedAttachments.length > 0 && (
+          <div className="px-4 pt-3 text-xs text-[var(--amber)] space-y-0.5">
+            <p>
+              {(fi.organizeSkippedOversized as (n: number, limit: number) => string)(
+                aiOrganize.skippedAttachments.length,
+                AI_ATTACHMENT_MAX_CHARS,
+              )}
+            </p>
+            <p className="text-muted-foreground truncate">
+              {aiOrganize.skippedAttachments.slice(0, 3).map(att => att.name).join(', ')}
+              {aiOrganize.skippedAttachments.length > 3 ? ', …' : ''}
+            </p>
+          </div>
+        )}
 
         {/* File list */}
         {isDone && (

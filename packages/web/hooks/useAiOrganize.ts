@@ -10,6 +10,7 @@ import {
   AI_ATTACHMENT_MAX_CHARS,
   describeOversizedAiAttachments,
   getOversizedAiAttachments,
+  partitionAiAttachments,
   type OversizedAiAttachment,
 } from '@/lib/agent/attachment-limits';
 
@@ -73,6 +74,7 @@ export const CLIENT_TRUNCATE_CHARS = CLIENT_ATTACHMENT_MAX_CHARS;
 export type OversizedOrganizeAttachment = OversizedAiAttachment;
 export const getOversizedOrganizeAttachments = getOversizedAiAttachments;
 export const describeOversizedOrganizeAttachments = describeOversizedAiAttachments;
+export const partitionOrganizeAttachments = partitionAiAttachments;
 
 const FILE_WRITE_TOOLS = new Set([
   'create_file', 'write_file', 'batch_create_files',
@@ -270,6 +272,7 @@ export function useAiOrganize() {
   const snapshotsRef = useRef<FileSnapshots>(new Map());
   const [snapshotPaths, setSnapshotPaths] = useState<Set<string>>(() => new Set());
   const [sourceFileNames, setSourceFileNames] = useState<string[]>([]);
+  const [skippedAttachments, setSkippedAttachments] = useState<OversizedOrganizeAttachment[]>([]);
   const [source, setSource] = useState<OrganizeSource>('upload');
   const startTimeRef = useRef<number>(0);
   const [durationMs, setDurationMs] = useState<number>(0);
@@ -280,8 +283,9 @@ export function useAiOrganize() {
     organizeSource: OrganizeSource = 'upload',
     options: AiOrganizeRunOptions = {},
   ) => {
-    const oversizedAttachments = getOversizedOrganizeAttachments(files);
-    if (oversizedAttachments.length > 0) {
+    const { accepted, oversized } = partitionAiAttachments(files);
+    setSkippedAttachments(oversized);
+    if (accepted.length === 0 && oversized.length > 0) {
       abortRef.current?.abort();
       abortRef.current = null;
       setPhase('error');
@@ -289,7 +293,7 @@ export function useAiOrganize() {
       setCurrentTool(null);
       setStageHint(null);
       setSummary('');
-      setError(describeOversizedOrganizeAttachments(oversizedAttachments));
+      setError(describeOversizedOrganizeAttachments(oversized));
       setToolCallCount(0);
       setSourceFileNames(files.map(f => f.name));
       setSource(organizeSource);
@@ -324,7 +328,7 @@ export function useAiOrganize() {
     try {
       const requestBody = buildAssistantAgentTurnRequestBody({
         messages,
-        uploadedFiles: files,
+        uploadedFiles: accepted,
         providerOverride: options.providerOverride,
         modelOverride: options.modelOverride,
         assistantId: options.assistantId,
@@ -509,6 +513,7 @@ export function useAiOrganize() {
     setError(null);
     setToolCallCount(0);
     setSourceFileNames([]);
+    setSkippedAttachments([]);
     setSource('upload');
     setDurationMs(0);
     startTimeRef.current = 0;
@@ -526,6 +531,7 @@ export function useAiOrganize() {
     error,
     toolCallCount,
     sourceFileNames,
+    skippedAttachments,
     source,
     durationMs,
     snapshots: snapshotsRef,

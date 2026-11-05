@@ -287,4 +287,76 @@ describe('useInboxOrganizeController', () => {
       root.unmount();
     });
   });
+
+  it('skips oversized source files and excludes them from archiving', async () => {
+    const deleteBodies: unknown[] = [];
+    const files = [
+      { name: 'notes.md', path: 'Inbox/notes.md' },
+      { name: 'huge.md', path: 'Inbox/huge.md' },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/settings') {
+        return {
+          ok: true,
+          json: async () => ({
+            ai: {
+              activeProvider: 'p_openai01',
+              providers: [
+                { id: 'p_openai01', name: 'OpenAI', protocol: 'openai', apiKey: 'sk-openai-test', model: 'gpt-5.4', baseUrl: '' },
+              ],
+            },
+            envOverrides: {},
+          }),
+        };
+      }
+      if (url.startsWith('/api/file?path=Inbox%2Fnotes.md')) {
+        return { ok: true, json: async () => ({ content: 'Readable notes' }) };
+      }
+      if (url.startsWith('/api/file?path=Inbox%2Fhuge.md')) {
+        return { ok: true, json: async () => ({ content: 'x'.repeat(20_001) }) };
+      }
+      if (url === '/api/inbox' && init?.method === 'DELETE') {
+        deleteBodies.push(JSON.parse(String(init.body)));
+        return {
+          ok: true,
+          json: async () => ({ archived: [{ original: 'notes.md', archivedPath: '.archive/notes.md' }], notFound: [] }),
+        };
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }));
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const idleAi = { ...aiOrganize, phase: 'idle', changes: [] };
+
+    await act(async () => {
+      root.render(<InboxOrganizeHarness files={files} ai={idleAi} />);
+      await new Promise(r => setTimeout(r, 0));
+    });
+
+    expect(startMock).toHaveBeenCalledWith(
+      [{ name: 'notes.md', content: 'Readable notes' }],
+      expect.stringContaining('Current Inbox Review Run'),
+      'inbox-organize',
+      { assistantId: 'inbox-organizer' },
+    );
+
+    const doneAi = {
+      ...idleAi,
+      phase: 'done',
+      changes: [{ ok: true, path: 'Knowledge/notes.md', action: 'create' }],
+    };
+
+    await act(async () => {
+      root.render(<InboxOrganizeHarness files={files} ai={doneAi} autoStart={false} />);
+      await new Promise(r => setTimeout(r, 0));
+    });
+
+    expect(deleteBodies).toEqual([{ names: ['notes.md'] }]);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
 });

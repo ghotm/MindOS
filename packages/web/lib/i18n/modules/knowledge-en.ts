@@ -398,6 +398,8 @@ Read the assistant prompt at ${promptPath} first, then read this space's INSTRUC
       `Inbox Organizer started with readable files. ${failed} unreadable and ${skipped} unsupported file${skipped === 1 ? '' : 's'} skipped.`,
     organizeNoReadableFiles: (skipped: number) =>
       `No readable files for Inbox Organizer. ${skipped} unsupported file${skipped === 1 ? '' : 's'} skipped.`,
+    organizeOversizedAll: (n: number) =>
+      `No files available for Inbox Organizer. ${n} file${n === 1 ? '' : 's'} exceed the attachment size limit.`,
     modelFollowSystem: 'Follow system',
     modelNoProvider: 'No provider',
     sidebarPanelTitle: 'Inbox',
@@ -644,6 +646,8 @@ Read the assistant prompt at ${promptPath} first, then read this space's INSTRUC
     organizeChangesLabel: (n: number) => `Changes (${n})`,
     organizeNoSummary: 'AI is working...',
     organizeMinimizeModal: 'Minimize',
+    organizeSkippedOversized: (n: number, limit: number) =>
+      `${n} file${n === 1 ? '' : 's'} skipped — exceed the ${limit.toLocaleString('en-US')} char limit.`,
   },
   importHistory: {
     title: 'Import History',

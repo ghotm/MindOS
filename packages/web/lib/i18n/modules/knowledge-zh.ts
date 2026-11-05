@@ -398,6 +398,8 @@ export const knowledgeZh = {
       `收集箱整理助理已开始处理可读取文件。${failed} 个读取失败，${skipped} 个格式不支持已跳过。`,
     organizeNoReadableFiles: (skipped: number) =>
       `没有可供 AI 整理的文件。${skipped} 个格式不支持已跳过。`,
+    organizeOversizedAll: (n: number) =>
+      `没有可供 AI 整理的文件。${n} 个文件超过附件大小上限，请拆分或精简后重试。`,
     modelFollowSystem: '跟随系统',
     modelNoProvider: '未配置模型',
     sidebarPanelTitle: '收集箱',
@@ -644,6 +646,8 @@ export const knowledgeZh = {
     organizeChangesLabel: (n: number) => `变更列表 (${n})`,
     organizeNoSummary: 'AI 正在处理中...',
     organizeMinimizeModal: '最小化',
+    organizeSkippedOversized: (n: number, limit: number) =>
+      `已跳过 ${n} 个文件（超过 ${limit.toLocaleString('en-US')} 字符上限），其余文件继续整理。`,
   },
   importHistory: {
     title: '导入历史',

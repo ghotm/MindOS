@@ -37,6 +37,27 @@ export function getOversizedAiAttachments(
     .map(file => ({ name: file.name, chars: file.content.length, maxChars }));
 }
 
+/**
+ * Split attachments into those small enough to send and those that must be
+ * skipped. Used by the organize flow so one oversized file no longer fails the
+ * whole run — the rest are still organized and the skipped ones are surfaced.
+ */
+export function partitionAiAttachments(
+  files: LocalAttachment[],
+  maxChars = AI_ATTACHMENT_MAX_CHARS,
+): { accepted: LocalAttachment[]; oversized: OversizedAiAttachment[] } {
+  const accepted: LocalAttachment[] = [];
+  const oversized: OversizedAiAttachment[] = [];
+  for (const file of files) {
+    if (file.content.length > maxChars) {
+      oversized.push({ name: file.name, chars: file.content.length, maxChars });
+    } else {
+      accepted.push(file);
+    }
+  }
+  return { accepted, oversized };
+}
+
 export function describeOversizedAiAttachments(files: OversizedAiAttachment[]): string {
   if (files.length === 0) return '';
   const limit = files[0]?.maxChars ?? AI_ATTACHMENT_MAX_CHARS;

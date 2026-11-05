@@ -45,6 +45,28 @@ function OversizedOrganizeHarness({ onState }: { onState: (state: { phase: strin
   return null;
 }
 
+function MixedOrganizeHarness({ onState }: { onState: (state: { phase: string; skipped: number }) => void }) {
+  const aiOrganize = useAiOrganize();
+
+  useEffect(() => {
+    void aiOrganize.start(
+      [
+        { name: 'ok.md', content: 'small content' },
+        { name: 'huge.md', content: 'x'.repeat(20_001) },
+      ],
+      'Organize this',
+      'inbox-organize',
+      { assistantId: 'inbox-organizer' },
+    );
+  }, [aiOrganize.start]);
+
+  useEffect(() => {
+    onState({ phase: aiOrganize.phase, skipped: aiOrganize.skippedAttachments.length });
+  }, [aiOrganize.phase, aiOrganize.skippedAttachments, onState]);
+
+  return null;
+}
+
 describe('useAiOrganize start request', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -97,6 +119,29 @@ describe('useAiOrganize start request', () => {
 
     expect(fetch).not.toHaveBeenCalled();
     expect(states.some(state => state.phase === 'error' && state.error?.includes('large.md'))).toBe(true);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('skips oversized attachments and continues with the remaining files', async () => {
+    const states: Array<{ phase: string; skipped: number }> = [];
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(<MixedOrganizeHarness onState={state => states.push(state)} />);
+      await new Promise(r => setTimeout(r, 0));
+    });
+
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const request = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(request.uploadedFiles).toEqual([{ name: 'ok.md', content: 'small content' }]);
+    expect(states.some(state => state.phase === 'done' && state.skipped === 1)).toBe(true);
+    expect(states.some(state => state.phase === 'error')).toBe(false);
 
     await act(async () => {
       root.unmount();

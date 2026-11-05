@@ -7,6 +7,7 @@ import {
   CLIENT_TRUNCATE_CHARS,
   describeOversizedOrganizeAttachments,
   getOversizedOrganizeAttachments,
+  partitionAiAttachments,
   type OrganizeStageHint,
 } from '@/hooks/useAiOrganize';
 
@@ -613,6 +614,44 @@ describe('CLIENT_ATTACHMENT_MAX_CHARS', () => {
     expect(message).toContain('large.md (25,000 chars)');
     expect(message).toContain('20,000 char limit');
     expect(message).toContain('Split or shorten');
+  });
+});
+
+describe('partitionAiAttachments', () => {
+  it('keeps content within the limit and flags oversized content', () => {
+    const { accepted, oversized } = partitionAiAttachments([
+      { name: 'ok.md', content: 'hello' },
+      { name: 'huge.md', content: 'x'.repeat(CLIENT_ATTACHMENT_MAX_CHARS + 1) },
+      { name: 'edge.md', content: 'a'.repeat(CLIENT_ATTACHMENT_MAX_CHARS) },
+    ]);
+
+    expect(accepted.map(file => file.name)).toEqual(['ok.md', 'edge.md']);
+    expect(oversized).toEqual([{
+      name: 'huge.md',
+      chars: CLIENT_ATTACHMENT_MAX_CHARS + 1,
+      maxChars: CLIENT_ATTACHMENT_MAX_CHARS,
+    }]);
+  });
+
+  it('returns no accepted attachments when every file is oversized', () => {
+    const { accepted, oversized } = partitionAiAttachments([
+      { name: 'a.md', content: 'x'.repeat(CLIENT_ATTACHMENT_MAX_CHARS + 1) },
+      { name: 'b.md', content: 'y'.repeat(CLIENT_ATTACHMENT_MAX_CHARS + 2) },
+    ]);
+
+    expect(accepted).toEqual([]);
+    expect(oversized.map(file => file.name)).toEqual(['a.md', 'b.md']);
+  });
+
+  it('passes everything through when no file exceeds the limit', () => {
+    const files = [
+      { name: 'a.md', content: 'small' },
+      { name: 'b.md', content: 'also small' },
+    ];
+    const { accepted, oversized } = partitionAiAttachments(files);
+
+    expect(accepted).toEqual(files);
+    expect(oversized).toEqual([]);
   });
 });
 

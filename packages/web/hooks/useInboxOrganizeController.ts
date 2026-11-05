@@ -5,6 +5,7 @@ import type { LocalAttachment } from '@/lib/types';
 import type { useAiOrganize } from '@/hooks/useAiOrganize';
 import { checkAiAvailable } from '@/lib/space-ai-init';
 import { isAiReadableCaptureName } from '@/lib/capture-formats';
+import { AI_ATTACHMENT_MAX_CHARS } from '@/lib/agent/attachment-limits';
 import { buildInboxOrganizerRunPrompt, INBOX_ORGANIZER_ASSISTANT_ID } from '@/lib/inbox-assistant';
 import { toast } from '@/lib/toast';
 import { archiveInboxFiles } from '@/lib/inbox-client';
@@ -25,6 +26,7 @@ export interface InboxOrganizeLabels {
   organizeBusy?: string;
   organizeReadFailed?: (failed: number, skipped: number) => string;
   organizeNoReadableFiles?: (skipped: number) => string;
+  organizeOversizedAll?: (count: number) => string;
 }
 
 export interface InboxOrganizeController {
@@ -36,12 +38,21 @@ export interface InboxOrganizeController {
   requestConversationOrganize: (detail: { content: string; name: string }) => void;
 }
 
-function buildReadFailureMessage(labels: InboxOrganizeLabels, failed: number, skipped: number): string {
+function buildReadFailureMessage(
+  labels: InboxOrganizeLabels,
+  failed: number,
+  skipped: number,
+  oversized: number,
+): string {
+  if (failed === 0 && skipped === 0 && oversized > 0) {
+    return labels.organizeOversizedAll?.(oversized)
+      ?? `${labels.organizeFailed} ${oversized} file${oversized === 1 ? '' : 's'} exceed the attachment size limit.`;
+  }
   if (failed === 0 && skipped > 0) {
     return labels.organizeNoReadableFiles?.(skipped)
       ?? `${labels.organizeFailed} ${skipped} unsupported file${skipped === 1 ? '' : 's'} skipped.`;
   }
-  if (failed > 0 || skipped > 0) {
+  if (failed > 0 || skipped > 0 || oversized > 0) {
     return labels.organizeReadFailed?.(failed, skipped)
       ?? `${labels.organizeFailed} ${failed} unreadable, ${skipped} unsupported.`;
   }
@@ -87,13 +98,21 @@ export function useInboxOrganizeController({
     const attachments: LocalAttachment[] = [];
     let failed = 0;
     let skipped = 0;
+    let oversized = 0;
     for (const file of files) {
       if (!isAiReadableCaptureName(file.name)) {
         skipped++;
         continue;
       }
       try {
-        attachments.push(await readInboxFile(file));
+        const attachment = await readInboxFile(file);
+        if (attachment.content.length > AI_ATTACHMENT_MAX_CHARS) {
+          // Oversized files are skipped so one large capture no longer fails the
+          // whole run. They are also excluded from archiving below.
+          oversized++;
+          continue;
+        }
+        attachments.push(attachment);
       } catch {
         failed++;
       }
@@ -101,13 +120,13 @@ export function useInboxOrganizeController({
 
     if (attachments.length === 0) {
       organizedReadableFileNamesRef.current = [];
-      toast.error(buildReadFailureMessage(labels, failed, skipped), 5000);
+      toast.error(buildReadFailureMessage(labels, failed, skipped, oversized), 5000);
       window.dispatchEvent(new Event('mindos:organize-done'));
       return { started: false, reason: 'no-readable-files' };
     }
 
-    if (failed > 0 || skipped > 0) {
-      toast.error(buildReadFailureMessage(labels, failed, skipped), 5000);
+    if (failed > 0 || skipped > 0 || oversized > 0) {
+      toast.error(buildReadFailureMessage(labels, failed, skipped, oversized), 5000);
     }
 
     organizedReadableFileNamesRef.current = attachments.map(attachment => attachment.name);
