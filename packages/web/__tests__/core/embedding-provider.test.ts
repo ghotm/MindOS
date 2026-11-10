@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 
@@ -42,12 +42,12 @@ describe('embedding-provider retry logic', () => {
       const mockPipeline = { mock: true };
       vi.mocked(pipeline).mockResolvedValueOnce(mockPipeline);
 
-      const { downloadLocalModel } = await import('@/lib/core/embedding-provider');
+      const { downloadLocalModel, getLocalEmbeddingCacheDir } = await import('@/lib/core/embedding-provider');
       await downloadLocalModel('test-model');
 
       // Verify mirror was configured
-      expect(env.remoteHost).toBe('https://hf-mirror.com');
-      expect(env.remotePathTemplate).toBe('{model}/resolve/{revision}/{fileName}');
+      expect(env.remoteHost).toBe('https://hf-mirror.com/');
+      expect(env.cacheDir).toBe(getLocalEmbeddingCacheDir());
 
       // Restore
       if (originalEnv) process.env.HF_ENDPOINT = originalEnv;
@@ -68,8 +68,8 @@ describe('embedding-provider retry logic', () => {
       const { downloadLocalModel } = await import('@/lib/core/embedding-provider');
       await downloadLocalModel('test-model');
 
-      // Verify custom mirror was NOT overridden (env.remoteHost should remain empty)
-      expect(env.remoteHost).toBe('');
+      // Verify custom mirror was applied explicitly (transformers.js ignores HF_ENDPOINT itself)
+      expect(env.remoteHost).toBe('https://custom-mirror.com');
 
       // Restore
       if (originalEnv) {
@@ -100,6 +100,30 @@ describe('embedding-provider retry logic', () => {
 
       // Restore
       if (originalEnv) process.env.HF_ENDPOINT = originalEnv;
+    });
+  });
+
+  describe('local model cache detection', () => {
+    it('detects the transformers.js cache layout', async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'mindos-embedding-cache-'));
+      const previous = process.env.MINDOS_LOCAL_EMBEDDING_CACHE_DIR;
+      process.env.MINDOS_LOCAL_EMBEDDING_CACHE_DIR = dir;
+
+      try {
+        const modelDir = path.join(dir, 'Xenova', 'bge-small-zh-v1.5');
+        mkdirSync(path.join(modelDir, 'onnx'), { recursive: true });
+        writeFileSync(path.join(modelDir, 'config.json'), '{}');
+
+        const { isLocalModelDownloaded } = await import('@/lib/core/embedding-provider');
+        expect(await isLocalModelDownloaded('Xenova/bge-small-zh-v1.5')).toBe(false);
+
+        writeFileSync(path.join(modelDir, 'onnx', 'model.onnx'), 'fake');
+        expect(await isLocalModelDownloaded('Xenova/bge-small-zh-v1.5')).toBe(true);
+      } finally {
+        if (previous === undefined) delete process.env.MINDOS_LOCAL_EMBEDDING_CACHE_DIR;
+        else process.env.MINDOS_LOCAL_EMBEDDING_CACHE_DIR = previous;
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 

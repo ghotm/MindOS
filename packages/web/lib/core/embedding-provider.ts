@@ -109,6 +109,18 @@ export function getLocalEmbeddingRuntimeDir(): string {
     || path.join(os.homedir(), '.mindos', 'local-embedding-runtime');
 }
 
+/**
+ * Directory for downloaded local embedding models.
+ *
+ * Must be explicit: transformers.js defaults to `<package>/.cache`, which lives
+ * inside node_modules and is wiped on every image rebuild. Keeping models under
+ * the home directory (mounted volume in Docker) makes them survive restarts.
+ */
+export function getLocalEmbeddingCacheDir(): string {
+  return process.env.MINDOS_LOCAL_EMBEDDING_CACHE_DIR
+    || path.join(os.homedir(), '.cache', 'huggingface', 'transformers');
+}
+
 export async function isLocalEmbeddingRuntimeInstalled(): Promise<boolean> {
   try {
     await loadTransformersModule({ installIfMissing: false });
@@ -119,20 +131,23 @@ export async function isLocalEmbeddingRuntimeInstalled(): Promise<boolean> {
 }
 
 /**
- * Check whether the local model is available (downloaded).
- * Checks ~/.cache/huggingface/ for the model directory.
+ * Check whether the local model is available on disk.
+ *
+ * transformers.js stores each file at `<cacheDir>/<org>/<model>/<file>`
+ * (see FileCache), so a model is ready when config.json and at least one
+ * ONNX weight exist. The old check used the Python huggingface_hub layout
+ * (`~/.cache/huggingface/hub/models--org--model`), which transformers.js
+ * never writes — that made the UI spin forever after a successful download.
  */
 export async function isLocalModelDownloaded(modelId?: string): Promise<boolean> {
   const id = modelId || DEFAULT_LOCAL_MODEL;
   try {
-    const fs = await import('fs');
-    const path = await import('path');
-    const os = await import('os');
-    const cacheDir = path.join(os.homedir(), '.cache', 'huggingface', 'hub');
-    // Hugging Face cache uses the format: models--org--model
-    const modelDir = `models--${id.replace('/', '--')}`;
-    const fullPath = path.join(cacheDir, modelDir);
-    return fs.existsSync(fullPath);
+    const modelDir = path.join(getLocalEmbeddingCacheDir(), ...id.split('/'));
+    if (!fs.existsSync(path.join(modelDir, 'config.json'))) return false;
+
+    const onnxDir = path.join(modelDir, 'onnx');
+    if (!fs.existsSync(onnxDir)) return false;
+    return fs.readdirSync(onnxDir).some((file) => file.endsWith('.onnx'));
   } catch {
     return false;
   }
@@ -301,6 +316,20 @@ function isRetryableError(err: any): boolean {
   );
 }
 
+/**
+ * Wrap transformers.js' fetch so each model file request is aborted after
+ * DOWNLOAD_TIMEOUT_MS. Without this, a silent TCP stall waits forever.
+ */
+function applyDownloadTimeout(env: any): void {
+  if (env.__mindosDownloadTimeoutApplied || typeof env.fetch !== 'function') return;
+  const baseFetch = env.fetch;
+  env.fetch = (input: any, init: any = {}) => {
+    if (init?.signal) return baseFetch(input, init);
+    return baseFetch(input, { ...init, signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+  };
+  env.__mindosDownloadTimeoutApplied = true;
+}
+
 async function loadLocalPipeline(modelId: string): Promise<any> {
   // Return existing if same model
   if (_localPipeline && _localModelId === modelId) {
@@ -320,13 +349,23 @@ async function loadLocalPipeline(modelId: string): Promise<any> {
       try {
         const { pipeline, env } = await loadTransformersModule({ installIfMissing: false });
 
-        // Configure mirror for China network (only if HF_ENDPOINT env var is not set)
-        // Check both process.env and the transformers env object
-        if (!process.env.HF_ENDPOINT && !env.remoteHost) {
+        // transformers.js does NOT read HF_ENDPOINT, and its env.remoteHost is
+        // always pre-filled with a default — so the old `!env.remoteHost` guard
+        // never fired and hf-mirror was never used. Apply the endpoint explicitly.
+        const hfEndpoint = process.env.HF_ENDPOINT?.trim();
+        if (hfEndpoint) {
+          env.remoteHost = hfEndpoint.replace(/\/+$/, '');
+        } else if (!env.remoteHost) {
           console.log('[embedding] Configuring hf-mirror.com for better connectivity in China');
-          env.remoteHost = 'https://hf-mirror.com';
-          env.remotePathTemplate = '{model}/resolve/{revision}/{fileName}';
+          env.remoteHost = 'https://hf-mirror.com/';
         }
+
+        // Persist model files outside node_modules so they survive rebuilds.
+        env.cacheDir = getLocalEmbeddingCacheDir();
+
+        // Bound every model file request: the old timer only flipped a flag and
+        // could never interrupt a stalled network read, leaving the UI spinning.
+        applyDownloadTimeout(env);
 
         // Set up timeout to catch stuck downloads
         timer = setTimeout(() => {

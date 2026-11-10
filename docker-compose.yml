@@ -55,6 +55,13 @@ services:
 
       # ── AI 配置通过 config.json 管理，见 config.example.json ──
 
+      # ── 向量搜索（Embedding）──
+      # 本地模型的下载源（代码会显式写入 transformers.js 的 env.remoteHost）
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      # 容器内 npm 走国内镜像：本地模式安装 embedding 运行时用
+      # （运行阶段没有继承 Dockerfile builder 阶段的 registry 配置）
+      - npm_config_registry=${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}
+
       # ── 可选：安全认证 ──
       - AUTH_TOKEN=${AUTH_TOKEN:-}
 
@@ -70,6 +77,9 @@ services:
       # 容器内 /root/.mindos/config.json，用可写命名卷防止容器重建后丢失；
       # 不要用 :ro 挂载 config.json —— 与 Web 设置页的写入冲突）
       - mindos-config:/root/.mindos
+      # 本地嵌入模型缓存持久化（向量搜索选「本地」时，模型下载到
+      # /root/.cache/huggingface；不挂卷则每次重建容器都要重新下载）
+      - mindos-hf-cache:/root/.cache/huggingface
 
     # 资源限制
     deploy:
@@ -94,6 +104,7 @@ services:
       retries: 3
       start_period: 60s
 
-# 命名卷声明（保留知识库数据与 MindOS 配置）
+# 命名卷声明（保留知识库数据、MindOS 配置与嵌入模型缓存）
 volumes:
   mindos-config:
+  mindos-hf-cache:
