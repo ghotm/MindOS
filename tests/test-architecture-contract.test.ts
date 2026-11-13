@@ -1,3 +1,4 @@
+import { privateCheckout } from './helpers/private-checkout';
 import { describe, expect, it } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -48,16 +49,11 @@ describe('test architecture contract', () => {
   it('keeps workspace TypeScript packages covered by the root type-check script', () => {
     const workspacePackageDirs = [
       'packages/browser-extension',
-      'packages/desktop-tauri',
-      'examples',
+      ...(privateCheckout ? ['examples'] : []),
       'packages/mindos',
       'packages/web',
       'packages/desktop',
       'packages/mobile',
-      'packages/retrieval/api',
-      'packages/retrieval/indexer',
-      'packages/retrieval/search',
-      'packages/retrieval/vector',
     ];
 
     for (const packageDir of workspacePackageDirs) {
@@ -76,8 +72,6 @@ describe('test architecture contract', () => {
     };
     const eslintPackageDirs = [
       'packages/mobile',
-      'packages/retrieval/search',
-      'packages/retrieval/vector',
     ];
 
     expect(rootPkg.devDependencies?.eslint).toBeDefined();

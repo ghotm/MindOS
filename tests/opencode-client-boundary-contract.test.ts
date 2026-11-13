@@ -1,3 +1,4 @@
+import { privateCheckout } from './helpers/private-checkout';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -36,7 +37,7 @@ function listSourceFiles(relativeDir: string): string[] {
 }
 
 describe('OpenCode client and runtime boundary contract', () => {
-  it('documents the difference between package flattening and product-runtime ownership', () => {
+  it.skipIf(!privateCheckout)('documents the difference between package flattening and product-runtime ownership', () => {
     const auditPath = 'wiki/reviews/opencode-architecture-boundary-audit-2026-05-09.md';
     expect(existsSync(resolve(root, auditPath))).toBe(true);
 
@@ -73,7 +74,6 @@ describe('OpenCode client and runtime boundary contract', () => {
       'packages/desktop/package.json',
       'packages/mobile/package.json',
       'packages/browser-extension/package.json',
-      'packages/desktop-tauri/package.json',
     ];
 
     for (const manifest of clientPackages) {
@@ -108,7 +108,6 @@ describe('OpenCode client and runtime boundary contract', () => {
       'packages/mobile/app',
       'packages/mobile/lib',
       'packages/browser-extension/src',
-      'packages/desktop-tauri/src',
     ]) {
       for (const file of listSourceFiles(dir)) {
         const source = readFileSync(file, 'utf-8');

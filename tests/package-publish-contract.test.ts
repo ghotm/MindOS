@@ -1,3 +1,4 @@
+import { privateCheckout } from './helpers/private-checkout';
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -21,21 +22,27 @@ describe('product npm publish contract', () => {
       dependencies?: Record<string, string>;
     }>('packages/web/package.json');
 
+    // The risk this guards is version skew, not a particular release: the
+    // product and Web must load one Pi instance, so a drift between the two
+    // would give the session two incompatible copies. Pinning the literal
+    // version here only forced an edit on every upgrade.
+    const EXACT_VERSION = /^\d+\.\d+\.\d+$/;
+
     for (const name of [
       '@earendil-works/pi-agent-core',
       '@earendil-works/pi-ai',
       '@earendil-works/pi-coding-agent',
     ]) {
-      expect(product.dependencies?.[name], name).toBe('0.84.4');
-      expect(web.dependencies?.[name], name).toBe('0.84.4');
+      const pinned = product.dependencies?.[name];
+      expect(pinned, name).toMatch(EXACT_VERSION);
+      expect(web.dependencies?.[name], `${name} must match the product pin`).toBe(pinned);
     }
-    expect(web.dependencies?.['@earendil-works/pi-ai']).toBe('0.84.4');
-    expect(web.dependencies).toEqual(expect.objectContaining({
-      'pi-mcp-adapter': '2.31.0',
-      'pi-schedule-prompt': '0.4.1',
-      'pi-subagents': '0.62.0',
-      'pi-web-access': '0.27.0',
-    }));
+
+    // Pi extensions are loaded by Web only, and must also be exact-pinned so a
+    // transitive bump cannot swap the extension under a running session.
+    for (const name of ['pi-mcp-adapter', 'pi-schedule-prompt', 'pi-subagents', 'pi-web-access']) {
+      expect(web.dependencies?.[name], name).toMatch(EXACT_VERSION);
+    }
   });
 
   it('declares the minimum Node.js version required by the Pi runtime', () => {
@@ -134,9 +141,9 @@ describe('product npm publish contract', () => {
     expect(pkg.scripts?.build).toBe('tsc && node ../../scripts/copy-mindos-agent-assets.mjs && node ../../scripts/build-cli-bundles.mjs && pnpm run build:protocols');
     expect(pkg.scripts?.['build:protocols']).toBe('node ../../scripts/build-product-protocols.mjs');
     expect(pkg.scripts?.['type-check']).toBe('tsc --noEmit');
-    // The published CLI owns the resident automation executor, so native
-    // Claude and Pi SDKs are part of the product runtime closure.
-    expect(pkg.dependencies).toHaveProperty('@anthropic-ai/claude-agent-sdk', '0.3.170');
+    // Claude Code runs as the user's own CLI or through ACP; MindOS does not
+    // embed the Claude Agent SDK or its per-platform native binaries.
+    expect(pkg.dependencies).not.toHaveProperty('@anthropic-ai/claude-agent-sdk');
     expect(pkg.devDependencies).not.toHaveProperty('@anthropic-ai/claude-agent-sdk');
   });
 
@@ -366,8 +373,10 @@ describe('product npm publish contract', () => {
     expect(runtimeHealthContract).toContain('"docx-runtime"');
     expect(runtimeHealthContract).toContain('"builtin-agent-extensions"');
     expect(runtimeHealthContract).toContain('"mindos-extension-sources"');
-    expect(runtimeHealthContract).toContain('pi-web-access/index.ts');
-    expect(runtimeHealthContract).toContain('pi-subagents/src/extension/index.ts');
+    // Checked at the entries the packages declare in pi.extensions
+    // (packages/desktop/src/builtin-extension-entries.test.ts).
+    expect(runtimeHealthContract).toContain('pi-web-access/dist/index.js');
+    expect(runtimeHealthContract).toContain('pi-subagents/bundle/index.js');
     expect(runtimeHealthContract).toContain('pi-schedule-prompt/src/tool.ts');
     expect(runtimeHealthContract).toContain('@juicesharp/rpiv-ask-user-question/index.ts');
     expect(runtimeHealthContract).toContain('lib/agent/kb-extension.ts');
@@ -401,7 +410,7 @@ describe('product npm publish contract', () => {
     expect(verifyStandalone).toContain('/api/health');
   });
 
-  it('documents the OpenCode-style artifact-only Web runtime direction', () => {
+  it.skipIf(!privateCheckout)('documents the OpenCode-style artifact-only Web runtime direction', () => {
     const spec = readText('wiki/specs/spec-opencode-style-web-runtime.md');
 
     expect(spec).toContain('packages/web');

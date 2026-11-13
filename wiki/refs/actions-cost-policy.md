@@ -53,3 +53,28 @@ Obsidian 语料扫描默认不自动运行，仅保留 **Obsidian Corpus (Manual
 [首次手动同步运行](https://github.com/GeminiLight/mindos-dev/actions/runs/34701975848) 成功（15:21–15:24 UTC）；公开仓 main 更新到 `d651c80c`，gh-pages 更新到 `013b8281`，网站树与源 main 的 landing 树完全一致，公开仓 Obsidian 手动工作流文件也与源文件 SHA 相同。运行器完成一次任务后自动注销，API 返回 0 个 runner，容器已删除。未修改付款方式、预算，也未发布 npm/Desktop 版本。
 
 本次对话期望 workflow：恢复同步，已完成。后续需要同步时重新启动单次运行器并手动派发；其他 GitHub 托管 PR 检查仍受账户额度限制。
+
+### 一条命令恢复同步（2026-11-09 起）
+
+上次恢复只在这里写了要求，没有留下脚本，第二次只能从头构建，又撞上 Docker Hub 不可达。现在镜像定义和驱动脚本放在 `.github/local-sync-runner/`（只有 `.github/workflows/*.yml` 会被同步，这个目录始终留在私有仓；`.syncinclude` 的泄漏检查会拦截任何名为 `Dockerfile` 的文件，所以它也不能放进 `scripts/`）：
+
+```bash
+.github/local-sync-runner/run.sh                                  # Docker Hub 可达时
+BASE_IMAGE=python:3.11-slim .github/local-sync-runner/run.sh      # 用本机已缓存的 bookworm 镜像
+```
+
+脚本依次完成：构建镜像（先校验官方 runner 包的 SHA-256）→ 经标准输入传入注册令牌启动一次性容器 → 确认 runner online → 从 main 派发 `runner=local-sync` → 等待容器自行退出 → 清理残留注册 → 打印公开仓 main 的提交、剩余 runner 数和容器状态。同步结论不是 `success` 时以非零退出，不会把失败报成完成。契约见 `tests/local-sync-runner.test.ts`。
+
+### 2026-11-09 第二次恢复记录
+
+公开仓停在 #389。用临时镜像（runner v2.338.2，Docker Hub 超时，改用本机缓存的 `python:3.11-slim` 作为 bookworm 基础镜像）完成了 [同步运行](https://github.com/GeminiLight/mindos-dev/actions/runs/42586951639)，公开仓 main 更新到 #415 的合并提交（`1670523b`），runner 自行注销，容器已删除。
+
+随后在公开仓手动运行 [Test Desktop Installation](https://github.com/GeminiLight/MindOS/actions/runs/42587369645)，三个平台都在 `pnpm install --frozen-lockfile` 失败：`pnpm-workspace.yaml` 的 `patchedDependencies` 引用了 `patches/pi-schedule-prompt@0.4.1.patch`，而 `patches/` 不在 `.syncinclude` 中。也就是说，这次同步带过去的公开仓是**无法安装的**。已把 `patches` 加入白名单，并新增 `tests/sync-include-completeness.test.ts`：工作区引用的每个补丁文件都必须落在会被同步的路径中。
+
+修复（#416）后用 `run.sh` 再次同步，公开仓 main 更新到 #416（`efbaa71c`），补丁文件已在公开仓中。重跑 [Test Desktop Installation](https://github.com/GeminiLight/MindOS/actions/runs/42588608775)：ubuntu-latest、windows-latest、macos-15 **全部通过**，包括 `pnpm install`、desktop 全部测试、发布完整性测试、typecheck、构建，Windows 上还有安装器所有权与旧数据迁移测试、安装钩子编译。这是 desktop 在 Windows / Linux 上第一次有执行级验证。
+
+那次运行也暴露了 `run.sh` 的一个缺陷：同步已经成功，脚本却在打印公开仓提交时因一次网络超时被 `set -e` 中断，没有完成后面的清理核对。现在汇报阶段的 API 调用都会重试三次，失败时只提示去网页确认，不再中断。
+
+### 公开仓根契约
+
+私有源仓和公开镜像共用 Linux 回归任务。公开镜像继续运行产品、打包和已发布工作流的通用断言，只跳过需要私有规格、基准和同步配置的断言。根 ESLint 配置通过白名单同步。私有源仓仍运行全部契约；CI 用仓库身份判断私有源仓，缺少私有文件会失败。

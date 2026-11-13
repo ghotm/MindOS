@@ -5,7 +5,7 @@
 <h1 align="center">MindOS</h1>
 
 <p align="center">
-  <strong>Human Thinks Here, Agents Act There.</strong>
+  <strong>Knowing and doing, each growing the other.</strong>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
   <a href="https://github.com/GeminiLight/MindOS/releases?q=clipper"><img src="https://img.shields.io/badge/Web_Clipper-Install-c8873a.svg?style=for-the-badge" alt="Web Clipper"></a>
 </p>
 
-MindOS is a local-first knowledge base for sharing durable context between you and the AI agents you use. **Think in one place. Let agents work from shared context.**
+MindOS is a local-first knowledge workspace for you and the AI agents you use. **You think here. Agents act on it. What they do comes back as experience you approve.**
 
 ---
 
@@ -105,6 +105,7 @@ MindOS is now organized around a few stable product modules instead of one-off s
 | **Native Agent Runtime** | Run agents with resumable sessions, cancellation, reconnect/reattach support, and reviewable output history where the runtime exposes it. |
 | **Workflow & Audit Surfaces** | YAML workflows, Agent Inspector, run ledgers, backlinks, graph views, and importer progress help keep human review in the loop. |
 | **Echo Coevolution Workspace** | Bring Claude/Codex history into a task canvas: decisions, participation modes, confirmed standards, disagreement tests, experience transfer, and collaboration trials. MindOS runs can use these agreements and return attributable outputs for review. |
+| **Project Experiences** | Discover local Claude/Codex sessions together, revisit a project's documented decisions on the replay canvas, and return to the original session with an unsent continuation draft. |
 | **Cross-platform Delivery** | Install through Desktop releases or `npm install -g @geminilight/mindos@latest`; the npm package includes the CLI and prebuilt local Web runtime. |
 
 ## 🧠 Human-AI Shared Mind
@@ -311,7 +312,6 @@ MindOS/
 ├── packages/web/         # Next.js frontend for the local knowledge workbench
 ├── packages/desktop/     # Electron desktop client and local process management
 ├── packages/browser-extension/ # Web Clipper browser extension
-├── packages/retrieval/   # Optional retrieval/search/vector adapters
 ├── packages/mobile/      # Expo mobile app
 ├── skills/               # Packaged MindOS Skills for agents
 ├── templates/            # Starter knowledge-base templates
@@ -386,7 +386,8 @@ Join our WeChat group for early access, feedback, and AI workflow discussions:
 
 ### 🙏 Acknowledgements
 
-This project has been published on the [LINUX DO community](https://linux.do), and we deeply appreciate the community's support and feedback.
+- This project has been published on the [LINUX DO community](https://linux.do), and we deeply appreciate the community's support and feedback.
+- Developers in mainland China can also use the [AtomGit mirror](https://atomgit.com/GeminiLight/MindOS).
 
 ---
 

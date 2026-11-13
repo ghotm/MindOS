@@ -95,6 +95,10 @@ detect → health → configure → launch → session → context
 | Codex / Claude Code | MindOS 拥有 detect / health / prompt bridge；外部 runtime 拥有 model、auth、permission、session、compact、execute |
 | ACP | MindOS 拥有 registry/detect 与 launch metadata；具体 adapter 拥有 auth、session、context window、execute |
 
+### MiniMax text models and Pi serialization
+
+The international and China-region MiniMax presets default to `MiniMax-M3.1-Flash`, with Flash followed by `MiniMax-M3` in the ordinary model list. Saved legacy models and custom IDs are not migrated automatically. The Web and standalone resolvers share `packages/mindos/src/agent/mindos-pi/minimax-model.ts`, which adds adaptive-thinking and empty-signature thinking-block replay compatibility for the pinned Pi release. Flash cannot disable thinking: ordinary completions omit effort and use the server-side default of max, while Pi clamps an agent-level off setting to minimal and sends low. M3 still supports both disabled and adaptive thinking. OpenRouter model availability and limits follow its own catalog. Protocol and effort behavior follow the [MiniMax Anthropic API documentation](https://platform.minimax.io/docs/api-reference/text-anthropic-api.md).
+
 ### Runtime Adapter Contract
 
 `AgentRuntimeDescriptor.adapterContract` 是 runtime lifecycle 的 adapter-facing 只读 contract。它不替代 `lifecycle` / `compatibility`，而是把“这个 runtime 如何接入 MindOS”拆成五个可被 Runtime Doctor、Compatibility Center、未来 Agent Pack 消费的面：
@@ -524,7 +528,7 @@ These selected MindOS files are unchanged since the last turn, so their full con
 |---|---|---|
 | MindOS Pi | MindOS Pi registered tools/extensions：KB tools、subagent、ask-user-question、pi-web-access 等 | `createMindosAgentPermissionPolicy()` 根据 `permissionMode` 生成 Pi policy |
 | Codex | Codex adapter / SDK / app-server | 由 Codex runtime adapter 映射并执行权限模型 |
-| Claude Code | Claude CLI / SDK bridge | 由 Claude adapter 和 permission prompt bridge 处理 |
+| Claude Code | Claude CLI（`--permission-prompt-tool`） | 由 Claude adapter 和 permission prompt bridge 处理 |
 | ACP | ACP session tools | 由 ACP adapter 与 runtime binding 控制 |
 
 工具 schema 本身不需要写进 system prompt。Pi runtime 通过注册的 `ToolDefinition` / extension registry 把工具交给模型；prompt 只保留必要的高层能力说明。

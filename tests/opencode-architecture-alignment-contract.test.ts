@@ -1,3 +1,4 @@
+import { privateCheckout } from './helpers/private-checkout';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -13,7 +14,7 @@ function readText(relativePath: string): string {
 }
 
 describe('OpenCode architecture alignment', () => {
-  it('documents the source/runtime/client boundary migration', () => {
+  it.skipIf(!privateCheckout)('documents the source/runtime/client boundary migration', () => {
     const specPath = 'wiki/specs/spec-opencode-architecture-alignment.md';
     expect(existsSync(resolve(root, specPath))).toBe(true);
 
@@ -36,7 +37,7 @@ describe('OpenCode architecture alignment', () => {
     expect(spec).toContain('serve');
   });
 
-  it('documents the agent architecture cleanup and keeps Web on package exports', () => {
+  it.skipIf(!privateCheckout)('documents the agent architecture cleanup', () => {
     const specPath = 'wiki/specs/spec-agent-architecture-cleanup.md';
     expect(existsSync(resolve(root, specPath))).toBe(true);
 
@@ -57,7 +58,9 @@ describe('OpenCode architecture alignment', () => {
     expect(spec).toContain('packages/mindos/src/agent/turn');
     expect(spec).toContain('packages/mindos/src/agent/mindos-pi/runtime.ts');
     expect(spec).toContain('package exports');
+  });
 
+  it('keeps Web on package exports', () => {
     const webTsconfig = readJson<{ compilerOptions?: { paths?: Record<string, unknown> } }>('packages/web/tsconfig.json');
     expect(webTsconfig.compilerOptions?.paths?.['@geminilight/mindos/agent']).toBeUndefined();
   });
@@ -324,17 +327,13 @@ describe('OpenCode architecture alignment', () => {
     // Native-only SDKs must load through the bundler-proof native import: a
     // static `import ... from` (or even a plain dynamic import) lets Next.js
     // inline a webpack copy of the SDK whose broken `import.meta` kills jiti
-    // extension loading (no KB tools) and Claude SDK CLI resolution.
+    // extension loading (no KB tools).
     const nativeImportHelper = readText('packages/mindos/src/foundation/native-import.ts');
-    const claudeSdkAdapter = readText('packages/mindos/src/agent/runtime/claude-code-sdk.ts');
     expect(nativeImportHelper).toContain("new Function('specifier', 'return import(specifier)')");
     expect(piRuntimeAdapter).toContain('@earendil-works/pi-coding-agent');
     expect(piRuntimeAdapter).toContain("import { nativeImport } from '../../foundation/native-import.js'");
     expect(piRuntimeAdapter).not.toMatch(/^import\s*\{[^}]*\}\s*from '@earendil-works\/pi-coding-agent';/m);
     expect(piRuntimeAdapter).not.toContain("from '@mariozechner/pi-coding-agent'");
-    expect(claudeSdkAdapter).toContain("import { nativeImport } from '../../foundation/native-import.js'");
-    expect(claudeSdkAdapter).not.toContain("import('@anthropic-ai/claude-agent-sdk')");
-    expect(claudeSdkAdapter).not.toMatch(/^const requireFromHere = createRequire/m);
     expect(piRuntimeAdapter).toContain('createMindosPiAgentRuntime');
     expect(piRuntimeAdapter).toContain('compactMindosPromptForTokenBudget');
     expect(mindosRuntimeAdapter).toContain('createMindosAgentRuntimeAdapter');

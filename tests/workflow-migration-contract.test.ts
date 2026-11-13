@@ -1,3 +1,4 @@
+import { privateCheckout } from './helpers/private-checkout';
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -23,10 +24,11 @@ describe('GitHub workflow migration contract', () => {
       'packages/desktop/package.json': '@mindos/desktop',
       'packages/mobile/package.json': '@mindos/mobile',
       'packages/browser-extension/package.json': '@mindos/browser-extension',
-      'packages/desktop-tauri/package.json': '@mindos/desktop-tauri',
-      'examples/package.json': '@mindos/examples',
       'tests/integration/package.json': '@mindos/integration-tests',
-      'demo/package.json': '@mindos/demo',
+      ...(privateCheckout ? {
+        'examples/package.json': '@mindos/examples',
+        'demo/package.json': '@mindos/demo',
+      } : {}),
     };
 
     for (const [packagePath, expectedName] of Object.entries(expectedAppNames)) {
@@ -50,7 +52,6 @@ describe('GitHub workflow migration contract', () => {
       'package.json',
       '.github/workflows/build-desktop.yml',
       '.github/workflows/build-mobile.yml',
-      '.github/workflows/build-tauri-desktop.yml',
       '.github/workflows/publish-clipper.yml',
       '.github/workflows/publish-npm.yml',
       '.github/workflows/publish-runtime.yml',
@@ -141,9 +142,8 @@ describe('GitHub workflow migration contract', () => {
     expect(yml).not.toMatch(/\bcd app\b|\bcd \.\.\/mcp\b|app\/package-lock\.json/);
   });
 
-  it('builds desktop from packages/desktop and dispatches tagged releases with inputs', () => {
+  it('builds desktop from packages/desktop for an exact tag', () => {
     const desktop = workflow('build-desktop.yml');
-    const sync = workflow('sync-to-mindos.yml');
 
     expect(desktop).toContain('cd packages/desktop');
     expect(desktop).toContain('pnpm install --frozen-lockfile');
@@ -163,7 +163,10 @@ describe('GitHub workflow migration contract', () => {
     expect(desktop).toContain('packages/desktop/dist/*.dmg');
     expect(desktop).toContain('packages/desktop/dist/*.blockmap');
     expect(desktop).not.toMatch(/\bcd desktop\b|\bcd app\b|\bcd mcp\b|(^|\s)desktop\/dist\//m);
+  });
 
+  it.skipIf(!privateCheckout)('dispatches tagged desktop releases with exact inputs', () => {
+    const sync = workflow('sync-to-mindos.yml');
     expect(sync).toContain('\\"tag\\":\\"${TAG}\\"');
     expect(sync).toContain('\\"publish\\":\\"true\\"');
     expect(sync).toContain('\\"ref\\":\\"${TAG}\\"');
@@ -173,7 +176,6 @@ describe('GitHub workflow migration contract', () => {
   });
 
   it('keeps release workflow triggers single-sourced by tag family', () => {
-    const sync = workflow('sync-to-mindos.yml');
     const publishNpm = workflow('publish-npm.yml');
     const publishRuntime = workflow('publish-runtime.yml');
     const publishClipper = workflow('publish-clipper.yml');
@@ -182,20 +184,23 @@ describe('GitHub workflow migration contract', () => {
     expect(publishNpm).toContain('workflow_dispatch:');
     expect(publishRuntime).toContain("tags:\n      - 'v[0-9]+.[0-9]+.[0-9]+'");
     expect(publishClipper).toContain("tags:\n      - 'clipper-v[0-9]+.[0-9]+.[0-9]+'");
+  });
 
+  it.skipIf(!privateCheckout)('lets the public tag trigger npm instead of dispatching it', () => {
+    const sync = workflow('sync-to-mindos.yml');
     expect(sync).toContain('build-desktop.yml/dispatches');
     expect(sync).not.toContain('publish-npm.yml/dispatches');
     expect(sync).toContain('public repo tag push will trigger publish-npm.yml and publish-runtime.yml');
   });
 
-  it('serializes public repository syncs so branch and tag pushes cannot race', () => {
+  it.skipIf(!privateCheckout)('serializes public repository syncs so branch and tag pushes cannot race', () => {
     const sync = workflow('sync-to-mindos.yml');
 
     expect(sync).toContain('concurrency:\n  group: sync-to-mindos');
     expect(sync).toContain('cancel-in-progress: false');
   });
 
-  it('preserves co-author trailers when syncing commits to the public repo', () => {
+  it.skipIf(!privateCheckout)('preserves co-author trailers when syncing commits to the public repo', () => {
     const sync = workflow('sync-to-mindos.yml');
 
     expect(sync).toContain("DEV_SUBJECT=$(git -C \"$GITHUB_WORKSPACE\" log -1 --format='%s')");
@@ -265,73 +270,15 @@ describe('GitHub workflow migration contract', () => {
     expect(clipperReadme).not.toMatch(/\bnpm install\b|\bnpm run build\b|\bnpm run watch\b|\bnpm run package\b/);
   });
 
-  it('keeps the Tauri desktop spike under packages/desktop-tauri', () => {
-    const npmignore = readText('.npmignore');
-
-    expect(existsSync(resolve(root, 'packages/desktop-tauri/package.json'))).toBe(true);
+  it('keeps the retired Tauri desktop spike out of the workspace and CI', () => {
+    expect(existsSync(resolve(root, 'packages/desktop-tauri'))).toBe(false);
     expect(existsSync(resolve(root, 'desktop-tauri'))).toBe(false);
-    expect(existsSync(resolve(root, 'packages/desktop-tauri/package-lock.json'))).toBe(false);
-    const tauriPkg = readText('packages/desktop-tauri/package.json');
-    const tauriConfig = readText('packages/desktop-tauri/src-tauri/tauri.conf.json');
-    const tauriCargo = readText('packages/desktop-tauri/src-tauri/Cargo.toml');
-    const tauriMain = readText('packages/desktop-tauri/src-tauri/src/main.rs');
-    const tauriRuntime = readText('packages/desktop-tauri/src-tauri/src/runtime.rs');
-    const tauriShortcuts = readText('packages/desktop-tauri/src-tauri/src/shortcuts.rs');
-    const tauriUpdater = readText('packages/desktop-tauri/src-tauri/src/updater.rs');
-
-    expect(tauriPkg).toContain('"name": "@mindos/desktop-tauri"');
-    expect(tauriPkg).toContain('"dev:web": "vite');
-    expect(tauriPkg).toContain('"build": "vite build"');
-    expect(tauriPkg).toContain('"build:web": "vite build"');
-    expect(tauriPkg).toContain('"build:tauri": "tauri build"');
-    expect(tauriConfig).toContain('"beforeDevCommand": "pnpm run dev:web"');
-    expect(tauriConfig).toContain('"beforeBuildCommand": "pnpm run build:web"');
-    expect(npmignore).toMatch(/^packages\/desktop-tauri\/$/m);
-    expect(readText('.gitignore')).toMatch(/^!packages\/desktop-tauri\/src-tauri\/icons\/\*\.png$/m);
-    expect(tauriCargo).toContain('alloc-no-stdlib = "=2.0.4"');
-    expect(tauriCargo).toContain('alloc-stdlib = "=0.2.2"');
-    expect(tauriCargo).toContain('brotli-decompressor = "=5.0.1"');
-    expect(tauriCargo).toContain('rust-ini = "=0.21.1"');
-    expect(tauriMain).toContain('use tauri_plugin_deep_link::DeepLinkExt;');
-    expect(tauriMain).toContain('app.deep_link().on_open_url');
-    expect(tauriMain).toContain('shortcuts::register_shortcuts(app.handle())');
-    expect(tauriMain).not.toContain('tauri_plugin_deep_link::register');
-    expect(tauriMain).not.toContain('event.window()');
-    expect(tauriRuntime).toContain('use tauri_plugin_shell::ShellExt;');
-    expect(tauriShortcuts).toContain(
-      'use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};',
-    );
-    expect(tauriUpdater).toContain('use tauri::{AppHandle, Emitter};');
-    expect(tauriUpdater).not.toContain('Manager, Emitter');
+    expect(existsSync(resolve(root, '.github/workflows/build-tauri-desktop.yml'))).toBe(false);
+    expect(readText('.npmignore')).not.toContain('desktop-tauri');
+    expect(readText('.gitignore')).not.toContain('desktop-tauri');
   });
 
-  it('builds the Tauri desktop spike through an isolated manual workflow', () => {
-    const yml = workflow('build-tauri-desktop.yml');
-    const requiredIcons = [
-      '32x32.png',
-      '128x128.png',
-      '128x128@2x.png',
-      'icon.ico',
-      'icon.png',
-    ];
-
-    expect(yml).toContain('name: Build Tauri Desktop');
-    expect(yml).toContain('workflow_dispatch:');
-    expect(yml).toContain("'packages/desktop-tauri/**'");
-    expect(yml).toContain('pnpm --filter @mindos/desktop-tauri run build:web');
-    expect(yml).toContain('pnpm --filter @mindos/desktop-tauri run build:tauri');
-    expect(yml).toContain('libwebkit2gtk-4.1-dev');
-    expect(yml).toContain('libayatana-appindicator3-dev');
-    expect(yml).toContain('packages/desktop-tauri/src-tauri/target/release/bundle/**/*');
-    expect(yml).not.toContain('gh release create');
-    expect(yml).not.toContain('electron-builder');
-
-    for (const icon of requiredIcons) {
-      expect(existsSync(resolve(root, `packages/desktop-tauri/src-tauri/icons/${icon}`)), icon).toBe(true);
-    }
-  });
-
-  it('keeps the public sync whitelist aligned with the monorepo layout', () => {
+  it.skipIf(!privateCheckout)('keeps the public sync whitelist aligned with the monorepo layout', () => {
     const syncinclude = readText('.syncinclude');
 
     expect(syncinclude).not.toMatch(/^\s+- apps$/m);
@@ -341,6 +288,7 @@ describe('GitHub workflow migration contract', () => {
     expect(syncinclude).toMatch(/^\s+- pnpm-lock\.yaml$/m);
     expect(syncinclude).toMatch(/^\s+- pnpm-workspace\.yaml$/m);
     expect(syncinclude).toMatch(/^\s+- turbo\.json$/m);
+    expect(syncinclude).toMatch(/^\s+- eslint\.config\.mjs$/m);
     expect(syncinclude).not.toMatch(/^\s+- app$/m);
     expect(syncinclude).not.toMatch(/^\s+- mcp$/m);
     expect(syncinclude).not.toMatch(/^\s+- desktop$/m);

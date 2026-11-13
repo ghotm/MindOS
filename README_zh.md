@@ -5,7 +5,7 @@
 <h1 align="center">MindOS</h1>
 
 <p align="center">
-  <strong>人类在此思考，Agent 依此行动。</strong>
+  <strong>知行相生 · 让认知沉淀，让心手并进</strong>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
   <a href="https://github.com/GeminiLight/MindOS/releases?q=clipper"><img src="https://img.shields.io/badge/网页剪藏-安装-c8873a.svg?style=for-the-badge" alt="网页剪藏"></a>
 </p>
 
-MindOS 是一个本地优先的知识库，用来在你和常用 AI Agent 之间共享长期上下文。**在一处思考，让 Agent 带着共同上下文行动。**
+MindOS 是一个本地优先的知识工作台。**你在这里想清楚，Agent 带着同一份上下文去做；做过的事再经你确认，沉淀成下一次的判断依据。**
 
 ---
 
@@ -105,6 +105,7 @@ MindOS 现在围绕几个稳定的产品模块展开，而不是一组零散安�
 | **原生 Agent Runtime** | 支持可恢复会话、取消、重连/重新附着，以及在 runtime 暴露能力时记录可审查的输出历史。 |
 | **工作流与审计面** | YAML 工作流、Agent Inspector、run ledger、反向链接、知识图谱与导入进度，让人类审查保留在流程里。 |
 | **回响共演化画布** | 将 Claude/Codex 历史带入任务画布，支持判断、参与方式、确认标准、分歧验证、经验迁移与协作试验。MindOS 后续运行可携带这些约定，并带回有出处的输出供核对。 |
+| **项目经历** | 一起发现本地 Claude/Codex 会话，按项目重走有记录的关键决策，再带着待发送草稿续接原会话。支持项目脉络、单段会话与画布回放。 |
 | **跨平台交付** | 可通过桌面端 Release 或 `npm install -g @geminilight/mindos@latest` 安装；npm 包内置 CLI 与预构建本地 Web runtime。 |
 
 ## 🧠 人机共享心智
@@ -311,7 +312,6 @@ MindOS/
 ├── packages/web/         # 本地知识工作台的 Next.js 前端
 ├── packages/desktop/     # Electron 桌面端与本地进程管理
 ├── packages/browser-extension/ # Web Clipper 浏览器扩展
-├── packages/retrieval/   # 可选检索 / 搜索 / 向量适配器
 ├── packages/mobile/      # Expo 移动端
 ├── skills/               # 随包发布的 MindOS Skills
 ├── templates/            # 知识库初始化模板
@@ -386,7 +386,8 @@ MindOS/
 
 ### 🙏 致谢
 
-本项目已在 [LINUX DO 社区](https://linux.do) 发布，感谢社区的支持与反馈。
+- 本项目已在 [LINUX DO 社区](https://linux.do) 发布，感谢社区的支持与反馈。
+- 中国大陆开发者也可以访问 [AtomGit 镜像](https://atomgit.com/GeminiLight/MindOS)。
 
 ---
 

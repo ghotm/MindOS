@@ -1,3 +1,4 @@
+import { privateCheckout } from './helpers/private-checkout';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
@@ -41,7 +42,7 @@ describe('CI dependency cache ownership', () => {
     const install = w.jobs.warm.steps.find((s: any) => s.run?.includes('pnpm install'));
     expect(install.if).toContain("steps.setup.outputs.cache-hit != 'true'");
   });
-  it.each(['test-reliability', 'test-desktop-install', 'build-tauri-desktop'])(
+  it.each(['test-reliability', 'test-desktop-install'])(
     '%s installs even after a cache miss and has no implicit pnpm cache save', (name) => {
       const w = workflow(name);
       for (const job of Object.values(w.jobs) as any[]) {
@@ -55,15 +56,13 @@ describe('CI dependency cache ownership', () => {
       }
     },
   );
-  it('preserves the inexpensive Rust cache to avoid repeated cold compilation', () => {
-    const steps = workflow('build-tauri-desktop').jobs.verify.steps;
-    expect(steps.find((s: any) => s.uses === 'Swatinem/rust-cache@v2').with['save-if'])
-      .toBeUndefined();
-  });
-  it('ships every local action required by public workflows through existing script sync', () => {
+  it.skipIf(!privateCheckout)('includes local actions in the source sync', () => {
     const sync = readFileSync('.github/workflows/sync-to-mindos.yml', 'utf8');
     expect(sync).toContain('cancel-in-progress: false');
     expect(read('.syncinclude').directories).toContain('scripts');
+  });
+
+  it('ships every local action required by checked-in workflows', () => {
     for (const name of readdirSync('.github/workflows')) {
       const w = read(`.github/workflows/${name}`);
       for (const job of Object.values(w.jobs) as any[]) {

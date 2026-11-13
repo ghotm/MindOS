@@ -1,3 +1,4 @@
+import { privateCheckout } from './helpers/private-checkout';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
@@ -38,13 +39,7 @@ describe('Actions cost controls', () => {
     }
   });
 
-  it('cancels outdated Tauri PR verification without interrupting manual packaging', () => {
-    const config = workflow('build-tauri-desktop');
-    expect(config.concurrency['cancel-in-progress']).toBe("${{ github.event_name == 'pull_request' }}");
-    expect(config.jobs.verify['timeout-minutes']).toBe(30);
-  });
-
-  it('preserves serialized public sync and release triggers', () => {
+  it.skipIf(!privateCheckout)('preserves serialized public sync and release triggers', () => {
     const sync = workflow('sync-to-mindos');
     expect(sync.concurrency['cancel-in-progress']).toBe(false);
     expect(sync.on.push.branches).toContain('main');
